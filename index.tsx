@@ -33,7 +33,7 @@ import {
     isWatched, log, removeUser, STATUS_EMOJI
 } from "./store"
 
-import { WatchlistModal } from "./WatchlistModal"
+import { Watchlistmodal } from "./Watchlistmodal"
 
 // ---------- runtime state ----------
 // (not in settings, just lives as long as the plugin is running)
