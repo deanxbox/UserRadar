@@ -12,7 +12,8 @@ import {
     displayName, featureOn
 } from "./store"
 
-// only animations — no color rules at all
+// ─── styles (injected once via effect, never during render) ──────────────────
+
 const STYLE_ID = "ur-s5"
 function injectStyles() {
     if (document.getElementById(STYLE_ID)) return
@@ -38,34 +39,48 @@ function injectStyles() {
     document.head.appendChild(el)
 }
 
-// --- CDN helpers ---
+// ─── safe CDN helpers (no BigInt crash, no getAvatarURL signature issues) ────
 
-function avatarUrl(id: string, hash?: string | null, size = 80) {
-    if (hash) {
-        const ext = hash.startsWith("a_") ? "gif" : "webp"
-        return `https://cdn.discordapp.com/avatars/${id}/${hash}.${ext}?size=${size}`
+function safeAvatarUrl(id: string, hash?: string | null, size = 80): string {
+    try {
+        if (hash) {
+            const ext = hash.startsWith("a_") ? "gif" : "webp"
+            return `https://cdn.discordapp.com/avatars/${id}/${hash}.${ext}?size=${size}`
+        }
+        let idx = 0
+        try { idx = Number(BigInt(id) % BigInt(6)) } catch { idx = parseInt(id.slice(-1), 10) % 6 || 0 }
+        return `https://cdn.discordapp.com/embed/avatars/${idx}.png`
+    } catch {
+        return "https://cdn.discordapp.com/embed/avatars/0.png"
     }
-    return `https://cdn.discordapp.com/embed/avatars/${Number(BigInt(id) % 6n)}.png`
 }
 
-function bannerUrl(id: string, hash?: string | null) {
+function userAvatarUrl(du: any, userId: string, size = 64): string {
+    // Construct CDN URL directly — avoids getAvatarURL() signature changes across Discord versions
+    if (!du) return safeAvatarUrl(userId, null, size)
+    try {
+        return safeAvatarUrl(du.id ?? userId, du.avatar ?? null, size)
+    } catch {
+        return safeAvatarUrl(userId, null, size)
+    }
+}
+
+function bannerUrl(id: string, hash?: string | null): string | null {
     if (!hash) return null
-    return `https://cdn.discordapp.com/banners/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=480`
+    try {
+        return `https://cdn.discordapp.com/banners/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=480`
+    } catch { return null }
 }
 
-function toHex(n?: number | null) {
+function toHex(n?: number | null): string | null {
     if (n == null) return null
-    return "#" + n.toString(16).padStart(6, "0")
+    try { return "#" + n.toString(16).padStart(6, "0") } catch { return null }
 }
 
-// --- reusable clickable div (no UA stylesheet issues unlike <button>) ---
-// role="button" + tabIndex for accessibility
+// ─── Clickable (div-based, no UA stylesheet black-text issue) ─────────────────
 
 function Clickable({
-    onClick,
-    style,
-    title,
-    children,
+    onClick, style, title, children,
 }: {
     onClick: () => void
     style?: React.CSSProperties
@@ -86,50 +101,39 @@ function Clickable({
     )
 }
 
-// --- toggle ---
+// ─── Toggle ───────────────────────────────────────────────────────────────────
 
 function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
     return (
         <Clickable
             onClick={() => onChange(!on)}
             style={{
-                position: "relative",
-                width: 32, height: 18,
-                borderRadius: 9,
+                position: "relative", width: 32, height: 18, borderRadius: 9,
                 background: on ? "var(--brand-500)" : "var(--background-modifier-accent)",
-                flexShrink: 0,
-                transition: "background .15s",
+                flexShrink: 0, transition: "background .15s",
             }}
         >
             <div style={{
-                position: "absolute", top: 2,
-                left: on ? 16 : 2,
+                position: "absolute", top: 2, left: on ? 16 : 2,
                 width: 14, height: 14, borderRadius: "50%",
-                background: "#fff",
-                boxShadow: "0 1px 3px rgba(0,0,0,.3)",
+                background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.3)",
                 transition: "left .15s",
             }} />
         </Clickable>
     )
 }
 
-// --- tab pill ---
+// ─── Tab pill ─────────────────────────────────────────────────────────────────
 
 function Tab({ active, onClick, children }: {
-    active: boolean
-    onClick: () => void
-    children: React.ReactNode
+    active: boolean; onClick: () => void; children: React.ReactNode
 }) {
     return (
         <Clickable
             onClick={onClick}
             style={{
-                flex: 1,
-                textAlign: "center",
-                padding: "7px 0",
-                borderRadius: 8,
-                fontSize: 13,
-                fontWeight: active ? 600 : 500,
+                flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 8,
+                fontSize: 13, fontWeight: active ? 600 : 500,
                 color: active ? "var(--header-primary)" : "var(--text-muted)",
                 background: active ? "var(--background-primary)" : "transparent",
                 boxShadow: active ? "0 1px 4px rgba(0,0,0,.2)" : "none",
@@ -141,60 +145,38 @@ function Tab({ active, onClick, children }: {
     )
 }
 
-// --- icon action button (div, not button) ---
+// ─── IconAction ───────────────────────────────────────────────────────────────
 
 function IconAction({ onClick, title, danger, children }: {
-    onClick: () => void
-    title?: string
-    danger?: boolean
-    children: React.ReactNode
+    onClick: () => void; title?: string; danger?: boolean; children: React.ReactNode
 }) {
     const [hov, setHov] = React.useState(false)
     return (
-        <Clickable
+        <div
+            role="button" tabIndex={0} title={title}
+            onMouseEnter={() => setHov(true)}
+            onMouseLeave={() => setHov(false)}
             onClick={onClick}
-            title={title}
+            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") onClick() }}
             style={{
-                padding: "5px 7px",
-                borderRadius: 6,
-                fontSize: 15,
-                lineHeight: 1,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: danger && hov
-                    ? "var(--status-danger)"
-                    : hov
-                        ? "var(--interactive-hover)"
-                        : "var(--interactive-normal)",
-                background: danger && hov
-                    ? "rgba(237,66,69,.1)"
-                    : hov
-                        ? "var(--background-modifier-hover)"
-                        : "transparent",
+                cursor: "pointer", userSelect: "none",
+                padding: "5px 7px", borderRadius: 6, fontSize: 15, lineHeight: 1,
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                color: danger && hov ? "var(--status-danger)" : hov ? "var(--interactive-hover)" : "var(--interactive-normal)",
+                background: danger && hov ? "rgba(237,66,69,.1)" : hov ? "var(--background-modifier-hover)" : "transparent",
                 transition: "background .12s, color .12s",
             }}
         >
-            <div
-                onMouseEnter={() => setHov(true)}
-                onMouseLeave={() => setHov(false)}
-                style={{ display: "contents" }}
-            >
-                {children}
-            </div>
-        </Clickable>
+            {children}
+        </div>
     )
 }
 
-// override chip — also a div
+// ─── Override Chip ────────────────────────────────────────────────────────────
 
 function Chip({ on, overridden, icon, label, onClick, onRightClick }: {
-    on: boolean
-    overridden: boolean
-    icon: string
-    label: string
-    onClick: () => void
-    onRightClick: () => void
+    on: boolean; overridden: boolean; icon: string; label: string
+    onClick: () => void; onRightClick: () => void
 }) {
     return (
         <Clickable
@@ -204,212 +186,23 @@ function Chip({ on, overridden, icon, label, onClick, onRightClick }: {
                 padding: "8px 10px", borderRadius: 8,
                 border: `1.5px solid ${on ? "rgba(88,101,242,.45)" : "var(--background-modifier-accent)"}`,
                 background: on ? "rgba(88,101,242,.1)" : "var(--background-tertiary)",
-                opacity: on ? 1 : 0.6,
-                transition: "all .12s",
+                opacity: on ? 1 : 0.6, transition: "all .12s",
             }}
             title={overridden ? "Overriding global — right-click to reset" : "Click to override global setting"}
         >
-            {/* need a real div for onContextMenu since Clickable doesn't expose it */}
-            <div
-                style={{ display: "contents" }}
-                onContextMenu={e => { e.preventDefault(); onRightClick() }}
-            >
+            <div style={{ display: "contents" }} onContextMenu={e => { e.preventDefault(); onRightClick() }}>
                 <span style={{ fontSize: 13 }}>{icon}</span>
                 <span style={{ flex: 1, fontSize: 12, fontWeight: 500, color: on ? "var(--text-normal)" : "var(--text-muted)" }}>
                     {label}
                 </span>
-                {overridden && (
-                    <span style={{ fontSize: 7, color: "var(--brand-400)", marginRight: 2 }}>●</span>
-                )}
-                <Toggle on={on} onChange={() => onClick()} />
+                {overridden && <span style={{ fontSize: 7, color: "var(--brand-400)", marginRight: 2 }}>●</span>}
+                <Toggle on={on} onChange={onClick} />
             </div>
         </Clickable>
     )
 }
 
-// --- ADD TAB ---
-
-type LookupState =
-    | { stage: "idle" }
-    | { stage: "loading" }
-    | { stage: "found"; user: any; av: string; banner: string | null; accent: string | null }
-    | { stage: "error"; msg: string }
-
-function AddTab({ settings, onAdded }: { settings: any; onAdded: () => void }) {
-    const [rawId, setRawId] = React.useState("")
-    const [label, setLabel] = React.useState("")
-    const [lk, setLk]       = React.useState<LookupState>({ stage: "idle" })
-
-    const cleanId = rawId.trim().replace(/\D/g, "")
-
-    const doLookup = async () => {
-        if (!cleanId)
-            return setLk({ stage: "error", msg: "Paste a user ID first." })
-        if (cleanId.length < 17 || cleanId.length > 20)
-            return setLk({ stage: "error", msg: "Discord IDs are 17–20 digits — double-check that." })
-        if (isWatched(settings, cleanId))
-            return setLk({ stage: "error", msg: "Already watching this person." })
-
-        setLk({ stage: "loading" })
-        try {
-            const { body } = await RestAPI.get({
-                url: `/users/${cleanId}/profile`,
-                query: { with_mutual_guilds: false, with_mutual_friends_count: false },
-            })
-            const d = camelize(body)
-            setLk({
-                stage: "found",
-                user: d.user,
-                av: avatarUrl(d.user.id, d.user.avatar, 128),
-                banner: bannerUrl(d.user.id, d.user.banner),
-                accent: toHex(d.user.accentColor),
-            })
-        } catch (e: any) {
-            const s = e?.status ?? e?.response?.status
-            setLk({
-                stage: "error",
-                msg: s === 404
-                    ? "User not found — double-check the ID."
-                    : s === 403
-                        ? "Profile is private (no shared server). You can still add by ID."
-                        : `Request failed${s ? ` (${s})` : ""} — try again.`,
-            })
-        }
-    }
-
-    const doAdd = () => {
-        if (lk.stage !== "found") return
-        addUser(settings, cleanId, label.trim())
-        setRawId(""); setLabel(""); setLk({ stage: "idle" })
-        onAdded()
-    }
-
-    // --- step 2: preview ---
-    if (lk.stage === "found") return (
-        <div style={{ animation: "ur-in .18s ease" }}>
-            <div style={{
-                borderRadius: 10, overflow: "hidden", marginBottom: 16,
-                border: "1px solid var(--background-modifier-accent)",
-                boxShadow: "0 4px 20px rgba(0,0,0,.2)",
-            }}>
-                <div style={{
-                    height: lk.banner ? 96 : 60, position: "relative",
-                    background: lk.banner
-                        ? `url(${lk.banner}) center/cover no-repeat`
-                        : lk.accent
-                            ? `linear-gradient(135deg,${lk.accent}bb,${lk.accent}44)`
-                            : "linear-gradient(135deg,#5865f2,#4752c4)",
-                }}>
-                    <img src={lk.av} style={{
-                        position: "absolute", bottom: -22, left: 16,
-                        width: 56, height: 56, borderRadius: "50%",
-                        border: "4px solid var(--modal-background,var(--background-primary))",
-                        objectFit: "cover", boxShadow: "0 2px 10px rgba(0,0,0,.3)",
-                    }} onError={(e: any) => e.target.style.display = "none"} />
-                </div>
-                <div style={{ padding: "28px 16px 16px", background: "var(--background-secondary)" }}>
-                    <div style={{ fontSize: 17, fontWeight: 700, color: "var(--header-primary)" }}>
-                        {lk.user.globalName || lk.user.username}
-                    </div>
-                    {lk.user.globalName && (
-                        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 2 }}>
-                            @{lk.user.username}
-                        </div>
-                    )}
-                    {lk.user.bio && (
-                        <div style={{
-                            fontSize: 13, color: "var(--text-normal)", marginTop: 8,
-                            lineHeight: 1.4, opacity: .85,
-                            display: "-webkit-box", WebkitLineClamp: 2,
-                            WebkitBoxOrient: "vertical", overflow: "hidden",
-                        }}>
-                            {lk.user.bio}
-                        </div>
-                    )}
-                </div>
-            </div>
-
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--header-secondary)", marginBottom: 6 }}>
-                Label&nbsp;
-                <span style={{ fontWeight: 400, textTransform: "none", color: "var(--text-muted)", fontSize: 11 }}>
-                    — optional
-                </span>
-            </div>
-            <TextInput
-                value={label}
-                onChange={(v: string) => setLabel(v)}
-                placeholder={'e.g. "my ex", "bestie", "coworker"'}
-                onKeyDown={(e: React.KeyboardEvent) => { if (e.key === "Enter") doAdd() }}
-                autoFocus
-            />
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 5, marginBottom: 16 }}>
-                Only visible in your notifications — completely invisible to them
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-                <Button onClick={doAdd} size={Button.Sizes.MEDIUM} style={{ flex: 1 }}>
-                    Add to Watchlist
-                </Button>
-                <Button
-                    onClick={() => { setLk({ stage: "idle" }); setLabel("") }}
-                    size={Button.Sizes.MEDIUM}
-                    color={Button.Colors.TRANSPARENT}
-                >
-                    Cancel
-                </Button>
-            </div>
-        </div>
-    )
-
-    // --- step 1: ID input ---
-    return (
-        <div>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--header-secondary)", marginBottom: 6 }}>
-                User ID
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}>
-                    <TextInput
-                        value={rawId}
-                        onChange={(v: string) => {
-                            setRawId(v)
-                            if (lk.stage === "error") setLk({ stage: "idle" })
-                        }}
-                        placeholder="e.g. 123456789012345678"
-                        onKeyDown={(e: React.KeyboardEvent) => { if (e.key === "Enter") doLookup() }}
-                        autoFocus
-                    />
-                </div>
-                <Button
-                    onClick={doLookup}
-                    size={Button.Sizes.MEDIUM}
-                    disabled={lk.stage === "loading" || !rawId.trim()}
-                    style={{ flexShrink: 0 }}
-                >
-                    {lk.stage === "loading"
-                        ? <><span className="ur-spinner" style={{ marginRight: 6 }} />Looking up…</>
-                        : "Look Up"}
-                </Button>
-            </div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-                Enable <strong style={{ color: "var(--text-normal)" }}>Developer Mode</strong> in Discord settings → right-click any user → Copy User ID
-            </div>
-            {lk.stage === "error" && (
-                <div style={{
-                    display: "flex", gap: 9, alignItems: "flex-start",
-                    marginTop: 12, padding: "10px 13px", borderRadius: 8,
-                    background: "rgba(237,66,69,.08)",
-                    border: "1px solid rgba(237,66,69,.3)",
-                    animation: "ur-in .14s ease",
-                }}>
-                    <span style={{ fontSize: 15, flexShrink: 0 }}>⚠️</span>
-                    <span style={{ fontSize: 13, color: "var(--status-danger)" }}>{lk.msg}</span>
-                </div>
-            )}
-        </div>
-    )
-}
-
-// --- override items list ---
+// ─── Override items config ────────────────────────────────────────────────────
 
 const OVERRIDE_ITEMS: { label: string; icon: string; key: keyof WatchedUser["overrides"]; gk: string }[] = [
     { label: "Messages", icon: "💬", key: "msgs",    gk: "globalMsgs"    },
@@ -421,82 +214,81 @@ const OVERRIDE_ITEMS: { label: string; icon: string; key: keyof WatchedUser["ove
     { label: "Status",   icon: "🟢",  key: "status",  gk: "globalStatus"  },
 ]
 
-// --- user card ---
+// ─── UserCard ─────────────────────────────────────────────────────────────────
 
 function UserCard({ user, settings, onUpdate, onRemove }: {
-    user: WatchedUser
-    settings: any
-    onUpdate: () => void
-    onRemove: () => void
+    user: WatchedUser; settings: any; onUpdate: () => void; onRemove: () => void
 }) {
-    const [nick, setNick]         = React.useState(user.nick)
+    const [nick,     setNick]     = React.useState(user.nick ?? "")
     const [expanded, setExpanded] = React.useState(false)
     const [editNick, setEditNick] = React.useState(false)
-    const du = UserStore.getUser(user.id)
 
-    const av   = du ? du.getAvatarURL(undefined, 64, false) : avatarUrl(user.id, null)
-    const name = displayName(du) || user.id
+    const du   = React.useMemo(() => { try { return UserStore.getUser(user.id) ?? null } catch { return null } }, [user.id])
+    const av   = userAvatarUrl(du, user.id, 64)
+    const name = (du ? displayName(du) : null) || user.nick || user.id
 
-    const saveNick = () => { patchUser(settings, user.id, { nick }); setEditNick(false); onUpdate() }
-
-    const setOv = (key: keyof WatchedUser["overrides"], val: boolean | null) => {
-        patchUser(settings, user.id, { overrides: { ...user.overrides, [key]: val } })
+    const saveNick = () => {
+        patchUser(settings, user.id, { nick: nick.trim() })
+        setEditNick(false)
         onUpdate()
     }
 
-    const hasOv = Object.values(user.overrides).some(v => v !== null)
+    const setOv = (key: keyof WatchedUser["overrides"], val: boolean | null) => {
+        patchUser(settings, user.id, { overrides: { ...(user.overrides ?? {}), [key]: val } })
+        onUpdate()
+    }
+
+    const overrides = user.overrides ?? {}
+    const hasOv = Object.values(overrides).some(v => v !== null && v !== undefined)
+
+    const addedDate = React.useMemo(() => {
+        try { return new Date(user.addedAt).toLocaleDateString() } catch { return "—" }
+    }, [user.addedAt])
 
     return (
         <div className="ur-card">
-            {/* main row */}
             <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px" }}>
                 <div style={{ position: "relative", flexShrink: 0 }}>
                     <img
-                        src={av}
+                        src={av} alt=""
                         style={{ width: 42, height: 42, borderRadius: "50%", objectFit: "cover", display: "block" }}
-                        onError={(e: any) => e.target.style.display = "none"}
+                        onError={(e: any) => { e.target.src = "https://cdn.discordapp.com/embed/avatars/0.png" }}
                     />
                     {hasOv && (
                         <div style={{
                             position: "absolute", bottom: 0, right: 0,
                             width: 10, height: 10, borderRadius: "50%",
-                            background: "var(--brand-500)",
-                            border: "2px solid var(--background-secondary)",
+                            background: "var(--brand-500)", border: "2px solid var(--background-secondary)",
                         }} />
                     )}
                 </div>
 
                 <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        <span style={{ fontWeight: 600, fontSize: 14, color: "var(--header-primary)" }}>
-                            {name}
-                        </span>
-                        {user.nick && (
+                        <span style={{ fontWeight: 600, fontSize: 14, color: "var(--header-primary)" }}>{name}</span>
+                        {user.nick ? (
                             <span style={{
                                 fontSize: 11, fontWeight: 600, padding: "1px 8px", borderRadius: 20,
                                 background: "rgba(88,101,242,.18)", color: "var(--brand-400)",
                             }}>
                                 {user.nick}
                             </span>
-                        )}
+                        ) : null}
                     </div>
                     <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                        {user.id} · added {new Date(user.addedAt).toLocaleDateString()}
+                        {user.id} · added {addedDate}
                     </div>
                 </div>
 
                 <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
                     <IconAction onClick={() => setEditNick(v => !v)} title="Edit label">✏️</IconAction>
                     <IconAction onClick={() => setExpanded(v => !v)} title="Per-user overrides">
-                        <span style={{ color: "var(--interactive-normal)", fontSize: 11 }}>
-                            {expanded ? "▲" : "▼"}
-                        </span>
+                        <span style={{ fontSize: 11 }}>{expanded ? "▲" : "▼"}</span>
                     </IconAction>
                     <IconAction onClick={onRemove} title="Stop watching" danger>🗑</IconAction>
                 </div>
             </div>
 
-            {/* label editor */}
             {editNick && (
                 <div style={{
                     display: "flex", gap: 8, padding: "10px 14px 12px",
@@ -516,32 +308,27 @@ function UserCard({ user, settings, onUpdate, onRemove }: {
                         />
                     </div>
                     <Button size={Button.Sizes.MEDIUM} onClick={saveNick}>Save</Button>
-                    <Button size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT} onClick={() => setEditNick(false)}>
-                        Cancel
-                    </Button>
+                    <Button size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT} onClick={() => setEditNick(false)}>Cancel</Button>
                 </div>
             )}
 
-            {/* overrides */}
             {expanded && (
                 <div style={{ borderTop: "1px solid var(--background-modifier-accent)" }}>
                     <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "8px 14px 6px" }}>
-                        Click to override global setting per-person. Right-click a chip to reset it.
+                        Click to override global setting per-person. Right-click to reset.
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, padding: "0 12px 10px" }}>
                         {OVERRIDE_ITEMS.map(item => {
                             const isOn = featureOn(settings, user.id, item.key, item.gk)
-                            const isOv = user.overrides[item.key] !== null
+                            const isOv = overrides[item.key] !== null && overrides[item.key] !== undefined
                             return (
                                 <Chip
                                     key={item.key}
-                                    on={isOn}
-                                    overridden={isOv}
-                                    icon={item.icon}
-                                    label={item.label}
+                                    on={isOn} overridden={isOv}
+                                    icon={item.icon} label={item.label}
                                     onClick={() => {
                                         if (!isOv) setOv(item.key, !isOn)
-                                        else if (user.overrides[item.key] === true) setOv(item.key, false)
+                                        else if (overrides[item.key] === true) setOv(item.key, false)
                                         else setOv(item.key, null)
                                     }}
                                     onRightClick={() => setOv(item.key, null)}
@@ -554,9 +341,7 @@ function UserCard({ user, settings, onUpdate, onRemove }: {
                             size={Button.Sizes.SMALL}
                             color={Button.Colors.TRANSPARENT}
                             onClick={() => {
-                                const reset = Object.fromEntries(
-                                    Object.keys(user.overrides).map(k => [k, null])
-                                ) as WatchedUser["overrides"]
+                                const reset = Object.fromEntries(OVERRIDE_ITEMS.map(i => [i.key, null])) as WatchedUser["overrides"]
                                 patchUser(settings, user.id, { overrides: reset })
                                 onUpdate()
                             }}
@@ -570,19 +355,26 @@ function UserCard({ user, settings, onUpdate, onRemove }: {
     )
 }
 
-// --- watchlist tab ---
+// ─── WatchlistTab ─────────────────────────────────────────────────────────────
 
 function WatchlistTab({ settings, onUpdate }: { settings: any; onUpdate: () => void }) {
-    const [users, setUsers]   = React.useState<WatchedUser[]>(() => getWatchlist(settings))
+    const [users, setUsers] = React.useState<WatchedUser[]>(() => {
+        try { return getWatchlist(settings) } catch { return [] }
+    })
     const [search, setSearch] = React.useState("")
 
-    const refresh = () => { setUsers(getWatchlist(settings)); onUpdate() }
+    const refresh = () => {
+        try { setUsers(getWatchlist(settings)) } catch { setUsers([]) }
+        onUpdate()
+    }
 
     const shown = search.trim()
         ? users.filter(u => {
-            const du  = UserStore.getUser(u.id)
-            const hay = [displayName(du), u.nick, u.id].join(" ").toLowerCase()
-            return hay.includes(search.toLowerCase())
+            try {
+                const du  = UserStore.getUser(u.id)
+                const hay = [displayName(du), u.nick ?? "", u.id].join(" ").toLowerCase()
+                return hay.includes(search.toLowerCase())
+            } catch { return true }
         })
         : users
 
@@ -613,9 +405,7 @@ function WatchlistTab({ settings, onUpdate }: { settings: any; onUpdate: () => v
                 ? <div style={{ textAlign: "center", padding: "24px 0", fontSize: 13, color: "var(--text-muted)" }}>No results for "{search}"</div>
                 : shown.map(u => (
                     <UserCard
-                        key={u.id}
-                        user={u}
-                        settings={settings}
+                        key={u.id} user={u} settings={settings}
                         onUpdate={refresh}
                         onRemove={() => { removeUser(settings, u.id); refresh() }}
                     />
@@ -625,15 +415,187 @@ function WatchlistTab({ settings, onUpdate }: { settings: any; onUpdate: () => v
     )
 }
 
-// --- main modal ---
+// ─── AddTab ───────────────────────────────────────────────────────────────────
+
+type LookupState =
+    | { stage: "idle" }
+    | { stage: "loading" }
+    | { stage: "found"; user: any; av: string; banner: string | null; accent: string | null }
+    | { stage: "error"; msg: string }
+
+function AddTab({ settings, onAdded }: { settings: any; onAdded: () => void }) {
+    const [rawId, setRawId] = React.useState("")
+    const [label, setLabel] = React.useState("")
+    const [lk, setLk]       = React.useState<LookupState>({ stage: "idle" })
+
+    const cleanId = rawId.trim().replace(/\D/g, "")
+
+    const doLookup = () => {
+        if (!cleanId)
+            return setLk({ stage: "error", msg: "Paste a user ID first." })
+        if (cleanId.length < 17 || cleanId.length > 20)
+            return setLk({ stage: "error", msg: "Discord IDs are 17–20 digits — double-check that." })
+        if (isWatched(settings, cleanId))
+            return setLk({ stage: "error", msg: "Already watching this person." })
+
+        setLk({ stage: "loading" })
+
+        RestAPI.get({
+            url: `/users/${cleanId}/profile`,
+            query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+        }).then((res: any) => {
+            const d = camelize(res.body)
+            setLk({
+                stage: "found",
+                user: d.user,
+                av: safeAvatarUrl(d.user?.id ?? cleanId, d.user?.avatar, 128),
+                banner: bannerUrl(d.user?.id ?? cleanId, d.user?.banner),
+                accent: toHex(d.user?.accentColor),
+            })
+        }).catch((e: any) => {
+            const s = e?.status ?? e?.response?.status
+            setLk({
+                stage: "error",
+                msg: s === 404
+                    ? "User not found — double-check the ID."
+                    : s === 403
+                        ? "Profile is private (no shared server). You can still add by ID."
+                        : `Request failed${s ? ` (${s})` : ""} — try again.`,
+            })
+        })
+    }
+
+    const doAdd = () => {
+        if (lk.stage !== "found") return
+        addUser(settings, cleanId, label.trim())
+        setRawId(""); setLabel(""); setLk({ stage: "idle" })
+        onAdded()
+    }
+
+    if (lk.stage === "found") return (
+        <div style={{ animation: "ur-in .18s ease" }}>
+            <div style={{
+                borderRadius: 10, overflow: "hidden", marginBottom: 16,
+                border: "1px solid var(--background-modifier-accent)",
+                boxShadow: "0 4px 20px rgba(0,0,0,.2)",
+            }}>
+                <div style={{
+                    height: lk.banner ? 96 : 60, position: "relative",
+                    background: lk.banner
+                        ? `url(${lk.banner}) center/cover no-repeat`
+                        : lk.accent
+                            ? `linear-gradient(135deg,${lk.accent}bb,${lk.accent}44)`
+                            : "linear-gradient(135deg,#5865f2,#4752c4)",
+                }}>
+                    <img src={lk.av} alt="" style={{
+                        position: "absolute", bottom: -22, left: 16,
+                        width: 56, height: 56, borderRadius: "50%",
+                        border: "4px solid var(--modal-background,var(--background-primary))",
+                        objectFit: "cover", boxShadow: "0 2px 10px rgba(0,0,0,.3)",
+                    }} onError={(e: any) => { e.target.src = "https://cdn.discordapp.com/embed/avatars/0.png" }} />
+                </div>
+                <div style={{ padding: "28px 16px 16px", background: "var(--background-secondary)" }}>
+                    <div style={{ fontSize: 17, fontWeight: 700, color: "var(--header-primary)" }}>
+                        {lk.user?.globalName || lk.user?.username || cleanId}
+                    </div>
+                    {lk.user?.globalName && (
+                        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 2 }}>
+                            @{lk.user.username}
+                        </div>
+                    )}
+                    {lk.user?.bio ? (
+                        <div style={{
+                            fontSize: 13, color: "var(--text-normal)", marginTop: 8,
+                            lineHeight: 1.4, opacity: .85,
+                            display: "-webkit-box", WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical", overflow: "hidden",
+                        }}>
+                            {lk.user.bio}
+                        </div>
+                    ) : null}
+                </div>
+            </div>
+
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--header-secondary)", marginBottom: 6 }}>
+                Label&nbsp;
+                <span style={{ fontWeight: 400, textTransform: "none", color: "var(--text-muted)", fontSize: 11 }}>— optional</span>
+            </div>
+            <TextInput
+                value={label}
+                onChange={(v: string) => setLabel(v)}
+                placeholder={'e.g. "my ex", "bestie", "coworker"'}
+                onKeyDown={(e: React.KeyboardEvent) => { if (e.key === "Enter") doAdd() }}
+                autoFocus
+            />
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 5, marginBottom: 16 }}>
+                Only visible in your notifications — completely invisible to them
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+                <Button onClick={doAdd} size={Button.Sizes.MEDIUM} style={{ flex: 1 }}>Add to Watchlist</Button>
+                <Button onClick={() => { setLk({ stage: "idle" }); setLabel("") }} size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT}>
+                    Cancel
+                </Button>
+            </div>
+        </div>
+    )
+
+    return (
+        <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--header-secondary)", marginBottom: 6 }}>
+                User ID
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}>
+                    <TextInput
+                        value={rawId}
+                        onChange={(v: string) => { setRawId(v); if (lk.stage === "error") setLk({ stage: "idle" }) }}
+                        placeholder="e.g. 123456789012345678"
+                        onKeyDown={(e: React.KeyboardEvent) => { if (e.key === "Enter") doLookup() }}
+                        autoFocus
+                    />
+                </div>
+                <Button
+                    onClick={doLookup}
+                    size={Button.Sizes.MEDIUM}
+                    disabled={lk.stage === "loading" || !rawId.trim()}
+                    style={{ flexShrink: 0 }}
+                >
+                    {lk.stage === "loading"
+                        ? <><span className="ur-spinner" style={{ marginRight: 6 }} />Looking up…</>
+                        : "Look Up"}
+                </Button>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+                Enable <strong style={{ color: "var(--text-normal)" }}>Developer Mode</strong> in Discord settings → right-click any user → Copy User ID
+            </div>
+            {lk.stage === "error" && (
+                <div style={{
+                    display: "flex", gap: 9, alignItems: "flex-start",
+                    marginTop: 12, padding: "10px 13px", borderRadius: 8,
+                    background: "rgba(237,66,69,.08)", border: "1px solid rgba(237,66,69,.3)",
+                    animation: "ur-in .14s ease",
+                }}>
+                    <span style={{ fontSize: 15, flexShrink: 0 }}>⚠️</span>
+                    <span style={{ fontSize: 13, color: "var(--status-danger)" }}>{lk.msg}</span>
+                </div>
+            )}
+        </div>
+    )
+}
+
+// ─── Main modal ───────────────────────────────────────────────────────────────
 
 export function WatchlistModal({ modalProps, settings }: { modalProps: any; settings: any }) {
-    injectStyles()
+    React.useEffect(() => { injectStyles() }, [])
 
     const [tab,   setTab]   = React.useState<"list" | "add">("list")
-    const [count, setCount] = React.useState(() => getWatchlist(settings).length)
+    const [count, setCount] = React.useState(() => {
+        try { return getWatchlist(settings).length } catch { return 0 }
+    })
 
-    const refreshCount = () => setCount(getWatchlist(settings).length)
+    const refreshCount = () => {
+        try { setCount(getWatchlist(settings).length) } catch { setCount(0) }
+    }
 
     return (
         <ModalRoot {...modalProps} size={ModalSize.MEDIUM}>
@@ -646,8 +608,7 @@ export function WatchlistModal({ modalProps, settings }: { modalProps: any; sett
                     {count > 0 && (
                         <span style={{
                             background: "var(--brand-500)", color: "#fff",
-                            borderRadius: 10, fontSize: 11, fontWeight: 700,
-                            padding: "1px 7px",
+                            borderRadius: 10, fontSize: 11, fontWeight: 700, padding: "1px 7px",
                         }}>
                             {count}
                         </span>
@@ -656,7 +617,6 @@ export function WatchlistModal({ modalProps, settings }: { modalProps: any; sett
             </ModalHeader>
 
             <ModalContent style={{ padding: "4px 16px 24px" }}>
-                {/* tabs — divs, not buttons */}
                 <div style={{
                     display: "flex", gap: 2, padding: 3,
                     background: "var(--background-secondary)",
