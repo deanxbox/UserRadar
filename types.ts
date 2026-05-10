@@ -1,4 +1,114 @@
-// discord's types package is like 2 years behind so i'm just writing what i need
+// types.ts - k1ng_op
+// just the bare minimum types i need, discord-types is way too outdated
+
+export type Status = "online" | "idle" | "dnd" | "offline" | "invisible"
+
+export interface MsgCreateEvent {
+    type: string
+    guildId: string
+    channelId: string
+    optimistic: boolean
+    message: {
+        id: string
+        type: number
+        content: string
+        channel_id: string
+        attachments: { filename: string; url: string }[]
+        author: {
+            id: string
+            username: string
+            global_name?: string  // discord added this whenever, old typedef doesnt have it
+            avatar?: string
+        }
+    }
+}
+
+export interface MsgUpdateEvent {
+    type: string
+    guildId: string
+    message: {
+        id: string
+        content: string
+        channel_id: string
+        edited_timestamp: string
+        attachments: { filename: string }[]
+        author: {
+            id: string
+            username: string
+            global_name?: string
+        }
+    }
+}
+
+export interface MsgDeleteEvent {
+    id: string
+    channelId: string
+    guildId: string
+}
+
+export interface TypingEvent {
+    channelId: string
+    userId: string
+}
+
+export interface VoiceStateEvent {
+    voiceStates: {
+        userId: string
+        channelId: string | null
+        guildId: string
+    }[]
+}
+
+export interface PresenceEvent {
+    updates: {
+        user: { id: string }
+        status: Status
+    }[]
+}
+
+export interface ProfileFetchEvent {
+    user: {
+        id: string
+        username: string
+        global_name?: string
+        globalName?: string  // after camelize()
+        avatar?: string
+        bio?: string
+        banner?: string
+        banner_color?: string
+        accent_color?: string
+    }
+    [k: string]: any
+}
+
+export interface ThreadCreateEvent {
+    isNewlyCreated: boolean
+    channel: {
+        id: string
+        name: string
+        guild_id: string
+        parent_id: string
+        owner_id: string
+        ownerId?: string  // after camelize()
+    }
+}
+
+// one entry in the watchlist
+export interface WatchedUser {
+    id: string
+    nick: string        // custom label, e.g. "my ex", "the rat"
+    addedAt: number
+    // null = dont override, use the global toggle
+    overrides: {
+        msgs: boolean | null
+        edits: boolean | null
+        deletes: boolean | null
+        typing: boolean | null
+        profile: boolean | null
+        voice: boolean | null
+        status: boolean | null
+    }
+}// discord's types package is like 2 years behind so i'm just writing what i need
 
 export type Status = "online" | "idle" | "dnd" | "offline" | "invisible"
 
