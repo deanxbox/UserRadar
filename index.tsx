@@ -83,17 +83,18 @@ function push(opts: { title: string; body: string; icon?: string; onClick?: () =
     if (inQuietHours(settings)) return
     if (settings.store.debugLog) log.info(`>> ${opts.title} — ${opts.body}`)
 
-    const fallback = () => Notifications.showNotification({
+    // always show in-app toast
+    Notifications.showNotification({
         title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick
     })
 
-    // try os notification first (works when discord is minimized)
-    // fall back to in-app toast if it errors
-    if (document.hasFocus()) { fallback(); return }
-    try {
-        const n = new window.Notification(opts.title, { body: opts.body, icon: opts.icon })
-        if (opts.onClick) n.onclick = () => { window.focus(); opts.onClick!() }
-    } catch { fallback() }
+    // also try os notification when discord isnt focused (silent fail is fine)
+    if (!document.hasFocus()) {
+        try {
+            const n = new window.Notification(opts.title, { body: opts.body, icon: opts.icon })
+            if (opts.onClick) n.onclick = () => { window.focus(); opts.onClick!() }
+        } catch { }
+    }
 }
 
 // profile change detection
