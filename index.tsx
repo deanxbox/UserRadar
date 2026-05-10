@@ -522,8 +522,6 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     )
 }
 
-}
-
 // ── plugin ────────────────────────────────────────────────────────────────────
 
 export default definePlugin({
