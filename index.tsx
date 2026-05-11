@@ -1,5 +1,6 @@
 // index.tsx - k1ng_op
-// userradar - watch people on discord and get notified when they do stuff
+// userradar — track people on discord, get notified when they do stuff
+// ported from my vencord desktop plugin
 
 import { addContextMenuPatch, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu"
 import { Notifications } from "@api/index"
@@ -23,15 +24,15 @@ import {
     TypingEvent, VoiceStateEvent, WatchedUser
 } from "./types"
 
-// stuff that lives as long as the plugin is running
-const profileCache: Record<string, any> = {}   // last known profile per user
-const vcCache: Record<string, string | null> = {}  // last known vc per user
-const statusCache: Record<string, string> = {}     // last known status per user
+// runtime state — lives as long as the plugin runs
+const profileCache:  Record<string, any>           = {}  // last known profile snapshot per uid
+const vcCache:       Record<string, string | null>  = {}  // last known vc channel per uid
+const statusCache:   Record<string, string>          = {}  // last known status per uid
 let loggedMsgs: Record<string, Message> | null = null
-let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollTimer:  ReturnType<typeof setInterval> | null = null
 
-// try to hook into vc-message-logger-enhanced for delete content
-// if its not installed, deletes just wont have message content - nbd
+// try to get deleted message content from vc-message-logger-enhanced
+// if it's not installed, deletes will just show "message was deleted" - nbd
 async function tryLoadLoggedMsgs() {
     if (loggedMsgs) return loggedMsgs
     for (const prefix of ["plugins", "userplugins"]) {
@@ -45,26 +46,30 @@ async function tryLoadLoggedMsgs() {
     return null
 }
 
-// settings
+// ── settings ─────────────────────────────────────────────────────────────────
+
 const settings = definePluginSettings({
-    watchlist:          { type: OptionType.STRING,  default: "[]",    description: "watchlist json (dont touch this)",                         hidden: true },
+    watchlist:          { type: OptionType.STRING,  default: "[]",    description: "watchlist json (don't touch this)",                            hidden: true },
     globalMsgs:         { type: OptionType.BOOLEAN, default: true,    description: "notify on new messages" },
     globalEdits:        { type: OptionType.BOOLEAN, default: true,    description: "notify on edits" },
     globalDeletes:      { type: OptionType.BOOLEAN, default: true,    description: "notify on deletes (needs vc-message-logger-enhanced for content)" },
     globalTyping:       { type: OptionType.BOOLEAN, default: true,    description: "notify when someone starts typing" },
-    globalProfile:      { type: OptionType.BOOLEAN, default: true,    description: "notify on profile changes (avatar, bio, banner etc)" },
-    globalVoice:        { type: OptionType.BOOLEAN, default: true,    description: "notify on voice joins/leaves" },
-    globalStatus:       { type: OptionType.BOOLEAN, default: false,   description: "notify on status changes (kinda spammy, off by default)" },
+    globalProfile:      { type: OptionType.BOOLEAN, default: true,    description: "notify on profile changes (bio, banner, username etc)" },
+    globalAvatar:       { type: OptionType.BOOLEAN, default: true,    description: "notify when someone changes their avatar (separate from profile)" },
+    globalVoice:        { type: OptionType.BOOLEAN, default: true,    description: "notify on voice joins/leaves/moves" },
+    globalStatus:       { type: OptionType.BOOLEAN, default: false,   description: "notify on status changes (spammy, off by default)" },
+    globalBoosts:       { type: OptionType.BOOLEAN, default: true,    description: "notify when someone boosts a server" },
     showPreview:        { type: OptionType.BOOLEAN, default: true,    description: "show message content in notifs" },
-    previewLen:         { type: OptionType.NUMBER,  default: 120,     description: "how many chars to show in preview (0 = no limit)" },
+    previewLen:         { type: OptionType.NUMBER,  default: 120,     description: "max chars in message preview (0 = no limit)" },
     quietHours:         { type: OptionType.BOOLEAN, default: false,   description: "silence notifs during certain hours" },
     quietStart:         { type: OptionType.STRING,  default: "23:00", description: "quiet hours start (24h format)" },
     quietEnd:           { type: OptionType.STRING,  default: "07:00", description: "quiet hours end (24h format)" },
-    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,    description: "skip notif if youre already looking at that channel" },
-    debugLog:           { type: OptionType.BOOLEAN, default: false,   description: "log everything to console (for debugging)" },
+    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,    description: "skip notif if you're already in that channel" },
+    debugLog:           { type: OptionType.BOOLEAN, default: false,   description: "log everything to console" },
 })
 
-// notif helpers
+// ── notif helpers ─────────────────────────────────────────────────────────────
+
 function trunc(s: string, max: number) {
     return max > 0 && s.length > max ? s.slice(0, max) + "…" : s
 }
@@ -83,12 +88,12 @@ function push(opts: { title: string; body: string; icon?: string; onClick?: () =
     if (inQuietHours(settings)) return
     if (settings.store.debugLog) log.info(`>> ${opts.title} — ${opts.body}`)
 
-    // always show in-app toast
+    // always fire in-app toast
     Notifications.showNotification({
         title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick
     })
 
-    // also try os notification when discord isnt focused (silent fail is fine)
+    // also try os notification when discord isn't focused (silent fail is fine)
     if (!document.hasFocus()) {
         try {
             const n = new window.Notification(opts.title, { body: opts.body, icon: opts.icon })
@@ -97,39 +102,78 @@ function push(opts: { title: string; body: string; icon?: string; onClick?: () =
     }
 }
 
-// profile change detection
-// track these fields and notify if any of them change
-const WATCH_FIELDS = ["username", "globalName", "avatar", "bio", "banner", "bannerColor", "accentColor"] as const
-const FIELD_NAMES: Record<string, string> = {
+// ── profile change detection ──────────────────────────────────────────────────
+
+// color fields are a nightmare — discord sends null/0/undefined interchangeably
+// depending on which endpoint you hit, causing constant false positives
+// so we normalize them before comparing
+function normColor(v: any): string | null {
+    if (v == null || v === 0) return null
+    return String(v)
+}
+
+// fields we diff (colors handled separately due to normalization)
+const TEXT_FIELDS  = ["username", "globalName", "bio", "banner"] as const
+const COLOR_FIELDS = ["bannerColor", "accentColor"] as const
+
+const FIELD_LABEL: Record<string, string> = {
     username: "username", globalName: "display name", avatar: "avatar",
-    bio: "bio", banner: "banner", bannerColor: "banner color", accentColor: "accent color"
+    bio: "bio", banner: "banner", bannerColor: "banner color", accentColor: "accent color",
 }
 
 function checkProfile(uid: string, fresh: any) {
     if (!isWatched(settings, uid)) return
-    if (!featureOn(settings, uid, "profile", "globalProfile")) return
 
     const old = profileCache[uid]
-    if (!old) { profileCache[uid] = fresh; return }
+    if (!old) { profileCache[uid] = fresh; return }  // first time, just set baseline
 
-    const changed = WATCH_FIELDS.filter(f => fresh.user?.[f] !== old.user?.[f])
-    if (!changed.length) return
+    const changed: string[] = []
 
-    const u = UserStore.getUser(uid)
-    const name = displayName(fresh.user)
-    const label = getWatchedUser(settings, uid)?.nick
+    // avatar is handled separately — has its own global toggle
+    if (fresh.user?.avatar !== old.user?.avatar) {
+        if (featureOn(settings, uid, "avatar", "globalAvatar")) {
+            const u     = UserStore.getUser(uid)
+            const name  = displayName(fresh.user)
+            const label = getWatchedUser(settings, uid)?.nick
+            push({
+                title: `${label ? `${label} (${name})` : name} changed their avatar`,
+                body: "click to see",
+                icon: fresh.user?.avatar
+                    ? `https://cdn.discordapp.com/avatars/${uid}/${fresh.user.avatar}.webp?size=128`
+                    : undefined,
+                onClick: () => openUserProfile(uid),
+            })
+        }
+        // update avatar in cache even if we didn't notify so next diff is clean
+        profileCache[uid] = { ...profileCache[uid], user: { ...profileCache[uid].user, avatar: fresh.user?.avatar } }
+    }
 
-    push({
-        title: `${label ? `${label} (${name})` : name} changed their profile`,
-        body: changed.map(f => FIELD_NAMES[f]).join(", "),
-        icon: u?.getAvatarURL(undefined, undefined, false),
-        onClick: () => openUserProfile(uid)
-    })
+    // check text fields
+    for (const f of TEXT_FIELDS) {
+        if ((fresh.user?.[f] ?? null) !== (old.user?.[f] ?? null)) changed.push(f)
+    }
+
+    // check color fields with normalization
+    for (const f of COLOR_FIELDS) {
+        if (normColor(fresh.user?.[f]) !== normColor(old.user?.[f])) changed.push(f)
+    }
+
+    if (changed.length && featureOn(settings, uid, "profile", "globalProfile")) {
+        const u     = UserStore.getUser(uid)
+        const name  = displayName(fresh.user)
+        const label = getWatchedUser(settings, uid)?.nick
+        push({
+            title: `${label ? `${label} (${name})` : name} updated their profile`,
+            body: changed.map(f => FIELD_LABEL[f] ?? f).join(", "),
+            icon: u?.getAvatarURL(undefined, undefined, false),
+            onClick: () => openUserProfile(uid),
+        })
+    }
+
     profileCache[uid] = fresh
 }
 
-// poll profiles every 5 mins
-// discord doesnt push bio/banner changes over ws so this is the only way
+// poll every 5 mins — discord doesn't push bio/banner over websocket
 async function pollProfiles() {
     const list = getWatchlist(settings)
     if (!list.length) return
@@ -137,15 +181,17 @@ async function pollProfiles() {
         try {
             const { body } = await RestAPI.get({
                 url: `/users/${wu.id}/profile`,
-                query: { with_mutual_guilds: false, with_mutual_friends_count: false }
+                query: { with_mutual_guilds: false, with_mutual_friends_count: false },
             })
             checkProfile(wu.id, camelize(body))
         } catch { }
-        await new Promise(r => setTimeout(r, 1500))  // dont hammer the api
+        await new Promise(r => setTimeout(r, 1500))  // don't hammer the api
     }
 }
 
-// cdn url helpers (dont use getAvatarURL bc its signature keeps changing)
+// ── cdn helpers ───────────────────────────────────────────────────────────────
+// don't use getAvatarURL() — its signature changes across discord versions
+
 function safeAvatar(id: string, hash?: string | null, size = 80) {
     try {
         if (hash) return `https://cdn.discordapp.com/avatars/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=${size}`
@@ -172,8 +218,9 @@ function hexColor(n?: number | null) {
 
 const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
 
-// inject styles once on modal open, never during render
-const STYLE_ID = "ur-s7"
+// ── styles ────────────────────────────────────────────────────────────────────
+
+const STYLE_ID = "ur-s8"
 function injectStyles() {
     if (document.getElementById(STYLE_ID)) return
     const s = document.createElement("style")
@@ -209,18 +256,18 @@ function injectStyles() {
             transition:background .12s, color .12s, transform .1s;
             color:var(--interactive-normal); background:transparent; user-select:none;
         }
-        .ur-ibtn:hover      { background:var(--background-modifier-hover); color:var(--interactive-hover); transform:scale(1.1); }
-        .ur-ibtn.d:hover    { background:rgba(237,66,69,.15); color:var(--status-danger); }
+        .ur-ibtn:hover   { background:var(--background-modifier-hover); color:var(--interactive-hover); transform:scale(1.1); }
+        .ur-ibtn.d:hover { background:rgba(237,66,69,.15); color:var(--status-danger); }
 
-        .ur-chips    { display:grid; grid-template-columns:1fr 1fr; gap:5px; padding:4px 12px 12px; }
+        .ur-chips { display:grid; grid-template-columns:1fr 1fr; gap:5px; padding:4px 12px 12px; }
         .ur-chip {
             display:flex; align-items:center; gap:7px; padding:7px 10px; border-radius:9px;
             border:1.5px solid var(--background-modifier-accent);
             background:var(--background-tertiary); cursor:pointer; user-select:none;
             transition:all .14s; opacity:.65;
         }
-        .ur-chip.on          { border-color:rgba(88,101,242,.5); background:rgba(88,101,242,.12); opacity:1; }
-        .ur-chip-lbl         { flex:1; font-size:12px; font-weight:500; color:var(--text-muted); }
+        .ur-chip.on           { border-color:rgba(88,101,242,.5); background:rgba(88,101,242,.12); opacity:1; }
+        .ur-chip-lbl          { flex:1; font-size:12px; font-weight:500; color:var(--text-muted); }
         .ur-chip.on .ur-chip-lbl { color:var(--text-normal); }
 
         .ur-tgl       { position:relative; width:30px; height:17px; border-radius:9px; flex-shrink:0; background:var(--background-modifier-accent); transition:background .14s; }
@@ -234,8 +281,9 @@ function injectStyles() {
     document.head.appendChild(s)
 }
 
-// tiny reusable div-button so i dont repeat myself
-// (using actual <button> causes black text from browser UA styles)
+// ── ui primitives ─────────────────────────────────────────────────────────────
+// using div role=button everywhere bc actual <button> gets black text from UA stylesheet
+
 function Btn({ onClick, style, title, ch }: { onClick: () => void; style?: any; title?: string; ch: any }) {
     return (
         <div role="button" tabIndex={0} title={title} onClick={onClick}
@@ -246,7 +294,6 @@ function Btn({ onClick, style, title, ch }: { onClick: () => void; style?: any; 
     )
 }
 
-// icon button - the small ones on each user card
 function IBtn({ onClick, title, danger, ch }: { onClick: () => void; title?: string; danger?: boolean; ch: any }) {
     return (
         <div role="button" tabIndex={0} title={title} onClick={onClick}
@@ -280,16 +327,18 @@ function TabBtn({ active, onClick, ch }: { active: boolean; onClick: () => void;
     )
 }
 
-// the override chips on each user card
-// null = use global, true/false = override
+// ── override chips ────────────────────────────────────────────────────────────
+
 const OV_ITEMS = [
     { label: "Messages", icon: "💬", key: "msgs",    gk: "globalMsgs"    },
     { label: "Edits",    icon: "✏️",  key: "edits",   gk: "globalEdits"   },
     { label: "Deletes",  icon: "🗑",  key: "deletes", gk: "globalDeletes" },
     { label: "Typing",   icon: "⌨️",  key: "typing",  gk: "globalTyping"  },
     { label: "Profile",  icon: "🪪",  key: "profile", gk: "globalProfile" },
-    { label: "Voice",    icon: "🎙",  key: "voice",   gk: "globalVoice"   },
+    { label: "Avatar",   icon: "🖼️",  key: "avatar",  gk: "globalAvatar"  },
+    { label: "Voice",    icon: "🎙️",  key: "voice",   gk: "globalVoice"   },
     { label: "Status",   icon: "🟢",  key: "status",  gk: "globalStatus"  },
+    { label: "Boosts",   icon: "🚀",  key: "boosts",  gk: "globalBoosts"  },
 ] as const
 
 function Chip({ on, overridden, icon, label, onClick, onRight }: {
@@ -310,17 +359,18 @@ function Chip({ on, overridden, icon, label, onClick, onRight }: {
     )
 }
 
-// single user row in the watchlist
+// ── user card ─────────────────────────────────────────────────────────────────
+
 function UserCard({ user, refresh, remove }: { user: WatchedUser; refresh: () => void; remove: () => void }) {
     const [nick,     setNick] = React.useState(user.nick ?? "")
     const [expanded, setExp]  = React.useState(false)
     const [editNick, setEdit] = React.useState(false)
 
-    const du      = React.useMemo(() => { try { return UserStore.getUser(user.id) ?? null } catch { return null } }, [user.id])
-    const av      = duAvatar(du, user.id)
-    const name    = (du ? displayName(du) : null) || user.nick || user.id
-    const ovs     = user.overrides ?? {} as any
-    const hasOv   = Object.values(ovs).some((v: any) => v !== null && v !== undefined)
+    const du        = React.useMemo(() => { try { return UserStore.getUser(user.id) ?? null } catch { return null } }, [user.id])
+    const av        = duAvatar(du, user.id)
+    const name      = (du ? displayName(du) : null) || user.nick || user.id
+    const ovs       = user.overrides ?? {} as any
+    const hasOv     = Object.values(ovs).some((v: any) => v !== null && v !== undefined)
     const addedDate = React.useMemo(() => { try { return new Date(user.addedAt).toLocaleDateString() } catch { return "?" } }, [user.addedAt])
 
     const saveNick = () => { patchUser(settings, user.id, { nick: nick.trim() }); setEdit(false); refresh() }
@@ -356,9 +406,7 @@ function UserCard({ user, refresh, remove }: { user: WatchedUser; refresh: () =>
             {editNick && (
                 <div style={{ display: "flex", gap: 8, padding: "8px 12px 12px", borderTop: "1px solid var(--background-modifier-accent)", background: "var(--background-tertiary)" }}>
                     <div style={{ flex: 1 }}>
-                        <TextInput
-                            value={nick}
-                            onChange={(v: string) => setNick(v)}
+                        <TextInput value={nick} onChange={(v: string) => setNick(v)}
                             placeholder={`label for ${name}`}
                             onKeyDown={(e: any) => { if (e.key === "Enter") saveNick(); if (e.key === "Escape") setEdit(false) }}
                             autoFocus />
@@ -371,7 +419,7 @@ function UserCard({ user, refresh, remove }: { user: WatchedUser; refresh: () =>
             {expanded && (
                 <div style={{ borderTop: "1px solid var(--background-modifier-accent)" }}>
                     <div style={{ fontSize: 11, color: "var(--text-muted)", padding: "8px 13px 3px" }}>
-                        per-user overrides · right-click a chip to reset it
+                        per-user overrides · right-click a chip to reset it to global
                     </div>
                     <div className="ur-chips">
                         {OV_ITEMS.map(item => {
@@ -405,17 +453,13 @@ function UserCard({ user, refresh, remove }: { user: WatchedUser; refresh: () =>
     )
 }
 
-// the watchlist tab
+// ── watchlist tab ─────────────────────────────────────────────────────────────
+
 function WatchlistTab({ onUpdate }: { onUpdate: () => void }) {
-    const [users, setUsers] = React.useState<WatchedUser[]>(() => {
-        try { return getWatchlist(settings) } catch { return [] }
-    })
+    const [users, setUsers]   = React.useState<WatchedUser[]>(() => { try { return getWatchlist(settings) } catch { return [] } })
     const [search, setSearch] = React.useState("")
 
-    const refresh = () => {
-        try { setUsers(getWatchlist(settings)) } catch { setUsers([]) }
-        onUpdate()
-    }
+    const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) }; onUpdate() }
 
     const shown = search.trim()
         ? users.filter(u => {
@@ -430,7 +474,7 @@ function WatchlistTab({ onUpdate }: { onUpdate: () => void }) {
         <div style={{ textAlign: "center", padding: "52px 20px" }}>
             <div style={{ fontSize: 52, marginBottom: 14, opacity: .4 }}>👁</div>
             <div style={{ fontSize: 16, fontWeight: 700, color: "var(--header-primary)", marginBottom: 6 }}>nothing here yet</div>
-            <div style={{ fontSize: 13, color: "var(--text-muted)" }}>go to + add user to start tracking someone</div>
+            <div style={{ fontSize: 13, color: "var(--text-muted)" }}>hit "+ add user" to start tracking someone</div>
         </div>
     )
 
@@ -452,7 +496,8 @@ function WatchlistTab({ onUpdate }: { onUpdate: () => void }) {
     )
 }
 
-// add user tab - step 1: enter id, step 2: confirm with preview card
+// ── add user tab ──────────────────────────────────────────────────────────────
+
 type LK =
     | { stage: "idle" }
     | { stage: "loading" }
@@ -472,10 +517,9 @@ function AddTab({ onAdded }: { onAdded: () => void }) {
         if (isWatched(settings, cleanId))                return setLk({ stage: "error", msg: "already watching this person" })
 
         setLk({ stage: "loading" })
-
         RestAPI.get({
             url: `/users/${cleanId}/profile`,
-            query: { with_mutual_guilds: false, with_mutual_friends_count: false }
+            query: { with_mutual_guilds: false, with_mutual_friends_count: false },
         }).then((res: any) => {
             const d = camelize(res.body)
             setLk({
@@ -490,7 +534,7 @@ function AddTab({ onAdded }: { onAdded: () => void }) {
             setLk({
                 stage: "error",
                 msg: s === 404 ? "user not found"
-                   : s === 403 ? "profile is private — you can still add by id though"
+                   : s === 403 ? "profile is private — you can still add by id"
                    : `request failed${s ? ` (${s})` : ""}`,
             })
         })
@@ -503,7 +547,6 @@ function AddTab({ onAdded }: { onAdded: () => void }) {
         onAdded()
     }
 
-    // step 2: preview card
     if (lk.stage === "found") return (
         <div>
             <div style={{ borderRadius: 12, overflow: "hidden", marginBottom: 16, border: "1px solid var(--background-modifier-accent)" }}>
@@ -544,9 +587,7 @@ function AddTab({ onAdded }: { onAdded: () => void }) {
                 placeholder={'e.g. "bestie", "the rat", "coworker"'}
                 onKeyDown={(e: any) => { if (e.key === "Enter") doAdd() }}
                 autoFocus />
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 5, marginBottom: 16 }}>
-                only you can see this
-            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 5, marginBottom: 16 }}>only you can see this</div>
             <div style={{ display: "flex", gap: 8 }}>
                 <Button onClick={doAdd} size={Button.Sizes.MEDIUM} style={{ flex: 1 }}>Add to Watchlist</Button>
                 <Button onClick={() => { setLk({ stage: "idle" }); setLabel("") }} size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT}>
@@ -556,7 +597,6 @@ function AddTab({ onAdded }: { onAdded: () => void }) {
         </div>
     )
 
-    // step 1: id input
     return (
         <div>
             <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--header-secondary)", marginBottom: 6 }}>
@@ -578,7 +618,7 @@ function AddTab({ onAdded }: { onAdded: () => void }) {
                 </Button>
             </div>
             <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-                enable <strong style={{ color: "var(--text-normal)" }}>developer mode</strong> in discord settings → right-click any user → copy user id
+                enable <strong style={{ color: "var(--text-normal)" }}>developer mode</strong> → right-click any user → copy user id
             </div>
             {lk.stage === "error" && (
                 <div className="ur-err">
@@ -590,13 +630,13 @@ function AddTab({ onAdded }: { onAdded: () => void }) {
     )
 }
 
-// the modal itself
+// ── modal ─────────────────────────────────────────────────────────────────────
+
 function WatchlistModal({ modalProps }: { modalProps: any }) {
     React.useEffect(() => { injectStyles() }, [])
 
     const [tab,   setTab]   = React.useState<"list" | "add">("list")
     const [count, setCount] = React.useState(() => { try { return getWatchlist(settings).length } catch { return 0 } })
-
     const refreshCount = () => { try { setCount(getWatchlist(settings).length) } catch { setCount(0) } }
 
     return (
@@ -628,10 +668,11 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     )
 }
 
-// the actual plugin
+// ── plugin ────────────────────────────────────────────────────────────────────
+
 export default definePlugin({
     name: "UserRadar",
-    description: "get notified when watched users send messages, edit/delete, type, change profile, join voice, change status",
+    description: "get notified when watched users message, edit/delete, type, change profile/avatar, join voice, change status, boost",
     authors: [{ id: 641266820187160576, name: "k1ng_op" }],
     settings,
 
@@ -640,7 +681,7 @@ export default definePlugin({
             <div>
                 <Text variant="heading-sm/semibold" style={{ marginBottom: 8 }}>Watchlist</Text>
                 <Text variant="text-sm/normal" style={{ color: "var(--text-muted)", marginBottom: 12 }}>
-                    manage who you're tracking below, or right-click any user → watch user to add them on the fly
+                    manage who you're tracking below, or right-click any user → watch user to add on the fly
                 </Text>
                 <button
                     style={{ background: "var(--brand-500)", color: "#fff", border: "none", borderRadius: 4, padding: "8px 14px", cursor: "pointer", fontWeight: 600, fontSize: 14, width: "100%" }}
@@ -662,12 +703,25 @@ export default definePlugin({
             const name  = displayName(u ?? message.author)
             const label = getWatchedUser(settings, message.author.id)?.nick
             const dn    = label ? `${label} (${name})` : name
+            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
 
-            if (message.type === 7) {
-                push({ title: `${dn} joined a server`, body: "click to view", icon: u?.getAvatarURL(undefined, undefined, false), onClick: () => jumpTo(guildId, channelId, message.id) })
+            // type 8 = boost, type 7 = server join
+            if (message.type === 8) {
+                if (!featureOn(settings, message.author.id, "boosts", "globalBoosts")) return
+                push({ title: `${dn} boosted a server 🚀`, body: "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
                 return
             }
-            push({ title: `${dn} sent a message`, body: preview(message.content, message.attachments?.[0]?.filename), icon: u?.getAvatarURL(undefined, undefined, false), onClick: () => jumpTo(guildId, channelId, message.id) })
+            if (message.type === 7) {
+                push({ title: `${dn} joined a server`, body: "click to view", icon, onClick: () => jumpTo(guildId, channelId, message.id) })
+                return
+            }
+
+            push({
+                title: `${dn} sent a message`,
+                body: preview(message.content, message.attachments?.[0]?.filename),
+                icon,
+                onClick: () => jumpTo(guildId, channelId, message.id),
+            })
         },
 
         MESSAGE_UPDATE(evt: MsgUpdateEvent) {
@@ -679,7 +733,14 @@ export default definePlugin({
             const u     = UserStore.getUser(message.author.id)
             const name  = displayName(u ?? message.author)
             const label = getWatchedUser(settings, message.author.id)?.nick
-            push({ title: `${label ? `${label} (${name})` : name} edited a message`, body: preview(message.content, message.attachments?.[0]?.filename), icon: u?.getAvatarURL(undefined, undefined, false), onClick: () => jumpTo(guildId, message.channel_id, message.id) })
+            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
+
+            push({
+                title: `${label ? `${label} (${name})` : name} edited a message`,
+                body: preview(message.content, message.attachments?.[0]?.filename),
+                icon,
+                onClick: () => jumpTo(guildId, message.channel_id, message.id),
+            })
         },
 
         async MESSAGE_DELETE(evt: MsgDeleteEvent) {
@@ -696,10 +757,16 @@ export default definePlugin({
             const u     = UserStore.getUser(msg.author.id)
             const name  = displayName(u ?? msg.author)
             const label = getWatchedUser(settings, msg.author.id)?.nick
+            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
             const body  = settings.store.showPreview && msg.content
                 ? `"${trunc(msg.content, settings.store.previewLen)}"`
                 : "message was deleted"
-            push({ title: `${label ? `${label} (${name})` : name} deleted a message`, body, icon: u?.getAvatarURL(undefined, undefined, false), onClick: () => jumpTo(evt.guildId, msg!.channel_id, msg!.id) })
+
+            push({
+                title: `${label ? `${label} (${name})` : name} deleted a message`,
+                body, icon,
+                onClick: () => jumpTo(evt.guildId, msg!.channel_id, msg!.id),
+            })
         },
 
         TYPING_START(evt: TypingEvent) {
@@ -712,23 +779,25 @@ export default definePlugin({
 
             const label = getWatchedUser(settings, evt.userId)?.nick
             const ch    = ChannelStore.getChannel(evt.channelId)
+            const icon  = safeAvatar(u.id, (u as any).avatar)
+
             push({
                 title: `${label ? `${label} (${displayName(u)})` : displayName(u)} is typing…`,
                 body: ch?.name ? `in #${ch.name}` : "click to jump",
-                icon: u.getAvatarURL(undefined, undefined, false),
-                onClick: () => jumpTo(ch?.guild_id, evt.channelId)
+                icon,
+                onClick: () => jumpTo(ch?.guild_id, evt.channelId),
             })
         },
 
+        // USER_UPDATE fires on ws for username/avatar changes — fast path
         USER_UPDATE(evt: { user: any }) {
-            if (!evt?.user?.id) return
-            if (!isWatched(settings, evt.user.id)) return
-            if (!featureOn(settings, evt.user.id, "profile", "globalProfile")) return
+            if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
             const old = profileCache[evt.user.id]
             if (!old) return
             checkProfile(evt.user.id, { ...old, user: { ...old.user, ...camelize(evt.user) } })
         },
 
+        // USER_PROFILE_FETCH_SUCCESS fires when discord fetches a profile (e.g. you open their profile)
         async USER_PROFILE_FETCH_SUCCESS(rawEvt: ProfileFetchEvent) {
             if (!rawEvt?.user?.id) return
             checkProfile(rawEvt.user.id, camelize(rawEvt))
@@ -746,7 +815,7 @@ export default definePlugin({
                 const u     = UserStore.getUser(userId)
                 const label = getWatchedUser(settings, userId)?.nick
                 const dn    = label ? `${label} (${displayName(u)})` : displayName(u)
-                const icon  = u?.getAvatarURL(undefined, undefined, false)
+                const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
 
                 if (!prev && channelId) {
                     const ch = ChannelStore.getChannel(channelId)
@@ -755,7 +824,7 @@ export default definePlugin({
                     push({ title: `${dn} left voice`, body: "disconnected", icon, onClick: () => openUserProfile(userId) })
                 } else if (prev && channelId && prev !== channelId) {
                     const ch = ChannelStore.getChannel(channelId)
-                    push({ title: `${dn} moved to a different vc`, body: ch ? `now in #${ch.name}` : "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
+                    push({ title: `${dn} moved vc`, body: ch ? `now in #${ch.name}` : "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
                 }
             }
         },
@@ -771,11 +840,13 @@ export default definePlugin({
 
                 const u     = UserStore.getUser(id)
                 const label = getWatchedUser(settings, id)?.nick
+                const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
+
                 push({
                     title: `${label ? `${label} (${displayName(u)})` : displayName(u)} is now ${update.status} ${STATUS_EMOJI[update.status] ?? ""}`,
                     body: `was: ${prev} ${STATUS_EMOJI[prev] ?? ""}`,
-                    icon: u?.getAvatarURL(undefined, undefined, false),
-                    onClick: () => openUserProfile(id)
+                    icon,
+                    onClick: () => openUserProfile(id),
                 })
             }
         },
@@ -788,10 +859,13 @@ export default definePlugin({
             Notification.requestPermission()
         }
 
-        // pre-fetch everyone as baseline so we dont false-positive on first poll
+        // pre-fetch profiles as baseline so we don't false-positive on first poll
         for (const wu of getWatchlist(settings)) {
             try {
-                const { body } = await RestAPI.get({ url: `/users/${wu.id}/profile`, query: { with_mutual_guilds: false, with_mutual_friends_count: false } })
+                const { body } = await RestAPI.get({
+                    url: `/users/${wu.id}/profile`,
+                    query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+                })
                 profileCache[wu.id] = camelize(body)
             } catch { }
         }
@@ -800,39 +874,45 @@ export default definePlugin({
 
         tryLoadLoggedMsgs().then(m => {
             if (m) log.info("hooked into message logger")
-            else   log.warn("message logger not found, delete content wont be available")
+            else   log.warn("message logger not found, delete content unavailable")
         })
     },
 
     stop() {
         removeContextMenuPatch("user-context", userContextPatch)
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-        for (const k in profileCache)  delete profileCache[k]
-        for (const k in vcCache)       delete vcCache[k]
-        for (const k in statusCache)   delete statusCache[k]
+        for (const k in profileCache) delete profileCache[k]
+        for (const k in vcCache)      delete vcCache[k]
+        for (const k in statusCache)  delete statusCache[k]
         loggedMsgs = null
     },
 
     async watchUser(id: string) {
         addUser(settings, id)
-        Toasts.show({ type: Toasts.Type.SUCCESS, message: `now watching ${displayName(UserStore.getUser(id))}`, id: Toasts.genId() })
+        const u = UserStore.getUser(id)
+        Toasts.show({ type: Toasts.Type.SUCCESS, message: `now watching ${displayName(u)}`, id: Toasts.genId() })
         try {
-            const { body } = await RestAPI.get({ url: `/users/${id}/profile`, query: { with_mutual_guilds: false, with_mutual_friends_count: false } })
+            const { body } = await RestAPI.get({
+                url: `/users/${id}/profile`,
+                query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+            })
             profileCache[id] = camelize(body)
         } catch { }
     },
 
     unwatchUser(id: string) {
+        const u = UserStore.getUser(id)
         removeUser(settings, id)
         delete profileCache[id]; delete vcCache[id]; delete statusCache[id]
-        Toasts.show({ type: Toasts.Type.SUCCESS, message: `stopped watching ${displayName(UserStore.getUser(id))}`, id: Toasts.genId() })
+        Toasts.show({ type: Toasts.Type.SUCCESS, message: `stopped watching ${displayName(u)}`, id: Toasts.genId() })
     },
 })
 
-// context menu patch - right click any user to watch/unwatch them
+// ── context menu ──────────────────────────────────────────────────────────────
+
 const userContextPatch: NavContextMenuPatchCallback = (children, props) => {
     if (!props?.user) return
-    if (props.user.id === UserStore.getCurrentUser()?.id) return  // dont watch yourself lol
+    if (props.user.id === UserStore.getCurrentUser()?.id) return  // don't watch yourself lol
     if (children.some((c: any) => c?.props?.id === "userradar-group")) return
 
     const { id } = props.user
