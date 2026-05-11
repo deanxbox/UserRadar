@@ -1,25 +1,17 @@
 // store.ts - k1ng_op
-// all watchlist state lives here so i dont have to thread settings through everything
 
 import { Logger } from "@utils/Logger"
 import { WatchedUser } from "./types"
 
 export const log = new Logger("UserRadar", "#a78bfa")
 
-// watchlist is stored as a JSON string bc vencord has no list type
-// annoying but it works
-
 function parse(raw: string): WatchedUser[] {
     if (!raw || raw.trim() === "") return []
-    try {
-        return JSON.parse(raw) as WatchedUser[]
-    } catch {
-        log.error("watchlist json got corrupted somehow, wiping it")
-        return []
-    }
+    try { return JSON.parse(raw) as WatchedUser[] }
+    catch { log.error("watchlist json is borked, wiping it"); return [] }
 }
 
-// always read fresh, never cache - stale state has burned me before
+// always read fresh, never cache - stale reads burned me too many times
 export function getWatchlist(settings: any): WatchedUser[] {
     return parse(settings.store.watchlist ?? "[]")
 }
@@ -38,28 +30,22 @@ export function getWatchedUser(settings: any, userId: string): WatchedUser | und
 
 export function addUser(settings: any, userId: string, nick = "") {
     const list = getWatchlist(settings)
-    if (list.some(u => u.id === userId)) return  // already there, skip
+    if (list.some(u => u.id === userId)) return
     list.push({
         id: userId,
         nick,
         addedAt: Date.now(),
         overrides: {
-            msgs: null,
-            edits: null,
-            deletes: null,
-            typing: null,
-            profile: null,
-            voice: null,
-            status: null,
+            msgs: null, edits: null, deletes: null, typing: null,
+            profile: null, voice: null, status: null, boosts: null, avatar: null,
         },
     })
     saveWatchlist(settings, list)
-    log.info("watching", userId)
+    log.info("now watching", userId)
 }
 
 export function removeUser(settings: any, userId: string) {
-    const list = getWatchlist(settings).filter(u => u.id !== userId)
-    saveWatchlist(settings, list)
+    saveWatchlist(settings, getWatchlist(settings).filter(u => u.id !== userId))
     log.info("unwatched", userId)
 }
 
@@ -70,7 +56,7 @@ export function patchUser(settings: any, userId: string, patch: Partial<WatchedU
     saveWatchlist(settings, list)
 }
 
-// null override = fall back to global setting
+// null override = fall through to global setting
 export function featureOn(
     settings: any,
     userId: string,
@@ -79,12 +65,11 @@ export function featureOn(
 ): boolean {
     const u = getWatchedUser(settings, userId)
     if (!u) return false
-    const ov = u.overrides[feature]
-    return ov !== null ? ov : (settings.store[globalKey] ?? true)
+    const ov = (u.overrides ?? {} as any)[feature]
+    return ov !== null && ov !== undefined ? ov : (settings.store[globalKey] ?? false)
 }
 
-// discord api returns snake_case, everything in js is camelCase
-// this just converts recursively so i dont have to think about it
+// discord api is snake_case, js is camelCase, this fixes that recursively
 export function camelize(obj: any): any {
     if (Array.isArray(obj)) return obj.map(camelize)
     if (obj && typeof obj === "object") {
@@ -98,25 +83,14 @@ export function camelize(obj: any): any {
     return obj
 }
 
-// returns true if notifs should be suppressed rn
 export function inQuietHours(settings: any): boolean {
     if (!settings.store.quietHours) return false
-
     const now = new Date()
     const cur = now.getHours() * 60 + now.getMinutes()
-
-    const toMins = (t: string) => {
-        const [h, m] = t.split(":").map(Number)
-        return h * 60 + m
-    }
-
+    const toMins = (t: string) => { const [h, m] = t.split(":").map(Number); return h * 60 + m }
     const start = toMins(settings.store.quietStart ?? "23:00")
     const end   = toMins(settings.store.quietEnd   ?? "07:00")
-
-    // overnight range like 23:00-07:00 needs special handling
-    return start > end
-        ? cur >= start || cur < end
-        : cur >= start && cur < end
+    return start > end ? cur >= start || cur < end : cur >= start && cur < end
 }
 
 export function displayName(user: any): string {
@@ -125,9 +99,5 @@ export function displayName(user: any): string {
 }
 
 export const STATUS_EMOJI: Record<string, string> = {
-    online:    "🟢",
-    idle:      "🌙",
-    dnd:       "🔴",
-    offline:   "⚫",
-    invisible: "👻",
+    online: "🟢", idle: "🌙", dnd: "🔴", offline: "⚫", invisible: "👻",
 }
