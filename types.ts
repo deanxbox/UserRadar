@@ -53,7 +53,12 @@ export interface PresenceEvent {
     updates: {
         user: { id: string }
         status: Status
-        activities?: any[]
+        activities: {
+            type: number   // 0=playing, 2=listening, 3=watching, 5=competing
+            name: string
+            details?: string
+            state?: string
+        }[]
     }[]
 }
 
@@ -86,7 +91,9 @@ export interface WatchedUser {
         profile: boolean | null
         voice:   boolean | null
         status:  boolean | null
-        boosts:  boolean | null
-        avatar:  boolean | null  // avatar-only changes (separate from full profile)
+        boosts:   boolean | null
+        avatar:   boolean | null  // avatar-only changes (separate from full profile)
+        activity: boolean | null  // playing/listening/watching activity changes
+        joins:    boolean | null  // server join/leave events
     }
 }
