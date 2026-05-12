@@ -1,6 +1,5 @@
 // index.tsx - k1ng_op
 // userradar — track people on discord, get notified when they do stuff
-// ported from my vencord desktop plugin
 
 import { addContextMenuPatch, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu"
 import { Notifications } from "@api/index"
@@ -88,17 +87,22 @@ function push(opts: { title: string; body: string; icon?: string; onClick?: () =
     if (inQuietHours(settings)) return
     if (settings.store.debugLog) log.info(`>> ${opts.title} — ${opts.body}`)
 
-    // always fire in-app toast
-    Notifications.showNotification({
-        title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick
-    })
-
-    // also try os notification when discord isn't focused (silent fail is fine)
-    if (!document.hasFocus()) {
+    if (document.hasFocus()) {
+        // discord is open and focused — in-app toast only
+        Notifications.showNotification({
+            title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick
+        })
+    } else {
+        // discord is minimized/in background — os notification only
         try {
             const n = new window.Notification(opts.title, { body: opts.body, icon: opts.icon })
             if (opts.onClick) n.onclick = () => { window.focus(); opts.onClick!() }
-        } catch { }
+        } catch {
+            // os notif failed (no permission etc), fall back to in-app
+            Notifications.showNotification({
+                title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick
+            })
+        }
     }
 }
 
