@@ -1,11 +1,12 @@
-// index.tsx - k1ng_op
-// userradar — track people on discord, get notified when they do stuff
+// index.tsx
+// k1ng_op — userradar
+// basically a stalker plugin lol, tracks people and notifies you when they do stuff
 
 import { addContextMenuPatch, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu"
 import { Notifications } from "@api/index"
 import { definePluginSettings } from "@api/Settings"
 import { getCurrentChannel, openUserProfile } from "@utils/discord"
-import { openModal, ModalRoot, ModalHeader, ModalContent, ModalSize } from "@utils/modal"
+import { openModal, ModalRoot, ModalHeader, ModalContent, ModalFooter, ModalCloseButton, ModalSize } from "@utils/modal"
 import definePlugin, { OptionType } from "@utils/types"
 import { findByProps } from "@webpack"
 import { Button, ChannelStore, Menu, MessageStore, React, RestAPI, Text, TextInput, Toasts, UserStore } from "@webpack/common"
@@ -18,20 +19,21 @@ import {
 } from "./store"
 
 import {
-    MsgCreateEvent, MsgDeleteEvent, MsgUpdateEvent,
+    GuildMemberEvent, MsgCreateEvent, MsgDeleteEvent, MsgUpdateEvent,
     PresenceEvent, ProfileFetchEvent,
     TypingEvent, VoiceStateEvent, WatchedUser
 } from "./types"
 
-// runtime state — lives as long as the plugin runs
-const profileCache:  Record<string, any>           = {}  // last known profile snapshot per uid
-const vcCache:       Record<string, string | null>  = {}  // last known vc channel per uid
-const statusCache:   Record<string, string>          = {}  // last known status per uid
+// in-memory state, resets when plugin stops
+const profileCache:  Record<string, any>          = {}  // last profile snapshot we saw per user
+const vcCache:       Record<string, string | null> = {}  // what vc they were last in
+const statusCache:   Record<string, string>         = {}  // last status
+const activityCache: Record<string, string | null>  = {}  // last activity (game/music/etc)
 let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
 
-// try to get deleted message content from vc-message-logger-enhanced
-// if it's not installed, deletes will just show "message was deleted" - nbd
+// hook into vc-message-logger-enhanced if it's installed
+// gives us deleted message content, otherwise we just say "message was deleted"
 async function tryLoadLoggedMsgs() {
     if (loggedMsgs) return loggedMsgs
     for (const prefix of ["plugins", "userplugins"]) {
@@ -45,29 +47,27 @@ async function tryLoadLoggedMsgs() {
     return null
 }
 
-// ── settings ─────────────────────────────────────────────────────────────────
-
 const settings = definePluginSettings({
-    watchlist:          { type: OptionType.STRING,  default: "[]",    description: "watchlist json (don't touch this)",                            hidden: true },
-    globalMsgs:         { type: OptionType.BOOLEAN, default: true,    description: "notify on new messages" },
-    globalEdits:        { type: OptionType.BOOLEAN, default: true,    description: "notify on edits" },
-    globalDeletes:      { type: OptionType.BOOLEAN, default: true,    description: "notify on deletes (needs vc-message-logger-enhanced for content)" },
-    globalTyping:       { type: OptionType.BOOLEAN, default: true,    description: "notify when someone starts typing" },
-    globalProfile:      { type: OptionType.BOOLEAN, default: true,    description: "notify on profile changes (bio, banner, username etc)" },
-    globalAvatar:       { type: OptionType.BOOLEAN, default: true,    description: "notify when someone changes their avatar (separate from profile)" },
-    globalVoice:        { type: OptionType.BOOLEAN, default: true,    description: "notify on voice joins/leaves/moves" },
-    globalStatus:       { type: OptionType.BOOLEAN, default: false,   description: "notify on status changes (spammy, off by default)" },
-    globalBoosts:       { type: OptionType.BOOLEAN, default: true,    description: "notify when someone boosts a server" },
-    showPreview:        { type: OptionType.BOOLEAN, default: true,    description: "show message content in notifs" },
-    previewLen:         { type: OptionType.NUMBER,  default: 120,     description: "max chars in message preview (0 = no limit)" },
-    quietHours:         { type: OptionType.BOOLEAN, default: false,   description: "silence notifs during certain hours" },
-    quietStart:         { type: OptionType.STRING,  default: "23:00", description: "quiet hours start (24h format)" },
-    quietEnd:           { type: OptionType.STRING,  default: "07:00", description: "quiet hours end (24h format)" },
-    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,    description: "skip notif if you're already in that channel" },
-    debugLog:           { type: OptionType.BOOLEAN, default: false,   description: "log everything to console" },
+    watchlist:          { type: OptionType.STRING,  default: "[]",    hidden: true,  description: "watchlist json — don't touch" },
+    globalMsgs:         { type: OptionType.BOOLEAN, default: true,                   description: "notify: messages" },
+    globalEdits:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: edits" },
+    globalDeletes:      { type: OptionType.BOOLEAN, default: true,                   description: "notify: deletes (needs vc-message-logger-enhanced for content)" },
+    globalTyping:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: typing" },
+    globalProfile:      { type: OptionType.BOOLEAN, default: true,                   description: "notify: profile changes (bio, banner, username etc)" },
+    globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: avatar changes" },
+    globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: voice joins/leaves/moves" },
+    globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "notify: status changes (pretty spammy, off by default)" },
+    globalBoosts:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: server boosts" },
+    globalActivity:     { type: OptionType.BOOLEAN, default: false,                  description: "notify: activity changes (game/music/etc) — very spammy, off by default" },
+    globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: server joins/leaves" },
+    showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message content in notifs" },
+    previewLen:         { type: OptionType.NUMBER,  default: 120,                    description: "max chars in preview (0 = no limit)" },
+    quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "mute notifs during certain hours" },
+    quietStart:         { type: OptionType.STRING,  default: "23:00",                description: "quiet hours start (24h)" },
+    quietEnd:           { type: OptionType.STRING,  default: "07:00",                description: "quiet hours end (24h)" },
+    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,                   description: "skip notif if you're already in that channel" },
+    debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "log all events to console" },
 })
-
-// ── notif helpers ─────────────────────────────────────────────────────────────
 
 function trunc(s: string, max: number) {
     return max > 0 && s.length > max ? s.slice(0, max) + "…" : s
@@ -88,35 +88,29 @@ function push(opts: { title: string; body: string; icon?: string; onClick?: () =
     if (settings.store.debugLog) log.info(`>> ${opts.title} — ${opts.body}`)
 
     if (document.hasFocus()) {
-        // discord is open and focused — in-app toast only
-        Notifications.showNotification({
-            title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick
-        })
+        // discord focused = in-app toast
+        Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
     } else {
-        // discord is minimized/in background — os notification only
+        // discord in background = os notification
+        // fall back to in-app if os notif fails (no permission, blocked, whatever)
         try {
             const n = new window.Notification(opts.title, { body: opts.body, icon: opts.icon })
             if (opts.onClick) n.onclick = () => { window.focus(); opts.onClick!() }
         } catch {
-            // os notif failed (no permission etc), fall back to in-app
-            Notifications.showNotification({
-                title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick
-            })
+            Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
         }
     }
 }
 
-// ── profile change detection ──────────────────────────────────────────────────
-
-// color fields are a nightmare — discord sends null/0/undefined interchangeably
-// depending on which endpoint you hit, causing constant false positives
-// so we normalize them before comparing
+// profile diffing
+// accent/banner colors are the worst — discord sends null, 0, and undefined
+// completely interchangeably depending on which api endpoint you hit
+// this normalizes all three to null so they don't spam false positives
 function normColor(v: any): string | null {
     if (v == null || v === 0) return null
     return String(v)
 }
 
-// fields we diff (colors handled separately due to normalization)
 const TEXT_FIELDS  = ["username", "globalName", "bio", "banner"] as const
 const COLOR_FIELDS = ["bannerColor", "accentColor"] as const
 
@@ -129,35 +123,28 @@ function checkProfile(uid: string, fresh: any) {
     if (!isWatched(settings, uid)) return
 
     const old = profileCache[uid]
-    if (!old) { profileCache[uid] = fresh; return }  // first time, just set baseline
+    if (!old) { profileCache[uid] = fresh; return }
 
-    const changed: string[] = []
-
-    // avatar is handled separately — has its own global toggle
+    // avatar has its own setting so handle it separately
     if (fresh.user?.avatar !== old.user?.avatar) {
         if (featureOn(settings, uid, "avatar", "globalAvatar")) {
-            const u     = UserStore.getUser(uid)
             const name  = displayName(fresh.user)
             const label = getWatchedUser(settings, uid)?.nick
             push({
                 title: `${label ? `${label} (${name})` : name} changed their avatar`,
                 body: "click to see",
-                icon: fresh.user?.avatar
-                    ? `https://cdn.discordapp.com/avatars/${uid}/${fresh.user.avatar}.webp?size=128`
-                    : undefined,
+                icon: fresh.user?.avatar ? `https://cdn.discordapp.com/avatars/${uid}/${fresh.user.avatar}.webp?size=128` : undefined,
                 onClick: () => openUserProfile(uid),
             })
         }
-        // update avatar in cache even if we didn't notify so next diff is clean
+        // always update cache even if we skipped the notif, keeps diff clean
         profileCache[uid] = { ...profileCache[uid], user: { ...profileCache[uid].user, avatar: fresh.user?.avatar } }
     }
 
-    // check text fields
+    const changed: string[] = []
     for (const f of TEXT_FIELDS) {
         if ((fresh.user?.[f] ?? null) !== (old.user?.[f] ?? null)) changed.push(f)
     }
-
-    // check color fields with normalization
     for (const f of COLOR_FIELDS) {
         if (normColor(fresh.user?.[f]) !== normColor(old.user?.[f])) changed.push(f)
     }
@@ -169,7 +156,7 @@ function checkProfile(uid: string, fresh: any) {
         push({
             title: `${label ? `${label} (${name})` : name} updated their profile`,
             body: changed.map(f => FIELD_LABEL[f] ?? f).join(", "),
-            icon: u?.getAvatarURL(undefined, undefined, false),
+            icon: u ? safeAvatar(u.id, (u as any).avatar) : undefined,
             onClick: () => openUserProfile(uid),
         })
     }
@@ -177,7 +164,8 @@ function checkProfile(uid: string, fresh: any) {
     profileCache[uid] = fresh
 }
 
-// poll every 5 mins — discord doesn't push bio/banner over websocket
+// poll bio/banner every 5 min bc discord doesn't push those over websocket
+// annoying but it's the only way
 async function pollProfiles() {
     const list = getWatchlist(settings)
     if (!list.length) return
@@ -189,13 +177,12 @@ async function pollProfiles() {
             })
             checkProfile(wu.id, camelize(body))
         } catch { }
-        await new Promise(r => setTimeout(r, 1500))  // don't hammer the api
+        await new Promise(r => setTimeout(r, 1500))  // chill between requests
     }
 }
 
-// ── cdn helpers ───────────────────────────────────────────────────────────────
-// don't use getAvatarURL() — its signature changes across discord versions
-
+// build avatar url ourselves instead of using getAvatarURL()
+// that function's signature breaks every few discord updates, not worth the trouble
 function safeAvatar(id: string, hash?: string | null, size = 80) {
     try {
         if (hash) return `https://cdn.discordapp.com/avatars/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=${size}`
@@ -203,10 +190,6 @@ function safeAvatar(id: string, hash?: string | null, size = 80) {
         try { idx = Number(BigInt(id) % BigInt(6)) } catch { idx = parseInt(id.slice(-1), 10) % 6 || 0 }
         return `https://cdn.discordapp.com/embed/avatars/${idx}.png`
     } catch { return "https://cdn.discordapp.com/embed/avatars/0.png" }
-}
-
-function duAvatar(du: any, id: string, size = 64) {
-    try { return safeAvatar(du?.id ?? id, du?.avatar, size) } catch { return safeAvatar(id, null, size) }
 }
 
 function bannerUrl(id: string, hash?: string | null) {
@@ -222,233 +205,194 @@ function hexColor(n?: number | null) {
 
 const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
 
-// ── styles ────────────────────────────────────────────────────────────────────
-
+// inject once on modal open
+// only a spinner keyframe, everything else is inline styles
 const STYLE_ID = "ur-s8"
 function injectStyles() {
     if (document.getElementById(STYLE_ID)) return
     const s = document.createElement("style")
     s.id = STYLE_ID
     s.textContent = `
-        @keyframes ur-in   { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:none } }
         @keyframes ur-spin { to { transform:rotate(360deg) } }
-
-        .ur-card {
-            border-radius:14px; overflow:hidden; margin-bottom:6px;
-            border:1px solid var(--background-modifier-accent);
-            background:var(--background-secondary-alt, var(--background-secondary));
-            transition:border-color .18s, box-shadow .18s, transform .12s;
-            animation:ur-in .16s ease;
+        .ur-spin {
+            display:inline-block; width:12px; height:12px; border-radius:50%;
+            border:2px solid rgba(255,255,255,.3); border-top-color:#fff;
+            animation:ur-spin .6s linear infinite; vertical-align:middle;
         }
-        .ur-card:hover {
-            border-color:rgba(88,101,242,.5);
-            box-shadow:0 4px 24px rgba(0,0,0,.22);
-            transform:translateY(-1px);
-        }
-        .ur-row       { display:flex; align-items:center; gap:13px; padding:11px 13px; }
-        .ur-av        { width:46px; height:46px; border-radius:50%; object-fit:cover; display:block; flex-shrink:0; box-shadow:0 2px 8px rgba(0,0,0,.3); }
-        .ur-av-wrap   { position:relative; flex-shrink:0; }
-        .ur-av-dot    { position:absolute; bottom:0; right:0; width:11px; height:11px; border-radius:50%; background:var(--brand-500); border:2px solid var(--background-secondary); }
-        .ur-name      { font-weight:700; font-size:14px; color:var(--header-primary); line-height:1.2; }
-        .ur-sub       { font-size:11px; color:var(--text-muted); margin-top:2px; }
-        .ur-nick-pill { display:inline-block; font-size:10px; font-weight:700; padding:2px 8px; border-radius:20px; background:rgba(88,101,242,.2); color:var(--brand-400); margin-left:5px; }
-        .ur-actions   { display:flex; gap:2px; flex-shrink:0; margin-left:auto; }
-
-        .ur-ibtn {
-            display:inline-flex; align-items:center; justify-content:center;
-            width:30px; height:30px; border-radius:8px; cursor:pointer; font-size:14px;
-            transition:background .12s, color .12s, transform .1s;
-            color:var(--interactive-normal); background:transparent; user-select:none;
-        }
-        .ur-ibtn:hover   { background:var(--background-modifier-hover); color:var(--interactive-hover); transform:scale(1.1); }
-        .ur-ibtn.d:hover { background:rgba(237,66,69,.15); color:var(--status-danger); }
-
-        .ur-chips { display:grid; grid-template-columns:1fr 1fr; gap:5px; padding:4px 12px 12px; }
-        .ur-chip {
-            display:flex; align-items:center; gap:7px; padding:7px 10px; border-radius:9px;
-            border:1.5px solid var(--background-modifier-accent);
-            background:var(--background-tertiary); cursor:pointer; user-select:none;
-            transition:all .14s; opacity:.65;
-        }
-        .ur-chip.on           { border-color:rgba(88,101,242,.5); background:rgba(88,101,242,.12); opacity:1; }
-        .ur-chip-lbl          { flex:1; font-size:12px; font-weight:500; color:var(--text-muted); }
-        .ur-chip.on .ur-chip-lbl { color:var(--text-normal); }
-
-        .ur-tgl       { position:relative; width:30px; height:17px; border-radius:9px; flex-shrink:0; background:var(--background-modifier-accent); transition:background .14s; }
-        .ur-tgl.on    { background:var(--brand-500); }
-        .ur-tgl-thumb { position:absolute; top:2px; left:2px; width:13px; height:13px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:left .14s; }
-        .ur-tgl.on .ur-tgl-thumb { left:15px; }
-
-        .ur-spin { display:inline-block; width:12px; height:12px; border-radius:50%; border:2px solid rgba(255,255,255,.3); border-top-color:#fff; animation:ur-spin .6s linear infinite; vertical-align:middle; }
-        .ur-err  { display:flex; gap:10px; align-items:flex-start; margin-top:12px; padding:10px 13px; border-radius:10px; background:rgba(237,66,69,.08); border:1px solid rgba(237,66,69,.3); }
     `
     document.head.appendChild(s)
 }
 
-// ── ui primitives ─────────────────────────────────────────────────────────────
-// using div role=button everywhere bc actual <button> gets black text from UA stylesheet
+// hardcoded colors so we don't fight CSS variables
+// these match discord dark theme and won't randomly break if discord changes var names
+const C = {
+    headerPrimary:   "#f2f3f5",
+    headerSecondary: "#b5bac1",
+    textNormal:      "#dbdee1",
+    textMuted:       "#949ba4",
+    textDanger:      "#fa777c",
+    bgPrimary:       "#313338",
+    bgSecondary:     "#2b2d31",
+    bgTertiary:      "#1e1f22",
+    bgModifier:      "#3f4147",
+    brand:           "#5865f2",
+    brandLight:      "#949cf4",
+    white:           "#ffffff",
+    green:           "#3ba55d",
+    red:             "#ed4245",
+} as const
 
-function Btn({ onClick, style, title, ch }: { onClick: () => void; style?: any; title?: string; ch: any }) {
+function modalAvatarUrl(userId: string, hash?: string | null): string {
+    if (!hash) {
+        let idx = 0
+        try { idx = Number(BigInt(userId) % BigInt(6)) } catch { idx = parseInt(userId.slice(-1), 10) % 6 || 0 }
+        return `https://cdn.discordapp.com/embed/avatars/${idx}.png`
+    }
+    return `https://cdn.discordapp.com/avatars/${userId}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=64`
+}
+
+// custom toggle bc discord's Switch component is a pain to import reliably
+function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
     return (
-        <div role="button" tabIndex={0} title={title} onClick={onClick}
-            onKeyDown={(e: any) => { if (e.key === "Enter" || e.key === " ") onClick() }}
-            style={{ cursor: "pointer", userSelect: "none", ...style }}>
-            {ch}
+        <div
+            role="switch"
+            aria-checked={checked}
+            onClick={() => onChange(!checked)}
+            style={{
+                width: 40, height: 24, borderRadius: 12,
+                background: checked ? C.green : "#4e5058",
+                cursor: "pointer", position: "relative",
+                transition: "background 150ms ease", flexShrink: 0,
+            }}
+        >
+            <div style={{
+                position: "absolute", top: 2,
+                left: checked ? 18 : 2,
+                width: 20, height: 20, borderRadius: "50%",
+                background: C.white, boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+                transition: "left 150ms cubic-bezier(0.4,0,0.2,1)",
+            }} />
         </div>
     )
 }
 
-function IBtn({ onClick, title, danger, ch }: { onClick: () => void; title?: string; danger?: boolean; ch: any }) {
-    return (
-        <div role="button" tabIndex={0} title={title} onClick={onClick}
-            onKeyDown={(e: any) => { if (e.key === "Enter" || e.key === " ") onClick() }}
-            className={`ur-ibtn${danger ? " d" : ""}`}>
-            {ch}
-        </div>
-    )
-}
+type LookupState =
+    | { stage: "idle" }
+    | { stage: "loading" }
+    | { stage: "found"; data: any; avatar: string }
+    | { stage: "error"; msg: string }
 
-function Tgl({ on, toggle }: { on: boolean; toggle: () => void }) {
-    return (
-        <Btn onClick={toggle} ch={
-            <div className={`ur-tgl${on ? " on" : ""}`}>
-                <div className="ur-tgl-thumb" />
-            </div>
-        } />
-    )
-}
+// add user section at the top of the modal
+// two-step: enter id -> look up -> confirm with preview card
+function AddUserSection({ onAdded }: { onAdded: () => void }) {
+    const [rawId, setRawId]   = React.useState("")
+    const [label, setLabel]   = React.useState("")
+    const [lookup, setLookup] = React.useState<LookupState>({ stage: "idle" })
 
-function TabBtn({ active, onClick, ch }: { active: boolean; onClick: () => void; ch: any }) {
-    return (
-        <Btn onClick={onClick} ch={ch} style={{
-            flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 9, fontSize: 13,
-            fontWeight: active ? 700 : 500,
-            color: active ? "var(--header-primary)" : "var(--text-muted)",
-            background: active ? "var(--background-primary)" : "transparent",
-            boxShadow: active ? "0 1px 5px rgba(0,0,0,.25)" : "none",
-            transition: "background .12s, color .12s",
-        }} />
-    )
-}
+    const cleanId = rawId.trim().replace(/\D/g, "")
 
-// ── override chips ────────────────────────────────────────────────────────────
+    const doLookup = () => {
+        if (!cleanId)                                    { setLookup({ stage: "error", msg: "enter a user id first" }); return }
+        if (cleanId.length < 17 || cleanId.length > 20) { setLookup({ stage: "error", msg: "discord ids are 17-20 digits" }); return }
+        if (isWatched(settings, cleanId))                { setLookup({ stage: "error", msg: "already on your watchlist" }); return }
 
-const OV_ITEMS = [
-    { label: "Messages", icon: "💬", key: "msgs",    gk: "globalMsgs"    },
-    { label: "Edits",    icon: "✏️",  key: "edits",   gk: "globalEdits"   },
-    { label: "Deletes",  icon: "🗑",  key: "deletes", gk: "globalDeletes" },
-    { label: "Typing",   icon: "⌨️",  key: "typing",  gk: "globalTyping"  },
-    { label: "Profile",  icon: "🪪",  key: "profile", gk: "globalProfile" },
-    { label: "Avatar",   icon: "🖼️",  key: "avatar",  gk: "globalAvatar"  },
-    { label: "Voice",    icon: "🎙️",  key: "voice",   gk: "globalVoice"   },
-    { label: "Status",   icon: "🟢",  key: "status",  gk: "globalStatus"  },
-    { label: "Boosts",   icon: "🚀",  key: "boosts",  gk: "globalBoosts"  },
-] as const
+        setLookup({ stage: "loading" })
+        RestAPI.get({
+            url: `/users/${cleanId}/profile`,
+            query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+        }).then((res: any) => {
+            const data = camelize(res.body)
+            setLookup({ stage: "found", data: data.user, avatar: modalAvatarUrl(data.user.id, data.user.avatar) })
+        }).catch((e: any) => {
+            const s = e?.status ?? e?.response?.status
+            setLookup({
+                stage: "error",
+                msg: s === 404 ? "user not found"
+                   : s === 403 ? "profile is private (no shared server) — you can still add by id though"
+                   : `request failed${s ? ` (${s})` : ""}`,
+            })
+        })
+    }
 
-function Chip({ on, overridden, icon, label, onClick, onRight }: {
-    on: boolean; overridden: boolean; icon: string; label: string
-    onClick: () => void; onRight: () => void
-}) {
-    return (
-        <div className={`ur-chip${on ? " on" : ""}`} role="button" tabIndex={0}
-            onClick={onClick}
-            onContextMenu={(e: any) => { e.preventDefault(); onRight() }}
-            onKeyDown={(e: any) => { if (e.key === "Enter" || e.key === " ") onClick() }}
-            title={overridden ? "overriding global — right-click to reset" : "click to override global"}>
-            <span style={{ fontSize: 13 }}>{icon}</span>
-            <span className="ur-chip-lbl">{label}</span>
-            {overridden && <span style={{ fontSize: 7, color: "var(--brand-400)" }}>●</span>}
-            <Tgl on={on} toggle={onClick} />
-        </div>
-    )
-}
-
-// ── user card ─────────────────────────────────────────────────────────────────
-
-function UserCard({ user, refresh, remove }: { user: WatchedUser; refresh: () => void; remove: () => void }) {
-    const [nick,     setNick] = React.useState(user.nick ?? "")
-    const [expanded, setExp]  = React.useState(false)
-    const [editNick, setEdit] = React.useState(false)
-
-    const du        = React.useMemo(() => { try { return UserStore.getUser(user.id) ?? null } catch { return null } }, [user.id])
-    const av        = duAvatar(du, user.id)
-    const name      = (du ? displayName(du) : null) || user.nick || user.id
-    const ovs       = user.overrides ?? {} as any
-    const hasOv     = Object.values(ovs).some((v: any) => v !== null && v !== undefined)
-    const addedDate = React.useMemo(() => { try { return new Date(user.addedAt).toLocaleDateString() } catch { return "?" } }, [user.addedAt])
-
-    const saveNick = () => { patchUser(settings, user.id, { nick: nick.trim() }); setEdit(false); refresh() }
-    const setOv = (key: string, val: boolean | null) => {
-        patchUser(settings, user.id, { overrides: { ...ovs, [key]: val } as any })
-        refresh()
+    const doAdd = () => {
+        if (lookup.stage !== "found") return
+        addUser(settings, cleanId, label.trim())
+        setRawId(""); setLabel(""); setLookup({ stage: "idle" })
+        onAdded()
     }
 
     return (
-        <div className="ur-card">
-            <div className="ur-row">
-                <div className="ur-av-wrap">
-                    <img className="ur-av" src={av} alt="" onError={(e: any) => { e.target.src = FALLBACK_AV }} />
-                    {hasOv && <div className="ur-av-dot" />}
-                </div>
-
-                <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="ur-name">
-                        {name}
-                        {user.nick ? <span className="ur-nick-pill">{user.nick}</span> : null}
-                    </div>
-                    <div className="ur-sub">{user.id} · {addedDate}</div>
-                </div>
-
-                <div className="ur-actions">
-                    <IBtn onClick={() => setEdit(v => !v)} title="edit label" ch="✏️" />
-                    <IBtn onClick={() => setExp(v => !v)} title="per-user overrides"
-                        ch={<span style={{ fontSize: 10, fontWeight: 700 }}>{expanded ? "▲" : "▼"}</span>} />
-                    <IBtn onClick={remove} title="unwatch" danger ch="🗑" />
-                </div>
+        <div>
+            <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.headerPrimary, marginBottom: 10 }}>
+                add user
             </div>
 
-            {editNick && (
-                <div style={{ display: "flex", gap: 8, padding: "8px 12px 12px", borderTop: "1px solid var(--background-modifier-accent)", background: "var(--background-tertiary)" }}>
+            {lookup.stage !== "found" && (
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                     <div style={{ flex: 1 }}>
-                        <TextInput value={nick} onChange={(v: string) => setNick(v)}
-                            placeholder={`label for ${name}`}
-                            onKeyDown={(e: any) => { if (e.key === "Enter") saveNick(); if (e.key === "Escape") setEdit(false) }}
-                            autoFocus />
+                        <TextInput
+                            placeholder="paste a discord user id"
+                            value={rawId}
+                            onChange={(v: string) => { setRawId(v); if (lookup.stage === "error") setLookup({ stage: "idle" }) }}
+                            onKeyDown={(e: any) => { if (e.key === "Enter") doLookup() }}
+                            autoFocus
+                        />
+                        <div style={{ fontSize: 12, color: C.textMuted, marginTop: 4 }}>
+                            developer mode → right-click user → copy user id
+                        </div>
                     </div>
-                    <Button size={Button.Sizes.MEDIUM} onClick={saveNick}>Save</Button>
-                    <Button size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT} onClick={() => setEdit(false)}>Cancel</Button>
+                    <Button onClick={doLookup} disabled={lookup.stage === "loading"} size={Button.Sizes.MEDIUM} color={Button.Colors.BRAND}>
+                        {lookup.stage === "loading"
+                            ? <><span className="ur-spin" style={{ marginRight: 6 }} />looking up…</>
+                            : "look up"}
+                    </Button>
                 </div>
             )}
 
-            {expanded && (
-                <div style={{ borderTop: "1px solid var(--background-modifier-accent)" }}>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", padding: "8px 13px 3px" }}>
-                        per-user overrides · right-click a chip to reset it to global
+            {lookup.stage === "error" && (
+                <div style={{ fontSize: 13, color: C.textDanger, marginTop: 8 }}>{lookup.msg}</div>
+            )}
+
+            {lookup.stage === "found" && (
+                <div style={{ marginTop: 12 }}>
+                    {/* preview card */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 12, background: C.bgTertiary, borderRadius: 8, border: `1px solid ${C.bgModifier}` }}>
+                        <img src={lookup.avatar} style={{ width: 48, height: 48, borderRadius: "50%", flexShrink: 0 }}
+                            onError={(e: any) => { e.target.style.display = "none" }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 16, fontWeight: 600, color: C.headerPrimary }}>
+                                {lookup.data.globalName || lookup.data.username}
+                            </div>
+                            {lookup.data.globalName && (
+                                <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>@{lookup.data.username}</div>
+                            )}
+                            <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{lookup.data.id}</div>
+                        </div>
+                        {/* checkmark */}
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0, color: C.green }}>
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="currentColor"/>
+                        </svg>
                     </div>
-                    <div className="ur-chips">
-                        {OV_ITEMS.map(item => {
-                            const isOn = featureOn(settings, user.id, item.key as any, item.gk)
-                            const isOv = ovs[item.key] !== null && ovs[item.key] !== undefined
-                            return (
-                                <Chip key={item.key} on={isOn} overridden={isOv} icon={item.icon} label={item.label}
-                                    onClick={() => {
-                                        if (!isOv) setOv(item.key, !isOn)
-                                        else if (ovs[item.key] === true) setOv(item.key, false)
-                                        else setOv(item.key, null)
-                                    }}
-                                    onRight={() => setOv(item.key, null)} />
-                            )
-                        })}
+
+                    <div style={{ marginTop: 12 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.headerPrimary, marginBottom: 6 }}>
+                            label <span style={{ fontWeight: 400, color: C.textMuted }}>(optional, only you see this)</span>
+                        </div>
+                        <TextInput
+                            placeholder='e.g. "bestie", "the rat", "ex"'
+                            value={label}
+                            onChange={(v: string) => setLabel(v)}
+                            onKeyDown={(e: any) => { if (e.key === "Enter") doAdd() }}
+                            autoFocus
+                        />
                     </div>
-                    <div style={{ padding: "0 12px 12px" }}>
-                        <Button size={Button.Sizes.SMALL} color={Button.Colors.TRANSPARENT}
-                            onClick={() => {
-                                const r: any = {}
-                                OV_ITEMS.forEach(i => { r[i.key] = null })
-                                patchUser(settings, user.id, { overrides: r })
-                                refresh()
-                            }}>
-                            ↩ reset all to global
+
+                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                        <Button onClick={doAdd} size={Button.Sizes.MEDIUM} color={Button.Colors.GREEN} style={{ flex: 1 }}>
+                            add to watchlist
+                        </Button>
+                        <Button onClick={() => { setLookup({ stage: "idle" }); setLabel("") }} size={Button.Sizes.MEDIUM} look={Button.Looks.OUTLINED}>
+                            cancel
                         </Button>
                     </div>
                 </div>
@@ -457,240 +401,222 @@ function UserCard({ user, refresh, remove }: { user: WatchedUser; refresh: () =>
     )
 }
 
-// ── watchlist tab ─────────────────────────────────────────────────────────────
+// override rows config — what shows in the expanded per-user panel
+const OV_ROWS = [
+    { label: "messages", key: "msgs",     gk: "globalMsgs"     },
+    { label: "edits",    key: "edits",    gk: "globalEdits"    },
+    { label: "deletes",  key: "deletes",  gk: "globalDeletes"  },
+    { label: "typing",   key: "typing",   gk: "globalTyping"   },
+    { label: "profile",  key: "profile",  gk: "globalProfile"  },
+    { label: "avatar",   key: "avatar",   gk: "globalAvatar"   },
+    { label: "voice",    key: "voice",    gk: "globalVoice"    },
+    { label: "status",   key: "status",   gk: "globalStatus"   },
+    { label: "boosts",   key: "boosts",   gk: "globalBoosts"   },
+    { label: "activity", key: "activity", gk: "globalActivity" },
+    { label: "joins",    key: "joins",    gk: "globalJoins"    },
+] as const
 
-function WatchlistTab({ onUpdate }: { onUpdate: () => void }) {
-    const [users, setUsers]   = React.useState<WatchedUser[]>(() => { try { return getWatchlist(settings) } catch { return [] } })
-    const [search, setSearch] = React.useState("")
+// single user row in the watchlist
+function WatchedRow({ user, refresh, onRemove }: { user: WatchedUser; refresh: () => void; onRemove: () => void }) {
+    const [nick,     setNick]     = React.useState(user.nick || "")
+    const [expanded, setExpanded] = React.useState(false)
 
-    const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) }; onUpdate() }
+    const du   = UserStore.getUser(user.id)
+    const name = displayName(du) || user.id
+    const ava  = du ? modalAvatarUrl(du.id, (du as any).avatar) : modalAvatarUrl(user.id, null)
 
-    const shown = search.trim()
-        ? users.filter(u => {
-            try {
-                const du = UserStore.getUser(u.id)
-                return [displayName(du), u.nick ?? "", u.id].join(" ").toLowerCase().includes(search.toLowerCase())
-            } catch { return true }
-        })
-        : users
+    const saveNick = () => { patchUser(settings, user.id, { nick: nick || "" }); refresh() }
 
-    if (!users.length) return (
-        <div style={{ textAlign: "center", padding: "52px 20px" }}>
-            <div style={{ fontSize: 52, marginBottom: 14, opacity: .4 }}>👁</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--header-primary)", marginBottom: 6 }}>nothing here yet</div>
-            <div style={{ fontSize: 13, color: "var(--text-muted)" }}>hit "+ add user" to start tracking someone</div>
-        </div>
-    )
+    const setOv = (key: keyof WatchedUser["overrides"], val: boolean | null) => {
+        patchUser(settings, user.id, { overrides: { ...user.overrides, [key]: val } })
+        refresh()
+    }
 
     return (
-        <>
-            {users.length > 3 && (
-                <div style={{ marginBottom: 10 }}>
-                    <TextInput value={search} onChange={(v: string) => setSearch(v)} placeholder="search by name, label, or id…" />
-                </div>
-            )}
-            {shown.length === 0
-                ? <div style={{ textAlign: "center", padding: "24px 0", fontSize: 13, color: "var(--text-muted)" }}>no results for "{search}"</div>
-                : shown.map(u => (
-                    <UserCard key={u.id} user={u} refresh={refresh}
-                        remove={() => { removeUser(settings, u.id); refresh() }} />
-                ))
-            }
-        </>
-    )
-}
+        <div style={{ background: C.bgSecondary, borderRadius: 8, marginBottom: 8, overflow: "hidden" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px" }}>
 
-// ── add user tab ──────────────────────────────────────────────────────────────
-
-type LK =
-    | { stage: "idle" }
-    | { stage: "loading" }
-    | { stage: "found"; user: any; av: string; banner: string | null; accent: string | null }
-    | { stage: "error"; msg: string }
-
-function AddTab({ onAdded }: { onAdded: () => void }) {
-    const [rawId, setRawId] = React.useState("")
-    const [label, setLabel] = React.useState("")
-    const [lk, setLk]       = React.useState<LK>({ stage: "idle" })
-
-    const cleanId = rawId.trim().replace(/\D/g, "")
-
-    const doLookup = () => {
-        if (!cleanId)                                    return setLk({ stage: "error", msg: "paste a user id first" })
-        if (cleanId.length < 17 || cleanId.length > 20) return setLk({ stage: "error", msg: "discord ids are 17-20 digits" })
-        if (isWatched(settings, cleanId))                return setLk({ stage: "error", msg: "already watching this person" })
-
-        setLk({ stage: "loading" })
-        RestAPI.get({
-            url: `/users/${cleanId}/profile`,
-            query: { with_mutual_guilds: false, with_mutual_friends_count: false },
-        }).then((res: any) => {
-            const d = camelize(res.body)
-            setLk({
-                stage: "found",
-                user:   d.user,
-                av:     safeAvatar(d.user?.id ?? cleanId, d.user?.avatar, 128),
-                banner: bannerUrl(d.user?.id ?? cleanId, d.user?.banner),
-                accent: hexColor(d.user?.accentColor),
-            })
-        }).catch((e: any) => {
-            const s = e?.status ?? e?.response?.status
-            setLk({
-                stage: "error",
-                msg: s === 404 ? "user not found"
-                   : s === 403 ? "profile is private — you can still add by id"
-                   : `request failed${s ? ` (${s})` : ""}`,
-            })
-        })
-    }
-
-    const doAdd = () => {
-        if (lk.stage !== "found") return
-        addUser(settings, cleanId, label.trim())
-        setRawId(""); setLabel(""); setLk({ stage: "idle" })
-        onAdded()
-    }
-
-    if (lk.stage === "found") return (
-        <div>
-            <div style={{ borderRadius: 12, overflow: "hidden", marginBottom: 16, border: "1px solid var(--background-modifier-accent)" }}>
-                <div style={{
-                    height: lk.banner ? 96 : 64, position: "relative",
-                    background: lk.banner
-                        ? `url(${lk.banner}) center/cover no-repeat`
-                        : lk.accent
-                            ? `linear-gradient(135deg, ${lk.accent}bb, ${lk.accent}44)`
-                            : "linear-gradient(135deg, #5865f2, #4752c4)",
-                }}>
-                    <img src={lk.av} alt="" style={{
-                        position: "absolute", bottom: -24, left: 16,
-                        width: 58, height: 58, borderRadius: "50%",
-                        border: "4px solid var(--modal-background, var(--background-primary))",
-                        objectFit: "cover", boxShadow: "0 2px 12px rgba(0,0,0,.4)",
-                    }} onError={(e: any) => { e.target.src = FALLBACK_AV }} />
-                </div>
-                <div style={{ padding: "30px 16px 14px", background: "var(--background-secondary)" }}>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: "var(--header-primary)" }}>
-                        {lk.user?.globalName || lk.user?.username || cleanId}
-                    </div>
-                    {lk.user?.globalName && (
-                        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 2 }}>@{lk.user.username}</div>
-                    )}
-                    {lk.user?.bio && (
-                        <div style={{ fontSize: 13, color: "var(--text-normal)", marginTop: 8, lineHeight: 1.45, opacity: .8, overflow: "hidden", maxHeight: "2.9em" }}>
-                            {lk.user.bio}
+                {/* click this area to expand overrides */}
+                <div onClick={() => setExpanded(e => !e)}
+                    style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, cursor: "pointer" }}>
+                    <img src={ava} style={{ width: 40, height: 40, borderRadius: "50%", flexShrink: 0 }}
+                        onError={(e: any) => { e.target.style.display = "none" }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 14, fontWeight: 600, color: C.headerPrimary }}>{name}</span>
+                            {user.nick && (
+                                <span style={{ background: C.brand, color: C.white, fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                                    {user.nick}
+                                </span>
+                            )}
                         </div>
-                    )}
+                        <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>
+                            {user.id} · {new Date(user.addedAt).toLocaleDateString()}
+                        </div>
+                    </div>
+                </div>
+
+                {/* label input — stop propagation so it doesn't toggle expand */}
+                <div onClick={(e: any) => e.stopPropagation()} style={{ width: 100, flexShrink: 0 }}>
+                    <TextInput
+                        placeholder="label"
+                        value={nick}
+                        onChange={(v: string) => setNick(v)}
+                        onBlur={saveNick}
+                        onKeyDown={(e: any) => { if (e.key === "Enter") saveNick() }}
+                    />
+                </div>
+
+                {/* chevron */}
+                <div style={{ color: C.textMuted, padding: 4, display: "flex", alignItems: "center", transform: expanded ? "rotate(180deg)" : "none", transition: "transform 200ms ease" }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
+                    </svg>
+                </div>
+
+                {/* remove button */}
+                <div
+                    role="button" tabIndex={0}
+                    onClick={(e: any) => { e.stopPropagation(); onRemove() }}
+                    onKeyDown={(e: any) => { if (e.key === "Enter") onRemove() }}
+                    style={{ color: C.red, cursor: "pointer", padding: 4, display: "flex", alignItems: "center" }}
+                >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                    </svg>
                 </div>
             </div>
 
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--header-secondary)", marginBottom: 6 }}>
-                label <span style={{ fontWeight: 400, textTransform: "none", color: "var(--text-muted)" }}>— optional</span>
-            </div>
-            <TextInput value={label} onChange={(v: string) => setLabel(v)}
-                placeholder={'e.g. "bestie", "the rat", "coworker"'}
-                onKeyDown={(e: any) => { if (e.key === "Enter") doAdd() }}
-                autoFocus />
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 5, marginBottom: 16 }}>only you can see this</div>
-            <div style={{ display: "flex", gap: 8 }}>
-                <Button onClick={doAdd} size={Button.Sizes.MEDIUM} style={{ flex: 1 }}>Add to Watchlist</Button>
-                <Button onClick={() => { setLk({ stage: "idle" }); setLabel("") }} size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT}>
-                    Cancel
-                </Button>
-            </div>
-        </div>
-    )
-
-    return (
-        <div>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--header-secondary)", marginBottom: 6 }}>
-                user id
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}>
-                    <TextInput value={rawId}
-                        onChange={(v: string) => { setRawId(v); if (lk.stage === "error") setLk({ stage: "idle" }) }}
-                        placeholder="e.g. 123456789012345678"
-                        onKeyDown={(e: any) => { if (e.key === "Enter") doLookup() }}
-                        autoFocus />
-                </div>
-                <Button onClick={doLookup} size={Button.Sizes.MEDIUM}
-                    disabled={lk.stage === "loading" || !rawId.trim()} style={{ flexShrink: 0 }}>
-                    {lk.stage === "loading"
-                        ? <><span className="ur-spin" style={{ marginRight: 6 }} />looking up…</>
-                        : "Look Up"}
-                </Button>
-            </div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-                enable <strong style={{ color: "var(--text-normal)" }}>developer mode</strong> → right-click any user → copy user id
-            </div>
-            {lk.stage === "error" && (
-                <div className="ur-err">
-                    <span style={{ flexShrink: 0 }}>⚠️</span>
-                    <span style={{ fontSize: 13, color: "var(--status-danger)" }}>{lk.msg}</span>
+            {/* per-user overrides panel */}
+            {expanded && (
+                <div style={{ padding: "0 14px 12px", borderTop: `1px solid ${C.bgModifier}` }}>
+                    <div style={{ marginTop: 10, marginBottom: 4, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.8, color: C.headerSecondary }}>
+                        per-user overrides
+                    </div>
+                    {OV_ROWS.map(row => {
+                        const effective    = featureOn(settings, user.id, row.key as any, row.gk)
+                        const isOverridden = (user.overrides as any)[row.key] !== null && (user.overrides as any)[row.key] !== undefined
+                        return (
+                            <div key={row.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
+                                <div style={{ flex: 1, fontSize: 12, color: C.textMuted }}>
+                                    {row.label}
+                                    {isOverridden && (
+                                        <span style={{ color: C.brandLight, marginLeft: 6, fontSize: 11, fontWeight: 500 }}>overriding global</span>
+                                    )}
+                                </div>
+                                <Switch checked={effective} onChange={v => setOv(row.key as any, v)} />
+                                {/* reset to global button, only shows when overriding */}
+                                {isOverridden && (
+                                    <div
+                                        role="button" tabIndex={0} title="reset to global"
+                                        onClick={() => setOv(row.key as any, null)}
+                                        onKeyDown={(e: any) => { if (e.key === "Enter") setOv(row.key as any, null) }}
+                                        style={{ color: C.textMuted, cursor: "pointer", fontSize: 13, padding: "0 4px" }}
+                                    >
+                                        ↩
+                                    </div>
+                                )}
+                            </div>
+                        )
+                    })}
                 </div>
             )}
         </div>
     )
 }
-
-// ── modal ─────────────────────────────────────────────────────────────────────
 
 function WatchlistModal({ modalProps }: { modalProps: any }) {
     React.useEffect(() => { injectStyles() }, [])
 
-    const [tab,   setTab]   = React.useState<"list" | "add">("list")
-    const [count, setCount] = React.useState(() => { try { return getWatchlist(settings).length } catch { return 0 } })
-    const refreshCount = () => { try { setCount(getWatchlist(settings).length) } catch { setCount(0) } }
+    const [users, setUsers] = React.useState<WatchedUser[]>(() => { try { return getWatchlist(settings) } catch { return [] } })
+    const [query, setQuery] = React.useState("")
+
+    const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) } }
+
+    const filtered = users.filter(u => {
+        if (!query.trim()) return true
+        const q  = query.toLowerCase()
+        const du = UserStore.getUser(u.id)
+        return [displayName(du), u.nick ?? "", u.id].join(" ").toLowerCase().includes(q)
+    })
 
     return (
-        <ModalRoot {...modalProps} size={ModalSize.MEDIUM}>
+        <ModalRoot {...modalProps} size={ModalSize.LARGE}>
             <ModalHeader separator={false}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "2px 0" }}>
-                    <div style={{
-                        width: 32, height: 32, borderRadius: 10, flexShrink: 0,
-                        background: "linear-gradient(135deg, #5865f2, #4752c4)",
-                        display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17,
-                    }}>👁</div>
-                    <span style={{ fontSize: 17, fontWeight: 800, color: "var(--header-primary)" }}>UserRadar</span>
-                    {count > 0 && (
-                        <span style={{ background: "var(--brand-500)", color: "#fff", borderRadius: 12, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>
-                            {count}
-                        </span>
-                    )}
+                <div style={{ flex: 1, fontSize: 20, fontWeight: 700, color: C.headerPrimary }}>
+                    👁 UserRadar
                 </div>
+                <ModalCloseButton onClick={modalProps.onClose} />
             </ModalHeader>
-            <ModalContent style={{ padding: "2px 14px 24px" }}>
-                <div style={{ display: "flex", gap: 3, padding: 4, background: "var(--background-secondary)", borderRadius: 12, marginBottom: 14 }}>
-                    <TabBtn active={tab === "list"} onClick={() => setTab("list")} ch={`Watchlist${count > 0 ? ` (${count})` : ""}`} />
-                    <TabBtn active={tab === "add"}  onClick={() => setTab("add")}  ch="+ Add User" />
+
+            <ModalContent style={{ paddingBottom: 16 }}>
+                <div style={{ padding: "0 16px" }}>
+                    <AddUserSection onAdded={refresh} />
+
+                    <div style={{ height: 1, background: C.bgModifier, margin: "16px 0" }} />
+
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                        <div style={{ flex: 1, fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.headerPrimary }}>
+                            watchlist <span style={{ color: C.textMuted, fontWeight: 400 }}>({users.length})</span>
+                        </div>
+                        {users.length > 3 && (
+                            <div style={{ width: 220 }}>
+                                <TextInput placeholder="search name, label, id…" value={query} onChange={(v: string) => setQuery(v)} />
+                            </div>
+                        )}
+                    </div>
+
+                    {users.length === 0 && (
+                        <div style={{ textAlign: "center", padding: "40px 0" }}>
+                            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.5 }}>👻</div>
+                            <div style={{ fontSize: 15, fontWeight: 600, color: C.headerPrimary }}>nobody here yet</div>
+                            <div style={{ fontSize: 13, color: C.textMuted, marginTop: 4 }}>add someone above to start tracking them</div>
+                        </div>
+                    )}
+
+                    {filtered.length === 0 && users.length > 0 && (
+                        <div style={{ textAlign: "center", padding: "24px 0", fontSize: 13, color: C.textMuted }}>
+                            no results for "{query}"
+                        </div>
+                    )}
+
+                    {filtered.map(u => (
+                        <WatchedRow key={u.id} user={u} refresh={refresh}
+                            onRemove={() => { removeUser(settings, u.id); refresh() }} />
+                    ))}
                 </div>
-                {tab === "list" && <WatchlistTab onUpdate={refreshCount} />}
-                {tab === "add"  && <AddTab onAdded={() => { refreshCount(); setTab("list") }} />}
             </ModalContent>
+
+            <ModalFooter>
+                <div style={{ fontSize: 12, color: C.textMuted, flex: 1 }}>
+                    {users.length} user{users.length !== 1 ? "s" : ""} watched
+                </div>
+                <Button onClick={modalProps.onClose} look={Button.Looks.OUTLINED} color={Button.Colors.PRIMARY}>
+                    close
+                </Button>
+            </ModalFooter>
         </ModalRoot>
     )
 }
 
-// ── plugin ────────────────────────────────────────────────────────────────────
-
 export default definePlugin({
     name: "UserRadar",
-    description: "get notified when watched users message, edit/delete, type, change profile/avatar, join voice, change status, boost",
+    description: "track users and get notified when they message, edit, delete, type, change profile/avatar, vc, status, activity, boost, join/leave servers",
     authors: [{ id: 641266820187160576, name: "k1ng_op" }],
     settings,
 
     settingsAboutComponent() {
         return (
             <div>
-                <Text variant="heading-sm/semibold" style={{ marginBottom: 8 }}>Watchlist</Text>
+                <Text variant="heading-sm/semibold" style={{ marginBottom: 8 }}>watchlist</Text>
                 <Text variant="text-sm/normal" style={{ color: "var(--text-muted)", marginBottom: 12 }}>
-                    manage who you're tracking below, or right-click any user → watch user to add on the fly
+                    manage who you're tracking, or right-click any user → watch user
                 </Text>
                 <button
                     style={{ background: "var(--brand-500)", color: "#fff", border: "none", borderRadius: 4, padding: "8px 14px", cursor: "pointer", fontWeight: 600, fontSize: 14, width: "100%" }}
-                    onClick={() => openModal(p => <WatchlistModal modalProps={p} />)}>
-                    open watchlist manager
+                    onClick={() => openModal(p => <WatchlistModal modalProps={p} />)}
+                >
+                    open watchlist
                 </button>
             </div>
         )
@@ -709,7 +635,7 @@ export default definePlugin({
             const dn    = label ? `${label} (${name})` : name
             const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
 
-            // type 8 = boost, type 7 = server join
+            // type 8 = boost message, type 7 = server join message
             if (message.type === 8) {
                 if (!featureOn(settings, message.author.id, "boosts", "globalBoosts")) return
                 push({ title: `${dn} boosted a server 🚀`, body: "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
@@ -793,7 +719,7 @@ export default definePlugin({
             })
         },
 
-        // USER_UPDATE fires on ws for username/avatar changes — fast path
+        // websocket pushes username/avatar changes instantly, good for fast detection
         USER_UPDATE(evt: { user: any }) {
             if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
             const old = profileCache[evt.user.id]
@@ -801,7 +727,7 @@ export default definePlugin({
             checkProfile(evt.user.id, { ...old, user: { ...old.user, ...camelize(evt.user) } })
         },
 
-        // USER_PROFILE_FETCH_SUCCESS fires when discord fetches a profile (e.g. you open their profile)
+        // fires when discord fetches someone's profile (opening their card, visiting profile etc)
         async USER_PROFILE_FETCH_SUCCESS(rawEvt: ProfileFetchEvent) {
             if (!rawEvt?.user?.id) return
             checkProfile(rawEvt.user.id, camelize(rawEvt))
@@ -814,7 +740,7 @@ export default definePlugin({
 
                 const prev = vcCache[userId] ?? null
                 vcCache[userId] = channelId ?? null
-                if (prev === (channelId ?? null)) continue
+                if (prev === (channelId ?? null)) continue  // no actual change
 
                 const u     = UserStore.getUser(userId)
                 const label = getWatchedUser(settings, userId)?.nick
@@ -836,23 +762,101 @@ export default definePlugin({
         PRESENCE_UPDATES(evt: PresenceEvent) {
             for (const update of evt.updates ?? []) {
                 const { id } = update.user
-                if (!featureOn(settings, id, "status", "globalStatus")) continue
-
-                const prev = statusCache[id]
-                statusCache[id] = update.status
-                if (!prev || prev === update.status) continue
+                if (!isWatched(settings, id)) continue
 
                 const u     = UserStore.getUser(id)
                 const label = getWatchedUser(settings, id)?.nick
+                const dn    = label ? `${label} (${displayName(u)})` : displayName(u)
                 const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
 
-                push({
-                    title: `${label ? `${label} (${displayName(u)})` : displayName(u)} is now ${update.status} ${STATUS_EMOJI[update.status] ?? ""}`,
-                    body: `was: ${prev} ${STATUS_EMOJI[prev] ?? ""}`,
-                    icon,
-                    onClick: () => openUserProfile(id),
-                })
+                // status tracking
+                if (featureOn(settings, id, "status", "globalStatus")) {
+                    const prev = statusCache[id]
+                    statusCache[id] = update.status
+                    if (prev && prev !== update.status) {
+                        push({
+                            title: `${dn} is now ${update.status} ${STATUS_EMOJI[update.status] ?? ""}`,
+                            body: `was: ${prev} ${STATUS_EMOJI[prev] ?? ""}`,
+                            icon,
+                            onClick: () => openUserProfile(id),
+                        })
+                    }
+                }
+
+                // activity tracking (playing/listening/watching/competing)
+                // type 4 = custom status, we skip that one
+                if (featureOn(settings, id, "activity", "globalActivity")) {
+                    const ACT_VERB: Record<number, string> = {
+                        0: "playing",
+                        2: "listening to",
+                        3: "watching",
+                        5: "competing in",
+                    }
+
+                    const act    = (update.activities ?? []).find((a: any) => a.type !== 4) ?? null
+                    const actKey = act ? `${act.type}:${act.name}` : null
+                    const prevKey = activityCache[id] ?? null
+                    activityCache[id] = actKey
+
+                    if (prevKey !== actKey && activityCache[id] !== undefined) {
+                        if (act) {
+                            const verb   = ACT_VERB[act.type] ?? "doing"
+                            const detail = act.details ? ` — ${act.details}` : ""
+                            push({
+                                title: `${dn} is ${verb} ${act.name}`,
+                                body: `${act.state ?? ""}${detail}`.trim() || `${verb} ${act.name}`,
+                                icon,
+                                onClick: () => openUserProfile(id),
+                            })
+                        } else if (prevKey) {
+                            push({
+                                title: `${dn} stopped their activity`,
+                                body: "no longer active",
+                                icon,
+                                onClick: () => openUserProfile(id),
+                            })
+                        }
+                    }
+                }
             }
+        },
+
+        // fires when someone joins a server you're in
+        GUILD_MEMBER_ADD(evt: GuildMemberEvent) {
+            if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
+            if (!featureOn(settings, evt.user.id, "joins", "globalJoins")) return
+
+            const u     = UserStore.getUser(evt.user.id)
+            const label = getWatchedUser(settings, evt.user.id)?.nick
+            const dn    = label ? `${label} (${displayName(u ?? evt.user)})` : displayName(u ?? evt.user)
+            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : safeAvatar(evt.user.id, evt.user.avatar)
+            const guild = (findByProps("getGuild")?.getGuild(evt.guildId) as any)
+
+            push({
+                title: `${dn} joined a server`,
+                body: guild?.name ?? "click to view",
+                icon,
+                onClick: () => jumpTo(evt.guildId),
+            })
+        },
+
+        // fires when someone leaves/gets kicked/banned from a server you're in
+        GUILD_MEMBER_REMOVE(evt: GuildMemberEvent) {
+            if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
+            if (!featureOn(settings, evt.user.id, "joins", "globalJoins")) return
+
+            const u     = UserStore.getUser(evt.user.id)
+            const label = getWatchedUser(settings, evt.user.id)?.nick
+            const dn    = label ? `${label} (${displayName(u ?? evt.user)})` : displayName(u ?? evt.user)
+            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : safeAvatar(evt.user.id, evt.user.avatar)
+            const guild = (findByProps("getGuild")?.getGuild(evt.guildId) as any)
+
+            push({
+                title: `${dn} left a server`,
+                body: guild?.name ?? "click to view",
+                icon,
+                onClick: () => openUserProfile(evt.user.id),
+            })
         },
     },
 
@@ -863,7 +867,7 @@ export default definePlugin({
             Notification.requestPermission()
         }
 
-        // pre-fetch profiles as baseline so we don't false-positive on first poll
+        // pre-fetch everyone's profile so the first poll doesn't spam false positives
         for (const wu of getWatchlist(settings)) {
             try {
                 const { body } = await RestAPI.get({
@@ -878,16 +882,17 @@ export default definePlugin({
 
         tryLoadLoggedMsgs().then(m => {
             if (m) log.info("hooked into message logger")
-            else   log.warn("message logger not found, delete content unavailable")
+            else   log.warn("message logger not found — delete content won't be available")
         })
     },
 
     stop() {
         removeContextMenuPatch("user-context", userContextPatch)
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-        for (const k in profileCache) delete profileCache[k]
-        for (const k in vcCache)      delete vcCache[k]
-        for (const k in statusCache)  delete statusCache[k]
+        for (const k in profileCache)  delete profileCache[k]
+        for (const k in vcCache)       delete vcCache[k]
+        for (const k in statusCache)   delete statusCache[k]
+        for (const k in activityCache) delete activityCache[k]
         loggedMsgs = null
     },
 
@@ -907,13 +912,12 @@ export default definePlugin({
     unwatchUser(id: string) {
         const u = UserStore.getUser(id)
         removeUser(settings, id)
-        delete profileCache[id]; delete vcCache[id]; delete statusCache[id]
+        delete profileCache[id]; delete vcCache[id]; delete statusCache[id]; delete activityCache[id]
         Toasts.show({ type: Toasts.Type.SUCCESS, message: `stopped watching ${displayName(u)}`, id: Toasts.genId() })
     },
 })
 
-// ── context menu ──────────────────────────────────────────────────────────────
-
+// right-click context menu patch
 const userContextPatch: NavContextMenuPatchCallback = (children, props) => {
     if (!props?.user) return
     if (props.user.id === UserStore.getCurrentUser()?.id) return  // don't watch yourself lol
@@ -927,16 +931,18 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props) => {
         <Menu.MenuGroup id="userradar-group">
             <Menu.MenuItem
                 id="userradar-toggle"
-                label={watching ? "👁 Stop Watching" : "👁 Watch User"}
+                label={watching ? "👁 stop watching" : "👁 watch user"}
                 action={() => {
                     const p = Vencord.Plugins.plugins["UserRadar"] as any
                     watching ? p.unwatchUser(id) : p.watchUser(id)
-                }} />
+                }}
+            />
             {watching && (
                 <Menu.MenuItem
                     id="userradar-manage"
-                    label="⚙ Manage Watchlist"
-                    action={() => openModal(p => <WatchlistModal modalProps={p} />)} />
+                    label="⚙ manage watchlist"
+                    action={() => openModal(p => <WatchlistModal modalProps={p} />)}
+                />
             )}
         </Menu.MenuGroup>
     )
