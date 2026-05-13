@@ -1,4 +1,5 @@
-// types.ts - k1ng_op
+// types for userradar
+// k1ng_op
 
 export type Status = "online" | "idle" | "dnd" | "offline" | "invisible"
 
@@ -9,11 +10,16 @@ export interface MsgCreateEvent {
     optimistic: boolean
     message: {
         id: string
-        type: number
+        type: number  // 0=normal, 7=join, 8=boost
         content: string
         channel_id: string
         attachments: { filename: string; url: string }[]
-        author: { id: string; username: string; global_name?: string; avatar?: string }
+        author: {
+            id: string
+            username: string
+            global_name?: string
+            avatar?: string
+        }
     }
 }
 
@@ -26,7 +32,11 @@ export interface MsgUpdateEvent {
         channel_id: string
         edited_timestamp: string
         attachments: { filename: string }[]
-        author: { id: string; username: string; global_name?: string }
+        author: {
+            id: string
+            username: string
+            global_name?: string
+        }
     }
 }
 
@@ -54,7 +64,7 @@ export interface PresenceEvent {
         user: { id: string }
         status: Status
         activities: {
-            type: number   // 0=playing, 2=listening, 3=watching, 5=competing
+            type: number   // 0=playing 2=listening 3=watching 4=custom 5=competing
             name: string
             details?: string
             state?: string
@@ -67,33 +77,44 @@ export interface ProfileFetchEvent {
         id: string
         username: string
         global_name?: string
-        globalName?: string
+        globalName?: string   // camelized version
         avatar?: string
         bio?: string
         banner?: string
         banner_color?: string
         accent_color?: number | null
-        accentColor?: number | null
+        accentColor?: number | null  // camelized
     }
     [k: string]: any
 }
 
+export interface GuildMemberEvent {
+    guildId: string
+    user: {
+        id: string
+        username: string
+        global_name?: string
+        avatar?: string
+    }
+}
+
+// one person on the watchlist
 export interface WatchedUser {
     id: string
-    nick: string        // custom label only you see, e.g. "my ex", "the rat"
-    addedAt: number
-    // null = don't override, just use the global toggle
+    nick: string     // your personal label, e.g. "my ex", "the rat from work"
+    addedAt: number  // timestamp so we can show when they were added
+    // per-user overrides — null means "just use the global setting"
     overrides: {
-        msgs:    boolean | null
-        edits:   boolean | null
-        deletes: boolean | null
-        typing:  boolean | null
-        profile: boolean | null
-        voice:   boolean | null
-        status:  boolean | null
+        msgs:     boolean | null
+        edits:    boolean | null
+        deletes:  boolean | null
+        typing:   boolean | null
+        profile:  boolean | null
+        avatar:   boolean | null
+        voice:    boolean | null
+        status:   boolean | null
         boosts:   boolean | null
-        avatar:   boolean | null  // avatar-only changes (separate from full profile)
-        activity: boolean | null  // playing/listening/watching activity changes
-        joins:    boolean | null  // server join/leave events
+        activity: boolean | null
+        joins:    boolean | null
     }
 }
