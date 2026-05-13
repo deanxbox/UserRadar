@@ -1,6 +1,17 @@
 // index.tsx
 // k1ng_op — userradar
 // basically a stalker plugin lol, tracks people and notifies you when they do stuff
+// messages, edits, deletes, typing, profile/avatar, voice, status, activity, boosts, server joins
+//
+// bugs fixed in this version:
+// - accent color false positives: discord sends null/0/undefined interchangeably, normalized now
+// - guild join/leave false positives: was using MESSAGE_CREATE type 7 for joins which fires
+//   for anyone in the channel seeing the join message — switched to GUILD_MEMBER_ADD/REMOVE
+//   which only fires for the actual member event
+// - typing not working in servers: TYPING_START fires for all channels but we need to check
+//   if user is actually watched, not just bail early on skipCurrentChannel
+// - activity cache init bug: was checking `uid in activityCache` but cache starts empty
+//   so first presence update always fired a notif — fixed with explicit undefined check
 
 import { addContextMenuPatch, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu"
 import { Notifications } from "@api/index"
@@ -24,16 +35,19 @@ import {
     TypingEvent, VoiceStateEvent, WatchedUser
 } from "./types"
 
-// in-memory state, resets when plugin stops
-const profileCache:  Record<string, any>          = {}  // last profile snapshot we saw per user
-const vcCache:       Record<string, string | null> = {}  // what vc they were last in
-const statusCache:   Record<string, string>         = {}  // last status
-const activityCache: Record<string, string | null>  = {}  // last activity (game/music/etc)
+// runtime caches — wiped when plugin stops
+const profileCache:  Record<string, any>           = {}
+const vcCache:       Record<string, string | null>  = {}
+const statusCache:   Record<string, string>          = {}
+// activityCache stores undefined = never seen, null = no activity, string = has activity
+// this distinction matters so we don't fire a notif on the very first presence update
+const activityCache: Record<string, string | null | undefined> = {}
+
 let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
 
-// hook into vc-message-logger-enhanced if it's installed
-// gives us deleted message content, otherwise we just say "message was deleted"
+// hook into vc-message-logger-enhanced for deleted message content
+// if not installed, deletes just say "message was deleted"
 async function tryLoadLoggedMsgs() {
     if (loggedMsgs) return loggedMsgs
     for (const prefix of ["plugins", "userplugins"]) {
@@ -47,35 +61,39 @@ async function tryLoadLoggedMsgs() {
     return null
 }
 
+// -- settings --
+
 const settings = definePluginSettings({
-    watchlist:          { type: OptionType.STRING,  default: "[]",    hidden: true,  description: "watchlist json — don't touch" },
-    globalMsgs:         { type: OptionType.BOOLEAN, default: true,                   description: "notify: messages" },
-    globalEdits:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: edits" },
-    globalDeletes:      { type: OptionType.BOOLEAN, default: true,                   description: "notify: deletes (needs vc-message-logger-enhanced for content)" },
-    globalTyping:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: typing" },
-    globalProfile:      { type: OptionType.BOOLEAN, default: true,                   description: "notify: profile changes (bio, banner, username etc)" },
-    globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: avatar changes" },
-    globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: voice joins/leaves/moves" },
-    globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "notify: status changes (pretty spammy, off by default)" },
-    globalBoosts:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: server boosts" },
-    globalActivity:     { type: OptionType.BOOLEAN, default: false,                  description: "notify: activity changes (game/music/etc) — very spammy, off by default" },
-    globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: server joins/leaves" },
-    showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message content in notifs" },
+    watchlist:          { type: OptionType.STRING,  hidden: true,  default: "[]",    description: "watchlist json — managed by the ui, don't touch" },
+    globalMsgs:         { type: OptionType.BOOLEAN, default: true,                   description: "messages" },
+    globalEdits:        { type: OptionType.BOOLEAN, default: true,                   description: "message edits" },
+    globalDeletes:      { type: OptionType.BOOLEAN, default: true,                   description: "message deletes (content needs vc-message-logger-enhanced)" },
+    globalTyping:       { type: OptionType.BOOLEAN, default: true,                   description: "typing (works in servers and dms)" },
+    globalProfile:      { type: OptionType.BOOLEAN, default: true,                   description: "profile changes (bio, banner, username, colors)" },
+    globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "avatar changes" },
+    globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "voice joins / leaves / moves" },
+    globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "status changes — spammy, off by default" },
+    globalBoosts:       { type: OptionType.BOOLEAN, default: true,                   description: "server boosts" },
+    globalActivity:     { type: OptionType.BOOLEAN, default: false,                  description: "activity changes (playing, listening, watching) — very spammy, off by default" },
+    globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "server joins / leaves (only servers you're in)" },
+    showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message content in notifications" },
     previewLen:         { type: OptionType.NUMBER,  default: 120,                    description: "max chars in preview (0 = no limit)" },
-    quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "mute notifs during certain hours" },
-    quietStart:         { type: OptionType.STRING,  default: "23:00",                description: "quiet hours start (24h)" },
-    quietEnd:           { type: OptionType.STRING,  default: "07:00",                description: "quiet hours end (24h)" },
-    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,                   description: "skip notif if you're already in that channel" },
+    quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "silence all notifications during certain hours" },
+    quietStart:         { type: OptionType.STRING,  default: "23:00",                description: "quiet hours start (24h, e.g. 23:00)" },
+    quietEnd:           { type: OptionType.STRING,  default: "07:00",                description: "quiet hours end (24h, e.g. 07:00)" },
+    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,                   description: "skip notification if you're already in that channel" },
     debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "log all events to console" },
 })
+
+// -- notif helpers --
 
 function trunc(s: string, max: number) {
     return max > 0 && s.length > max ? s.slice(0, max) + "…" : s
 }
 
-function preview(content: string, file?: string) {
+function msgPreview(content: string, filename?: string) {
     if (!settings.store.showPreview) return "click to jump"
-    return trunc(content || file || "click to jump", settings.store.previewLen)
+    return trunc(content || filename || "click to jump", settings.store.previewLen)
 }
 
 function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
@@ -83,16 +101,13 @@ function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
     if (channelId) findByProps("selectChannel")?.selectChannel({ guildId: guildId ?? "@me", channelId, messageId: msgId })
 }
 
-function push(opts: { title: string; body: string; icon?: string; onClick?: () => void }) {
+function notify(opts: { title: string; body: string; icon?: string; onClick?: () => void }) {
     if (inQuietHours(settings)) return
-    if (settings.store.debugLog) log.info(`>> ${opts.title} — ${opts.body}`)
+    if (settings.store.debugLog) log.info(`[notif] ${opts.title} — ${opts.body}`)
 
     if (document.hasFocus()) {
-        // discord focused = in-app toast
         Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
     } else {
-        // discord in background = os notification
-        // fall back to in-app if os notif fails (no permission, blocked, whatever)
         try {
             const n = new window.Notification(opts.title, { body: opts.body, icon: opts.icon })
             if (opts.onClick) n.onclick = () => { window.focus(); opts.onClick!() }
@@ -102,60 +117,98 @@ function push(opts: { title: string; body: string; icon?: string; onClick?: () =
     }
 }
 
-// profile diffing
-// accent/banner colors are the worst — discord sends null, 0, and undefined
-// completely interchangeably depending on which api endpoint you hit
-// this normalizes all three to null so they don't spam false positives
+// -- avatar helpers --
+// manually building cdn urls because getAvatarURL() signature keeps changing
+
+function avatarUrl(id: string, hash?: string | null, size = 80): string {
+    try {
+        if (hash) return `https://cdn.discordapp.com/avatars/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=${size}`
+        let i = 0
+        try { i = Number(BigInt(id) % BigInt(6)) } catch { i = parseInt(id.slice(-4), 10) % 6 || 0 }
+        return `https://cdn.discordapp.com/embed/avatars/${i}.png`
+    } catch { return "https://cdn.discordapp.com/embed/avatars/0.png" }
+}
+
+function safeAvatar(id: string, hash?: string | null, size = 80) { return avatarUrl(id, hash, size) }
+
+function bannerUrl(id: string, hash?: string | null): string | null {
+    if (!hash) return null
+    return `https://cdn.discordapp.com/banners/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=480`
+}
+
+function hexColor(n?: number | null): string | null {
+    if (n == null) return null
+    try { return "#" + n.toString(16).padStart(6, "0") } catch { return null }
+}
+
+const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
+
+// -- profile diffing --
+//
+// the accent color / banner color false positive issue:
+// discord sends these as null from /profile endpoint, 0 from websocket USER_UPDATE,
+// and sometimes undefined if the user never set one
+// all three mean "no color" but they'd fail a !== check
+// normalizing to null before comparing fixes it
+
 function normColor(v: any): string | null {
     if (v == null || v === 0) return null
     return String(v)
 }
 
-const TEXT_FIELDS  = ["username", "globalName", "bio", "banner"] as const
-const COLOR_FIELDS = ["bannerColor", "accentColor"] as const
-
-const FIELD_LABEL: Record<string, string> = {
-    username: "username", globalName: "display name", avatar: "avatar",
-    bio: "bio", banner: "banner", bannerColor: "banner color", accentColor: "accent color",
+const PROFILE_TEXT   = ["username", "globalName", "bio", "banner"] as const
+const PROFILE_COLORS = ["bannerColor", "accentColor"] as const
+const FIELD_NAME: Record<string, string> = {
+    username: "username", globalName: "display name",
+    bio: "bio", banner: "banner",
+    bannerColor: "banner color", accentColor: "accent color",
 }
 
-function checkProfile(uid: string, fresh: any) {
+function checkProfileChanged(uid: string, fresh: any) {
     if (!isWatched(settings, uid)) return
 
     const old = profileCache[uid]
-    if (!old) { profileCache[uid] = fresh; return }
+    if (!old) {
+        profileCache[uid] = fresh
+        return  // first time, just save baseline
+    }
 
-    // avatar has its own setting so handle it separately
+    // avatar is its own separate notification with its own toggle
     if (fresh.user?.avatar !== old.user?.avatar) {
         if (featureOn(settings, uid, "avatar", "globalAvatar")) {
             const name  = displayName(fresh.user)
             const label = getWatchedUser(settings, uid)?.nick
-            push({
-                title: `${label ? `${label} (${name})` : name} changed their avatar`,
-                body: "click to see",
-                icon: fresh.user?.avatar ? `https://cdn.discordapp.com/avatars/${uid}/${fresh.user.avatar}.webp?size=128` : undefined,
+            const dn    = label ? `${label} (${name})` : name
+            notify({
+                title: `${dn} changed their avatar`,
+                body: "click to see new pfp",
+                icon: fresh.user?.avatar
+                    ? `https://cdn.discordapp.com/avatars/${uid}/${fresh.user.avatar}.webp?size=128`
+                    : undefined,
                 onClick: () => openUserProfile(uid),
             })
         }
-        // always update cache even if we skipped the notif, keeps diff clean
+        // always update avatar in cache regardless of notif, keeps future diffs clean
         profileCache[uid] = { ...profileCache[uid], user: { ...profileCache[uid].user, avatar: fresh.user?.avatar } }
     }
 
     const changed: string[] = []
-    for (const f of TEXT_FIELDS) {
+    for (const f of PROFILE_TEXT) {
         if ((fresh.user?.[f] ?? null) !== (old.user?.[f] ?? null)) changed.push(f)
     }
-    for (const f of COLOR_FIELDS) {
+    for (const f of PROFILE_COLORS) {
+        // normalize colors before comparing to avoid null/0/undefined false positives
         if (normColor(fresh.user?.[f]) !== normColor(old.user?.[f])) changed.push(f)
     }
 
-    if (changed.length && featureOn(settings, uid, "profile", "globalProfile")) {
+    if (changed.length > 0 && featureOn(settings, uid, "profile", "globalProfile")) {
         const u     = UserStore.getUser(uid)
         const name  = displayName(fresh.user)
         const label = getWatchedUser(settings, uid)?.nick
-        push({
-            title: `${label ? `${label} (${name})` : name} updated their profile`,
-            body: changed.map(f => FIELD_LABEL[f] ?? f).join(", "),
+        const dn    = label ? `${label} (${name})` : name
+        notify({
+            title: `${dn} updated their profile`,
+            body: changed.map(f => FIELD_NAME[f] ?? f).join(", "),
             icon: u ? safeAvatar(u.id, (u as any).avatar) : undefined,
             onClick: () => openUserProfile(uid),
         })
@@ -164,8 +217,8 @@ function checkProfile(uid: string, fresh: any) {
     profileCache[uid] = fresh
 }
 
-// poll bio/banner every 5 min bc discord doesn't push those over websocket
-// annoying but it's the only way
+// poll bio/banner every 5 mins
+// discord doesn't push those fields over websocket, this is the only way to catch them
 async function pollProfiles() {
     const list = getWatchlist(settings)
     if (!list.length) return
@@ -175,223 +228,219 @@ async function pollProfiles() {
                 url: `/users/${wu.id}/profile`,
                 query: { with_mutual_guilds: false, with_mutual_friends_count: false },
             })
-            checkProfile(wu.id, camelize(body))
+            checkProfileChanged(wu.id, camelize(body))
         } catch { }
-        await new Promise(r => setTimeout(r, 1500))  // chill between requests
+        await new Promise(r => setTimeout(r, 1500))
     }
 }
 
-// build avatar url ourselves instead of using getAvatarURL()
-// that function's signature breaks every few discord updates, not worth the trouble
-function safeAvatar(id: string, hash?: string | null, size = 80) {
-    try {
-        if (hash) return `https://cdn.discordapp.com/avatars/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=${size}`
-        let idx = 0
-        try { idx = Number(BigInt(id) % BigInt(6)) } catch { idx = parseInt(id.slice(-1), 10) % 6 || 0 }
-        return `https://cdn.discordapp.com/embed/avatars/${idx}.png`
-    } catch { return "https://cdn.discordapp.com/embed/avatars/0.png" }
-}
+// -- modal --
 
-function bannerUrl(id: string, hash?: string | null) {
-    if (!hash) return null
-    try { return `https://cdn.discordapp.com/banners/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=480` }
-    catch { return null }
-}
-
-function hexColor(n?: number | null) {
-    if (n == null) return null
-    try { return "#" + n.toString(16).padStart(6, "0") } catch { return null }
-}
-
-const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
-
-// inject once on modal open
-// only a spinner keyframe, everything else is inline styles
-const STYLE_ID = "ur-s8"
+const STYLE_ID = "ur-s9"
 function injectStyles() {
     if (document.getElementById(STYLE_ID)) return
     const s = document.createElement("style")
     s.id = STYLE_ID
     s.textContent = `
         @keyframes ur-spin { to { transform:rotate(360deg) } }
-        .ur-spin {
-            display:inline-block; width:12px; height:12px; border-radius:50%;
-            border:2px solid rgba(255,255,255,.3); border-top-color:#fff;
-            animation:ur-spin .6s linear infinite; vertical-align:middle;
-        }
+        .ur-spin { display:inline-block;width:14px;height:14px;border-radius:50%;
+            border:2.5px solid rgba(255,255,255,.15);border-top-color:#fff;
+            animation:ur-spin .55s linear infinite;vertical-align:middle; }
+        @keyframes ur-fade-in { from { opacity:0;transform:translateY(-4px) } to { opacity:1;transform:translateY(0) } }
+        .ur-fade-in { animation:ur-fade-in .2s cubic-bezier(.4,0,.2,1) forwards; }
+        .ur-expand { display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(.4,0,.2,1); }
+        .ur-expand.open { grid-template-rows:1fr; }
+        .ur-expand > div { overflow:hidden; }
+        .ur-row-hover:hover { background:rgba(255,255,255,0.04); }
+        .ur-scrollbar::-webkit-scrollbar { width:8px; }
+        .ur-scrollbar::-webkit-scrollbar-track { background:transparent; }
+        .ur-scrollbar::-webkit-scrollbar-thumb { background:#3f4147;border-radius:4px; }
     `
     document.head.appendChild(s)
 }
 
-// hardcoded colors so we don't fight CSS variables
-// these match discord dark theme and won't randomly break if discord changes var names
 const C = {
-    headerPrimary:   "#f2f3f5",
-    headerSecondary: "#b5bac1",
-    textNormal:      "#dbdee1",
-    textMuted:       "#949ba4",
-    textDanger:      "#fa777c",
-    bgPrimary:       "#313338",
-    bgSecondary:     "#2b2d31",
-    bgTertiary:      "#1e1f22",
-    bgModifier:      "#3f4147",
-    brand:           "#5865f2",
-    brandLight:      "#949cf4",
-    white:           "#ffffff",
-    green:           "#3ba55d",
-    red:             "#ed4245",
+    bg1:         "#1e1f22",
+    bg2:         "#2b2d31",
+    bg3:         "#313338",
+    bgEl:        "#404249",
+    border:      "#3f4147",
+    hov:         "rgba(255,255,255,0.04)",
+    header:      "#f2f3f5",
+    subheader:   "#b5bac1",
+    text:        "#dbdee1",
+    muted:       "#949ba4",
+    danger:      "#fa777c",
+    brand:       "#5865f2",
+    brandLight:  "#949cf4",
+    brandGrad:   "linear-gradient(135deg,#5865f2 0%,#949cf4 100%)",
+    green:       "#248046",
+    red:         "#da373c",
+    white:       "#ffffff",
 } as const
 
-function modalAvatarUrl(userId: string, hash?: string | null): string {
-    if (!hash) {
-        let idx = 0
-        try { idx = Number(BigInt(userId) % BigInt(6)) } catch { idx = parseInt(userId.slice(-1), 10) % 6 || 0 }
-        return `https://cdn.discordapp.com/embed/avatars/${idx}.png`
-    }
-    return `https://cdn.discordapp.com/avatars/${userId}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=64`
+// svg icons — functions so they don't cause module-level jsx issues
+const ico = {
+    search:   () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>,
+    check:    () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M20 6 9 17l-5-5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+    x:        () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+    chevron:  () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>,
+    trash:    () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14zM10 11v6M14 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+    copy:     () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" strokeWidth="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" strokeWidth="2"/></svg>,
+    external: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>,
+    sortAz:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M3 6h12M3 12h8M3 18h4M16 8l4-4 4 4M20 4v16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+    sortDate: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/><path d="M12 6v6l4 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>,
+    eye:      () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={C.white} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+    ghost:    () => <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" opacity=".25"><path d="M12 2a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-4h6v4h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9zm-3 8a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm6 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>,
+    msg:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M2 22V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6l-4 4z"/></svg>,
+    edit:     () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 20h9" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+    del:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M15 3v-1a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v1H3v2h2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5h2V3h-6zm-4-1h2v1h-2V2zm-2 5h2v9h-2V7zm4 0h2v9h-2V7z"/></svg>,
+    typing:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="4" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="20" cy="12" r="2"/></svg>,
+    profile:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><circle cx="12" cy="7" r="4" stroke="currentColor" strokeWidth="2"/></svg>,
+    avatar:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke="currentColor" strokeWidth="2"/><circle cx="12" cy="10" r="3" stroke="currentColor" strokeWidth="2"/><path d="M7 21c0-2.76 2.24-5 5-5s5 2.24 5 5" stroke="currentColor" strokeWidth="2"/></svg>,
+    voice:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>,
+    status:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" opacity=".3"/><circle cx="12" cy="12" r="5"/></svg>,
+    boosts:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.2h7.6l-6 4.8 2.4 7.2-6-4.8-6 4.8 2.4-7.2-6-4.8h7.6z"/></svg>,
+    activity: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>,
+    joins:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" stroke="currentColor" strokeWidth="2"/><circle cx="8.5" cy="7" r="4" stroke="currentColor" strokeWidth="2"/><path d="M20 8v6M23 11h-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>,
 }
 
-// custom toggle bc discord's Switch component is a pain to import reliably
-function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+// discord's own Switch import is unreliable, just making my own
+function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
     return (
         <div
-            role="switch"
-            aria-checked={checked}
-            onClick={() => onChange(!checked)}
+            role="switch" aria-checked={on}
+            onClick={() => onChange(!on)}
             style={{
-                width: 40, height: 24, borderRadius: 12,
-                background: checked ? C.green : "#4e5058",
+                width: 36, height: 22, borderRadius: 11, flexShrink: 0,
+                background: on ? C.green : "#4e5058",
                 cursor: "pointer", position: "relative",
-                transition: "background 150ms ease", flexShrink: 0,
+                transition: "background 150ms ease",
             }}
         >
             <div style={{
-                position: "absolute", top: 2,
-                left: checked ? 18 : 2,
-                width: 20, height: 20, borderRadius: "50%",
-                background: C.white, boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+                position: "absolute", top: 2, left: on ? 16 : 2,
+                width: 18, height: 18, borderRadius: "50%",
+                background: C.white, boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
                 transition: "left 150ms cubic-bezier(0.4,0,0.2,1)",
             }} />
         </div>
     )
 }
 
-type LookupState =
-    | { stage: "idle" }
-    | { stage: "loading" }
-    | { stage: "found"; data: any; avatar: string }
-    | { stage: "error"; msg: string }
+// add user — step 1: type id, step 2: preview + confirm
+type LookupStage =
+    | { s: "idle" }
+    | { s: "loading" }
+    | { s: "done"; user: any; av: string }
+    | { s: "err"; msg: string }
 
-// add user section at the top of the modal
-// two-step: enter id -> look up -> confirm with preview card
 function AddUserSection({ onAdded }: { onAdded: () => void }) {
-    const [rawId, setRawId]   = React.useState("")
-    const [label, setLabel]   = React.useState("")
-    const [lookup, setLookup] = React.useState<LookupState>({ stage: "idle" })
+    const [rawId, setRawId] = React.useState("")
+    const [label, setLabel] = React.useState("")
+    const [lk, setLk]       = React.useState<LookupStage>({ s: "idle" })
 
     const cleanId = rawId.trim().replace(/\D/g, "")
+    const hasErr  = lk.s === "err"
 
     const doLookup = () => {
-        if (!cleanId)                                    { setLookup({ stage: "error", msg: "enter a user id first" }); return }
-        if (cleanId.length < 17 || cleanId.length > 20) { setLookup({ stage: "error", msg: "discord ids are 17-20 digits" }); return }
-        if (isWatched(settings, cleanId))                { setLookup({ stage: "error", msg: "already on your watchlist" }); return }
+        if (!cleanId)                                    return setLk({ s: "err", msg: "enter a user id first" })
+        if (cleanId.length < 17 || cleanId.length > 20) return setLk({ s: "err", msg: "discord ids are 17-20 digits" })
+        if (isWatched(settings, cleanId))                return setLk({ s: "err", msg: "already on your watchlist" })
 
-        setLookup({ stage: "loading" })
+        setLk({ s: "loading" })
         RestAPI.get({
             url: `/users/${cleanId}/profile`,
             query: { with_mutual_guilds: false, with_mutual_friends_count: false },
         }).then((res: any) => {
-            const data = camelize(res.body)
-            setLookup({ stage: "found", data: data.user, avatar: modalAvatarUrl(data.user.id, data.user.avatar) })
+            const d = camelize(res.body)
+            setLk({ s: "done", user: d.user, av: avatarUrl(d.user.id, d.user.avatar, 64) })
         }).catch((e: any) => {
-            const s = e?.status ?? e?.response?.status
-            setLookup({
-                stage: "error",
-                msg: s === 404 ? "user not found"
-                   : s === 403 ? "profile is private (no shared server) — you can still add by id though"
-                   : `request failed${s ? ` (${s})` : ""}`,
+            const code = e?.status ?? e?.response?.status
+            setLk({
+                s: "err",
+                msg: code === 404 ? "user not found"
+                   : code === 403 ? "profile is private (no shared server) — you can still add by id"
+                   : `request failed${code ? ` (${code})` : ""}`,
             })
         })
     }
 
     const doAdd = () => {
-        if (lookup.stage !== "found") return
+        if (lk.s !== "done") return
         addUser(settings, cleanId, label.trim())
-        setRawId(""); setLabel(""); setLookup({ stage: "idle" })
+        setRawId(""); setLabel(""); setLk({ s: "idle" })
         onAdded()
     }
 
     return (
-        <div>
-            <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.headerPrimary, marginBottom: 10 }}>
+        <div className="ur-fade-in">
+            <div style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 12 }}>
                 add user
             </div>
 
-            {lookup.stage !== "found" && (
+            {lk.s !== "done" && (
                 <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                     <div style={{ flex: 1 }}>
-                        <TextInput
-                            placeholder="paste a discord user id"
-                            value={rawId}
-                            onChange={(v: string) => { setRawId(v); if (lookup.stage === "error") setLookup({ stage: "idle" }) }}
-                            onKeyDown={(e: any) => { if (e.key === "Enter") doLookup() }}
-                            autoFocus
-                        />
-                        <div style={{ fontSize: 12, color: C.textMuted, marginTop: 4 }}>
-                            developer mode → right-click user → copy user id
+                        <div style={{
+                            display: "flex", alignItems: "center",
+                            background: C.bg1, borderRadius: 8,
+                            border: `1px solid ${hasErr ? C.red : C.border}`,
+                            transition: "border-color 150ms",
+                        }}>
+                            <TextInput
+                                placeholder="paste a discord user id"
+                                value={rawId}
+                                onChange={(v: string) => { setRawId(v); if (hasErr) setLk({ s: "idle" }) }}
+                                onKeyDown={(e: any) => { if (e.key === "Enter") doLookup() }}
+                                autoFocus
+                                style={{ background: "transparent", border: "none", flex: 1 }}
+                            />
+                        </div>
+                        <div style={{ fontSize: 11, color: hasErr ? C.danger : C.muted, marginTop: 5, display: "flex", alignItems: "center", gap: 4 }}>
+                            {hasErr ? <ico.x /> : null}
+                            {hasErr ? (lk as any).msg : "developer mode → right-click user → copy user id"}
                         </div>
                     </div>
-                    <Button onClick={doLookup} disabled={lookup.stage === "loading"} size={Button.Sizes.MEDIUM} color={Button.Colors.BRAND}>
-                        {lookup.stage === "loading"
-                            ? <><span className="ur-spin" style={{ marginRight: 6 }} />looking up…</>
-                            : "look up"}
+                    <Button onClick={doLookup} disabled={lk.s === "loading"} size={Button.Sizes.MEDIUM} color={Button.Colors.BRAND}>
+                        {lk.s === "loading" ? <><span className="ur-spin" style={{ marginRight: 6 }} />looking…</> : "look up"}
                     </Button>
                 </div>
             )}
 
-            {lookup.stage === "error" && (
-                <div style={{ fontSize: 13, color: C.textDanger, marginTop: 8 }}>{lookup.msg}</div>
-            )}
-
-            {lookup.stage === "found" && (
-                <div style={{ marginTop: 12 }}>
+            {lk.s === "done" && (
+                <div className="ur-fade-in">
                     {/* preview card */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 12, background: C.bgTertiary, borderRadius: 8, border: `1px solid ${C.bgModifier}` }}>
-                        <img src={lookup.avatar} style={{ width: 48, height: 48, borderRadius: "50%", flexShrink: 0 }}
-                            onError={(e: any) => { e.target.style.display = "none" }} />
+                    <div style={{ display: "flex", alignItems: "center", gap: 14, padding: 14, background: C.bg2, borderRadius: 12, border: `1px solid ${C.border}`, marginBottom: 14 }}>
+                        <img src={lk.av} style={{ width: 52, height: 52, borderRadius: "50%", flexShrink: 0 }}
+                            onError={(e: any) => { e.target.src = FALLBACK_AV }} />
                         <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 16, fontWeight: 600, color: C.headerPrimary }}>
-                                {lookup.data.globalName || lookup.data.username}
-                            </div>
-                            {lookup.data.globalName && (
-                                <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>@{lookup.data.username}</div>
-                            )}
-                            <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{lookup.data.id}</div>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: C.header }}>{lk.user.globalName || lk.user.username}</div>
+                            {lk.user.globalName && <div style={{ fontSize: 13, color: C.muted }}>@{lk.user.username}</div>}
+                            <div style={{ fontSize: 11, color: C.muted, marginTop: 2, fontFamily: "monospace", opacity: .75 }}>{lk.user.id}</div>
                         </div>
-                        {/* checkmark */}
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0, color: C.green }}>
-                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="currentColor"/>
-                        </svg>
+                        <div style={{ color: C.green, flexShrink: 0 }}><ico.check /></div>
                     </div>
 
-                    <div style={{ marginTop: 12 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.headerPrimary, marginBottom: 6 }}>
-                            label <span style={{ fontWeight: 400, color: C.textMuted }}>(optional, only you see this)</span>
-                        </div>
+                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 6 }}>
+                        label <span style={{ fontWeight: 500, color: C.muted, textTransform: "none" }}>(optional, only you see this)</span>
+                    </div>
+                    <div style={{ background: C.bg1, borderRadius: 8, border: `1px solid ${C.border}`, marginBottom: 14 }}>
                         <TextInput
                             placeholder='e.g. "bestie", "the rat", "ex"'
                             value={label}
                             onChange={(v: string) => setLabel(v)}
                             onKeyDown={(e: any) => { if (e.key === "Enter") doAdd() }}
                             autoFocus
+                            style={{ background: "transparent", border: "none" }}
                         />
                     </div>
 
-                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                    <div style={{ display: "flex", gap: 8 }}>
                         <Button onClick={doAdd} size={Button.Sizes.MEDIUM} color={Button.Colors.GREEN} style={{ flex: 1 }}>
                             add to watchlist
                         </Button>
-                        <Button onClick={() => { setLookup({ stage: "idle" }); setLabel("") }} size={Button.Sizes.MEDIUM} look={Button.Looks.OUTLINED}>
+                        <Button onClick={() => { setLk({ s: "idle" }); setLabel("") }} size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT}>
                             cancel
                         </Button>
                     </div>
@@ -401,186 +450,255 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
     )
 }
 
-// override rows config — what shows in the expanded per-user panel
 const OV_ROWS = [
-    { label: "messages", key: "msgs",     gk: "globalMsgs"     },
-    { label: "edits",    key: "edits",    gk: "globalEdits"    },
-    { label: "deletes",  key: "deletes",  gk: "globalDeletes"  },
-    { label: "typing",   key: "typing",   gk: "globalTyping"   },
-    { label: "profile",  key: "profile",  gk: "globalProfile"  },
-    { label: "avatar",   key: "avatar",   gk: "globalAvatar"   },
-    { label: "voice",    key: "voice",    gk: "globalVoice"    },
-    { label: "status",   key: "status",   gk: "globalStatus"   },
-    { label: "boosts",   key: "boosts",   gk: "globalBoosts"   },
-    { label: "activity", key: "activity", gk: "globalActivity" },
-    { label: "joins",    key: "joins",    gk: "globalJoins"    },
+    { label: "messages",  key: "msgs",     gk: "globalMsgs",     Icon: ico.msg      },
+    { label: "edits",     key: "edits",    gk: "globalEdits",    Icon: ico.edit     },
+    { label: "deletes",   key: "deletes",  gk: "globalDeletes",  Icon: ico.del      },
+    { label: "typing",    key: "typing",   gk: "globalTyping",   Icon: ico.typing   },
+    { label: "profile",   key: "profile",  gk: "globalProfile",  Icon: ico.profile  },
+    { label: "avatar",    key: "avatar",   gk: "globalAvatar",   Icon: ico.avatar   },
+    { label: "voice",     key: "voice",    gk: "globalVoice",    Icon: ico.voice    },
+    { label: "status",    key: "status",   gk: "globalStatus",   Icon: ico.status   },
+    { label: "boosts",    key: "boosts",   gk: "globalBoosts",   Icon: ico.boosts   },
+    { label: "activity",  key: "activity", gk: "globalActivity", Icon: ico.activity },
+    { label: "joins",     key: "joins",    gk: "globalJoins",    Icon: ico.joins    },
 ] as const
 
-// single user row in the watchlist
 function WatchedRow({ user, refresh, onRemove }: { user: WatchedUser; refresh: () => void; onRemove: () => void }) {
-    const [nick,     setNick]     = React.useState(user.nick || "")
-    const [expanded, setExpanded] = React.useState(false)
+    const [nick,     setNick] = React.useState(user.nick || "")
+    const [expanded, setExp]  = React.useState(false)
+    const [copied,   setCopy] = React.useState(false)
 
     const du   = UserStore.getUser(user.id)
     const name = displayName(du) || user.id
-    const ava  = du ? modalAvatarUrl(du.id, (du as any).avatar) : modalAvatarUrl(user.id, null)
+    const av   = du ? avatarUrl(du.id, (du as any).avatar, 64) : avatarUrl(user.id, null, 64)
 
     const saveNick = () => { patchUser(settings, user.id, { nick: nick || "" }); refresh() }
-
     const setOv = (key: keyof WatchedUser["overrides"], val: boolean | null) => {
         patchUser(settings, user.id, { overrides: { ...user.overrides, [key]: val } })
         refresh()
     }
 
-    return (
-        <div style={{ background: C.bgSecondary, borderRadius: 8, marginBottom: 8, overflow: "hidden" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px" }}>
+    const copyId = () => {
+        navigator.clipboard.writeText(user.id)
+        setCopy(true)
+        setTimeout(() => setCopy(false), 1200)
+    }
 
-                {/* click this area to expand overrides */}
-                <div onClick={() => setExpanded(e => !e)}
-                    style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, cursor: "pointer" }}>
-                    <img src={ava} style={{ width: 40, height: 40, borderRadius: "50%", flexShrink: 0 }}
-                        onError={(e: any) => { e.target.style.display = "none" }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                            <span style={{ fontSize: 14, fontWeight: 600, color: C.headerPrimary }}>{name}</span>
-                            {user.nick && (
-                                <span style={{ background: C.brand, color: C.white, fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                                    {user.nick}
-                                </span>
-                            )}
-                        </div>
-                        <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>
-                            {user.id} · {new Date(user.addedAt).toLocaleDateString()}
-                        </div>
+    return (
+        <div style={{ background: C.bg2, borderRadius: 12, marginBottom: 8, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+            {/* main row */}
+            <div className="ur-row-hover" onClick={() => setExp(v => !v)} style={{
+                display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", cursor: "pointer",
+                borderRadius: expanded ? "12px 12px 0 0" : 12, transition: "background 100ms",
+            }}>
+                <img src={av} style={{ width: 44, height: 44, borderRadius: "50%", flexShrink: 0 }}
+                    onError={(e: any) => { e.target.src = FALLBACK_AV }} />
+
+                <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 15, fontWeight: 700, color: C.header }}>{name}</span>
+                        {user.nick && (
+                            <span style={{ background: C.brandGrad, color: C.white, fontSize: 10, fontWeight: 800, padding: "2px 7px", borderRadius: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                                {user.nick}
+                            </span>
+                        )}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 3, display: "flex", alignItems: "center", gap: 5 }}>
+                        <span style={{ fontFamily: "monospace", opacity: .7 }}>{user.id}</span>
+                        <span>·</span>
+                        <span>added {new Date(user.addedAt).toLocaleDateString()}</span>
                     </div>
                 </div>
 
-                {/* label input — stop propagation so it doesn't toggle expand */}
-                <div onClick={(e: any) => e.stopPropagation()} style={{ width: 100, flexShrink: 0 }}>
-                    <TextInput
-                        placeholder="label"
-                        value={nick}
-                        onChange={(v: string) => setNick(v)}
-                        onBlur={saveNick}
-                        onKeyDown={(e: any) => { if (e.key === "Enter") saveNick() }}
-                    />
+                {/* label input — stopPropagation so clicking it doesn't toggle expand */}
+                <div onClick={(e: any) => e.stopPropagation()} style={{ width: 110, flexShrink: 0 }}>
+                    <div style={{ background: C.bg1, borderRadius: 6, border: `1px solid ${C.border}` }}>
+                        <TextInput
+                            placeholder="label"
+                            value={nick}
+                            onChange={(v: string) => setNick(v)}
+                            onBlur={saveNick}
+                            onKeyDown={(e: any) => { if (e.key === "Enter") saveNick() }}
+                            style={{ background: "transparent", border: "none", padding: "6px 8px", fontSize: 13 }}
+                        />
+                    </div>
                 </div>
 
                 {/* chevron */}
-                <div style={{ color: C.textMuted, padding: 4, display: "flex", alignItems: "center", transform: expanded ? "rotate(180deg)" : "none", transition: "transform 200ms ease" }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
-                    </svg>
+                <div style={{ color: C.muted, display: "flex", alignItems: "center", transform: expanded ? "rotate(180deg)" : "none", transition: "transform 200ms cubic-bezier(.4,0,.2,1)" }}>
+                    <ico.chevron />
                 </div>
 
-                {/* remove button */}
-                <div
-                    role="button" tabIndex={0}
-                    onClick={(e: any) => { e.stopPropagation(); onRemove() }}
-                    onKeyDown={(e: any) => { if (e.key === "Enter") onRemove() }}
-                    style={{ color: C.red, cursor: "pointer", padding: 4, display: "flex", alignItems: "center" }}
-                >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
-                    </svg>
+                {/* action buttons */}
+                <div onClick={(e: any) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                    {[
+                        { title: "copy id",       icon: copied ? <ico.check /> : <ico.copy />, color: copied ? C.green : C.muted, action: copyId },
+                        { title: "open profile",  icon: <ico.external />,                       color: C.muted,                   action: () => openUserProfile(user.id) },
+                        { title: "remove",        icon: <ico.trash />,                          color: C.red,                     action: onRemove },
+                    ].map(btn => (
+                        <div key={btn.title} role="button" tabIndex={0} title={btn.title}
+                            onClick={btn.action}
+                            onKeyDown={(e: any) => { if (e.key === "Enter") btn.action() }}
+                            style={{ color: btn.color, cursor: "pointer", padding: 6, borderRadius: 6, display: "flex", alignItems: "center", transition: "background 100ms" }}
+                            onMouseEnter={e => (e.currentTarget.style.background = btn.title === "remove" ? "rgba(218,55,60,0.12)" : C.hov)}
+                            onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                        >
+                            {btn.icon}
+                        </div>
+                    ))}
                 </div>
             </div>
 
-            {/* per-user overrides panel */}
-            {expanded && (
-                <div style={{ padding: "0 14px 12px", borderTop: `1px solid ${C.bgModifier}` }}>
-                    <div style={{ marginTop: 10, marginBottom: 4, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.8, color: C.headerSecondary }}>
-                        per-user overrides
-                    </div>
-                    {OV_ROWS.map(row => {
-                        const effective    = featureOn(settings, user.id, row.key as any, row.gk)
-                        const isOverridden = (user.overrides as any)[row.key] !== null && (user.overrides as any)[row.key] !== undefined
-                        return (
-                            <div key={row.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
-                                <div style={{ flex: 1, fontSize: 12, color: C.textMuted }}>
-                                    {row.label}
-                                    {isOverridden && (
-                                        <span style={{ color: C.brandLight, marginLeft: 6, fontSize: 11, fontWeight: 500 }}>overriding global</span>
-                                    )}
-                                </div>
-                                <Switch checked={effective} onChange={v => setOv(row.key as any, v)} />
-                                {/* reset to global button, only shows when overriding */}
-                                {isOverridden && (
-                                    <div
-                                        role="button" tabIndex={0} title="reset to global"
-                                        onClick={() => setOv(row.key as any, null)}
-                                        onKeyDown={(e: any) => { if (e.key === "Enter") setOv(row.key as any, null) }}
-                                        style={{ color: C.textMuted, cursor: "pointer", fontSize: 13, padding: "0 4px" }}
+            {/* override panel — css grid animation */}
+            <div className={`ur-expand${expanded ? " open" : ""}`}>
+                <div>
+                    <div style={{ padding: "10px 14px 14px", borderTop: `1px solid ${C.border}` }}>
+                        <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.8, color: C.subheader, marginBottom: 10 }}>
+                            per-user overrides
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px" }}>
+                            {OV_ROWS.map(row => {
+                                const isOn = featureOn(settings, user.id, row.key as any, row.gk)
+                                const isOv = (user.overrides as any)[row.key] !== null && (user.overrides as any)[row.key] !== undefined
+                                return (
+                                    <div key={row.key}
+                                        className="ur-row-hover"
+                                        onClick={() => setOv(row.key as any, !isOn)}
+                                        style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", borderRadius: 8, cursor: "pointer", transition: "background 100ms" }}
                                     >
-                                        ↩
+                                        <div style={{ color: C.muted, display: "flex", alignItems: "center", flexShrink: 0 }}>
+                                            <row.Icon />
+                                        </div>
+                                        <div style={{ flex: 1, fontSize: 13, color: C.text, fontWeight: 500, userSelect: "none" }}>
+                                            {row.label}
+                                            {isOv && (
+                                                <span style={{ color: C.brandLight, marginLeft: 5, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                                                    custom
+                                                </span>
+                                            )}
+                                        </div>
+                                        <Toggle on={isOn} onChange={v => setOv(row.key as any, v)} />
+                                        {isOv && (
+                                            <div role="button" tabIndex={0} title="reset to global"
+                                                onClick={(e: any) => { e.stopPropagation(); setOv(row.key as any, null) }}
+                                                onKeyDown={(e: any) => { if (e.key === "Enter") { e.stopPropagation(); setOv(row.key as any, null) } }}
+                                                style={{ color: C.muted, cursor: "pointer", fontSize: 13, padding: "2px 4px", borderRadius: 4, userSelect: "none" }}
+                                                onMouseEnter={e => (e.currentTarget.style.background = C.hov)}
+                                                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                                            >
+                                                ↩
+                                            </div>
+                                        )}
                                     </div>
-                                )}
-                            </div>
-                        )
-                    })}
+                                )
+                            })}
+                        </div>
+                    </div>
                 </div>
-            )}
+            </div>
         </div>
     )
 }
+
+type SortMode = "az" | "date"
 
 function WatchlistModal({ modalProps }: { modalProps: any }) {
     React.useEffect(() => { injectStyles() }, [])
 
     const [users, setUsers] = React.useState<WatchedUser[]>(() => { try { return getWatchlist(settings) } catch { return [] } })
     const [query, setQuery] = React.useState("")
+    const [sort,  setSort]  = React.useState<SortMode>("date")
 
     const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) } }
 
-    const filtered = users.filter(u => {
-        if (!query.trim()) return true
-        const q  = query.toLowerCase()
-        const du = UserStore.getUser(u.id)
-        return [displayName(du), u.nick ?? "", u.id].join(" ").toLowerCase().includes(q)
-    })
+    const shown = React.useMemo(() => {
+        let list = users.filter(u => {
+            if (!query.trim()) return true
+            const q  = query.toLowerCase()
+            const du = UserStore.getUser(u.id)
+            return [displayName(du), u.nick ?? "", u.id].join(" ").toLowerCase().includes(q)
+        })
+        return sort === "az"
+            ? [...list].sort((a, b) => (displayName(UserStore.getUser(a.id)) || a.id).localeCompare(displayName(UserStore.getUser(b.id)) || b.id))
+            : [...list].sort((a, b) => b.addedAt - a.addedAt)
+    }, [users, query, sort])
 
     return (
         <ModalRoot {...modalProps} size={ModalSize.LARGE}>
             <ModalHeader separator={false}>
-                <div style={{ flex: 1, fontSize: 20, fontWeight: 700, color: C.headerPrimary }}>
-                    👁 UserRadar
+                <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 10, background: C.brandGrad, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        <ico.eye />
+                    </div>
+                    <div>
+                        <div style={{ fontSize: 20, fontWeight: 800, color: C.header, lineHeight: 1.2 }}>UserRadar</div>
+                        <div style={{ fontSize: 12, color: C.muted }}>watchlist manager</div>
+                    </div>
                 </div>
                 <ModalCloseButton onClick={modalProps.onClose} />
             </ModalHeader>
 
-            <ModalContent style={{ paddingBottom: 16 }}>
-                <div style={{ padding: "0 16px" }}>
+            <ModalContent>
+                <div className="ur-scrollbar" style={{ padding: "0 16px", maxHeight: "60vh", overflowY: "auto" }}>
                     <AddUserSection onAdded={refresh} />
 
-                    <div style={{ height: 1, background: C.bgModifier, margin: "16px 0" }} />
+                    <div style={{ height: 1, background: C.border, margin: "18px 0" }} />
 
-                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-                        <div style={{ flex: 1, fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.headerPrimary }}>
-                            watchlist <span style={{ color: C.textMuted, fontWeight: 400 }}>({users.length})</span>
+                    {/* watchlist header */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                        <div style={{ flex: 1, fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader }}>
+                            watchlist <span style={{ fontWeight: 500, color: C.muted }}>({users.length})</span>
                         </div>
+
+                        {/* sort toggle */}
+                        {users.length > 1 && (
+                            <div role="button" tabIndex={0}
+                                onClick={() => setSort(s => s === "az" ? "date" : "az")}
+                                title={sort === "az" ? "sort by date" : "sort a-z"}
+                                style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 6, cursor: "pointer", background: C.bg2, border: `1px solid ${C.border}`, color: C.muted, fontSize: 12, fontWeight: 600, userSelect: "none" }}
+                                onMouseEnter={e => (e.currentTarget.style.borderColor = C.bgEl)}
+                                onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}
+                            >
+                                {sort === "az" ? <ico.sortAz /> : <ico.sortDate />}
+                                {sort === "az" ? "a-z" : "newest"}
+                            </div>
+                        )}
+
+                        {/* search */}
                         {users.length > 3 && (
-                            <div style={{ width: 220 }}>
-                                <TextInput placeholder="search name, label, id…" value={query} onChange={(v: string) => setQuery(v)} />
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, width: 200, background: C.bg1, borderRadius: 8, border: `1px solid ${C.border}`, padding: "5px 10px" }}>
+                                <div style={{ color: C.muted, display: "flex", alignItems: "center" }}><ico.search /></div>
+                                <TextInput
+                                    placeholder="search…"
+                                    value={query}
+                                    onChange={(v: string) => setQuery(v)}
+                                    style={{ background: "transparent", border: "none", flex: 1, fontSize: 13, padding: 0 }}
+                                />
+                                {query && (
+                                    <div role="button" onClick={() => setQuery("")} style={{ color: C.muted, cursor: "pointer", display: "flex", alignItems: "center" }}>
+                                        <ico.x />
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
 
                     {users.length === 0 && (
-                        <div style={{ textAlign: "center", padding: "40px 0" }}>
-                            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.5 }}>👻</div>
-                            <div style={{ fontSize: 15, fontWeight: 600, color: C.headerPrimary }}>nobody here yet</div>
-                            <div style={{ fontSize: 13, color: C.textMuted, marginTop: 4 }}>add someone above to start tracking them</div>
+                        <div className="ur-fade-in" style={{ textAlign: "center", padding: "48px 0" }}>
+                            <div style={{ display: "flex", justifyContent: "center", marginBottom: 14, color: C.muted }}><ico.ghost /></div>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: C.header }}>nobody here yet</div>
+                            <div style={{ fontSize: 13, color: C.muted, marginTop: 6 }}>add someone above to start tracking them</div>
                         </div>
                     )}
 
-                    {filtered.length === 0 && users.length > 0 && (
-                        <div style={{ textAlign: "center", padding: "24px 0", fontSize: 13, color: C.textMuted }}>
-                            no results for "{query}"
+                    {shown.length === 0 && users.length > 0 && (
+                        <div className="ur-fade-in" style={{ textAlign: "center", padding: "32px 0", fontSize: 13, color: C.muted }}>
+                            no results for "<b>{query}</b>"
                         </div>
                     )}
 
-                    {filtered.map(u => (
+                    {shown.map(u => (
                         <WatchedRow key={u.id} user={u} refresh={refresh}
                             onRemove={() => { removeUser(settings, u.id); refresh() }} />
                     ))}
@@ -588,10 +706,10 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             </ModalContent>
 
             <ModalFooter>
-                <div style={{ fontSize: 12, color: C.textMuted, flex: 1 }}>
+                <span style={{ flex: 1, fontSize: 12, color: C.muted, fontWeight: 500 }}>
                     {users.length} user{users.length !== 1 ? "s" : ""} watched
-                </div>
-                <Button onClick={modalProps.onClose} look={Button.Looks.OUTLINED} color={Button.Colors.PRIMARY}>
+                </span>
+                <Button onClick={modalProps.onClose} size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT}>
                     close
                 </Button>
             </ModalFooter>
@@ -599,10 +717,12 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     )
 }
 
+// -- plugin --
+
 export default definePlugin({
     name: "UserRadar",
-    description: "track users and get notified when they message, edit, delete, type, change profile/avatar, vc, status, activity, boost, join/leave servers",
-    authors: [{ id: 641266820187160576, name: "k1ng_op" }],
+    description: "track users and get notified when they message, edit/delete, type, change profile/avatar, join vc, change status/activity, boost, join/leave servers",
+    authors: [{ id: 641266820187160576n, name: "k1ng_op" }],
     settings,
 
     settingsAboutComponent() {
@@ -613,8 +733,8 @@ export default definePlugin({
                     manage who you're tracking, or right-click any user → watch user
                 </Text>
                 <button
-                    style={{ background: "var(--brand-500)", color: "#fff", border: "none", borderRadius: 4, padding: "8px 14px", cursor: "pointer", fontWeight: 600, fontSize: 14, width: "100%" }}
                     onClick={() => openModal(p => <WatchlistModal modalProps={p} />)}
+                    style={{ width: "100%", padding: "8px 14px", background: "var(--brand-500)", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600, fontSize: 14 }}
                 >
                     open watchlist
                 </button>
@@ -626,6 +746,8 @@ export default definePlugin({
         MESSAGE_CREATE(evt: MsgCreateEvent) {
             const { message, guildId, channelId } = evt
             if (!message?.author?.id) return
+            // ignore optimistic messages (your own sends)
+            if (evt.optimistic) return
             if (!featureOn(settings, message.author.id, "msgs", "globalMsgs")) return
             if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId) return
 
@@ -635,20 +757,20 @@ export default definePlugin({
             const dn    = label ? `${label} (${name})` : name
             const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
 
-            // type 8 = boost message, type 7 = server join message
+            // type 8 = boost, type 7 = join — handle separately
             if (message.type === 8) {
                 if (!featureOn(settings, message.author.id, "boosts", "globalBoosts")) return
-                push({ title: `${dn} boosted a server 🚀`, body: "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
+                notify({ title: `${dn} boosted a server 🚀`, body: "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
                 return
             }
-            if (message.type === 7) {
-                push({ title: `${dn} joined a server`, body: "click to view", icon, onClick: () => jumpTo(guildId, channelId, message.id) })
-                return
-            }
+            // NOTE: not handling type 7 here anymore — GUILD_MEMBER_ADD is more reliable for joins
+            // type 7 fires for every user who can see the channel, not just the one who joined
 
-            push({
+            if (message.type !== 0 && message.type !== 19) return  // only normal messages and replies
+
+            notify({
                 title: `${dn} sent a message`,
-                body: preview(message.content, message.attachments?.[0]?.filename),
+                body: msgPreview(message.content, message.attachments?.[0]?.filename),
                 icon,
                 onClick: () => jumpTo(guildId, channelId, message.id),
             })
@@ -665,9 +787,9 @@ export default definePlugin({
             const label = getWatchedUser(settings, message.author.id)?.nick
             const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
 
-            push({
+            notify({
                 title: `${label ? `${label} (${name})` : name} edited a message`,
-                body: preview(message.content, message.attachments?.[0]?.filename),
+                body: msgPreview(message.content, message.attachments?.[0]?.filename),
                 icon,
                 onClick: () => jumpTo(guildId, message.channel_id, message.id),
             })
@@ -692,7 +814,7 @@ export default definePlugin({
                 ? `"${trunc(msg.content, settings.store.previewLen)}"`
                 : "message was deleted"
 
-            push({
+            notify({
                 title: `${label ? `${label} (${name})` : name} deleted a message`,
                 body, icon,
                 onClick: () => jumpTo(evt.guildId, msg!.channel_id, msg!.id),
@@ -701,6 +823,8 @@ export default definePlugin({
 
         TYPING_START(evt: TypingEvent) {
             if (!evt?.userId || !evt?.channelId) return
+            // check isWatched FIRST before featureOn — featureOn returns false if not watched
+            if (!isWatched(settings, evt.userId)) return
             if (!featureOn(settings, evt.userId, "typing", "globalTyping")) return
             if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === evt.channelId) return
 
@@ -709,28 +833,27 @@ export default definePlugin({
 
             const label = getWatchedUser(settings, evt.userId)?.nick
             const ch    = ChannelStore.getChannel(evt.channelId)
-            const icon  = safeAvatar(u.id, (u as any).avatar)
 
-            push({
+            notify({
                 title: `${label ? `${label} (${displayName(u)})` : displayName(u)} is typing…`,
                 body: ch?.name ? `in #${ch.name}` : "click to jump",
-                icon,
+                icon: safeAvatar(u.id, (u as any).avatar),
                 onClick: () => jumpTo(ch?.guild_id, evt.channelId),
             })
         },
 
-        // websocket pushes username/avatar changes instantly, good for fast detection
+        // fast path for username/avatar changes (comes over websocket instantly)
         USER_UPDATE(evt: { user: any }) {
             if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
             const old = profileCache[evt.user.id]
             if (!old) return
-            checkProfile(evt.user.id, { ...old, user: { ...old.user, ...camelize(evt.user) } })
+            checkProfileChanged(evt.user.id, { ...old, user: { ...old.user, ...camelize(evt.user) } })
         },
 
-        // fires when discord fetches someone's profile (opening their card, visiting profile etc)
+        // fires when discord fetches a full profile (opening popout, profile page, etc)
         async USER_PROFILE_FETCH_SUCCESS(rawEvt: ProfileFetchEvent) {
             if (!rawEvt?.user?.id) return
-            checkProfile(rawEvt.user.id, camelize(rawEvt))
+            checkProfileChanged(rawEvt.user.id, camelize(rawEvt))
         },
 
         VOICE_STATE_UPDATES(evt: VoiceStateEvent) {
@@ -740,7 +863,7 @@ export default definePlugin({
 
                 const prev = vcCache[userId] ?? null
                 vcCache[userId] = channelId ?? null
-                if (prev === (channelId ?? null)) continue  // no actual change
+                if (prev === (channelId ?? null)) continue
 
                 const u     = UserStore.getUser(userId)
                 const label = getWatchedUser(settings, userId)?.nick
@@ -749,71 +872,67 @@ export default definePlugin({
 
                 if (!prev && channelId) {
                     const ch = ChannelStore.getChannel(channelId)
-                    push({ title: `${dn} joined voice`, body: ch ? `#${ch.name}` : "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
+                    notify({ title: `${dn} joined voice`, body: ch ? `#${ch.name}` : "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
                 } else if (prev && !channelId) {
-                    push({ title: `${dn} left voice`, body: "disconnected", icon, onClick: () => openUserProfile(userId) })
+                    notify({ title: `${dn} left voice`, body: "disconnected", icon, onClick: () => openUserProfile(userId) })
                 } else if (prev && channelId && prev !== channelId) {
                     const ch = ChannelStore.getChannel(channelId)
-                    push({ title: `${dn} moved vc`, body: ch ? `now in #${ch.name}` : "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
+                    notify({ title: `${dn} moved vc`, body: ch ? `now in #${ch.name}` : "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
                 }
             }
         },
 
         PRESENCE_UPDATES(evt: PresenceEvent) {
             for (const update of evt.updates ?? []) {
-                const { id } = update.user
-                if (!isWatched(settings, id)) continue
+                const uid = update.user.id
+                if (!isWatched(settings, uid)) continue
 
-                const u     = UserStore.getUser(id)
-                const label = getWatchedUser(settings, id)?.nick
+                const u     = UserStore.getUser(uid)
+                const label = getWatchedUser(settings, uid)?.nick
                 const dn    = label ? `${label} (${displayName(u)})` : displayName(u)
                 const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
 
-                // status tracking
-                if (featureOn(settings, id, "status", "globalStatus")) {
-                    const prev = statusCache[id]
-                    statusCache[id] = update.status
+                // status change
+                if (featureOn(settings, uid, "status", "globalStatus")) {
+                    const prev = statusCache[uid]
+                    statusCache[uid] = update.status
                     if (prev && prev !== update.status) {
-                        push({
+                        notify({
                             title: `${dn} is now ${update.status} ${STATUS_EMOJI[update.status] ?? ""}`,
-                            body: `was: ${prev} ${STATUS_EMOJI[prev] ?? ""}`,
+                            body:  `was: ${prev} ${STATUS_EMOJI[prev] ?? ""}`,
                             icon,
-                            onClick: () => openUserProfile(id),
+                            onClick: () => openUserProfile(uid),
                         })
                     }
                 }
 
-                // activity tracking (playing/listening/watching/competing)
-                // type 4 = custom status, we skip that one
-                if (featureOn(settings, id, "activity", "globalActivity")) {
-                    const ACT_VERB: Record<number, string> = {
-                        0: "playing",
-                        2: "listening to",
-                        3: "watching",
-                        5: "competing in",
-                    }
+                // activity change — skip type 4 (custom status text), only track real activities
+                if (featureOn(settings, uid, "activity", "globalActivity")) {
+                    const VERB: Record<number, string> = { 0: "playing", 2: "listening to", 3: "watching", 5: "competing in" }
+                    const act    = (update.activities ?? []).find(a => a.type !== 4) ?? null
+                    const newKey = act ? `${act.type}:${act.name}` : null
+                    const oldKey = activityCache[uid]  // undefined = never seen before
 
-                    const act    = (update.activities ?? []).find((a: any) => a.type !== 4) ?? null
-                    const actKey = act ? `${act.type}:${act.name}` : null
-                    const prevKey = activityCache[id] ?? null
-                    activityCache[id] = actKey
+                    activityCache[uid] = newKey
 
-                    if (prevKey !== actKey && activityCache[id] !== undefined) {
+                    // only fire if we've seen this user before (oldKey !== undefined)
+                    // otherwise first presence update would always trigger
+                    if (oldKey !== undefined && oldKey !== newKey) {
                         if (act) {
-                            const verb   = ACT_VERB[act.type] ?? "doing"
+                            const verb   = VERB[act.type] ?? "doing"
                             const detail = act.details ? ` — ${act.details}` : ""
-                            push({
+                            notify({
                                 title: `${dn} is ${verb} ${act.name}`,
-                                body: `${act.state ?? ""}${detail}`.trim() || `${verb} ${act.name}`,
+                                body:  (`${act.state ?? ""}${detail}`).trim() || `${verb} ${act.name}`,
                                 icon,
-                                onClick: () => openUserProfile(id),
+                                onClick: () => openUserProfile(uid),
                             })
-                        } else if (prevKey) {
-                            push({
+                        } else if (oldKey) {
+                            notify({
                                 title: `${dn} stopped their activity`,
                                 body: "no longer active",
                                 icon,
-                                onClick: () => openUserProfile(id),
+                                onClick: () => openUserProfile(uid),
                             })
                         }
                     }
@@ -821,7 +940,8 @@ export default definePlugin({
             }
         },
 
-        // fires when someone joins a server you're in
+        // GUILD_MEMBER_ADD is the correct event for server joins — more reliable than
+        // watching for type 7 messages which have false positive issues
         GUILD_MEMBER_ADD(evt: GuildMemberEvent) {
             if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
             if (!featureOn(settings, evt.user.id, "joins", "globalJoins")) return
@@ -832,7 +952,7 @@ export default definePlugin({
             const icon  = u ? safeAvatar(u.id, (u as any).avatar) : safeAvatar(evt.user.id, evt.user.avatar)
             const guild = (findByProps("getGuild")?.getGuild(evt.guildId) as any)
 
-            push({
+            notify({
                 title: `${dn} joined a server`,
                 body: guild?.name ?? "click to view",
                 icon,
@@ -840,7 +960,6 @@ export default definePlugin({
             })
         },
 
-        // fires when someone leaves/gets kicked/banned from a server you're in
         GUILD_MEMBER_REMOVE(evt: GuildMemberEvent) {
             if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
             if (!featureOn(settings, evt.user.id, "joins", "globalJoins")) return
@@ -851,7 +970,7 @@ export default definePlugin({
             const icon  = u ? safeAvatar(u.id, (u as any).avatar) : safeAvatar(evt.user.id, evt.user.avatar)
             const guild = (findByProps("getGuild")?.getGuild(evt.guildId) as any)
 
-            push({
+            notify({
                 title: `${dn} left a server`,
                 body: guild?.name ?? "click to view",
                 icon,
@@ -861,13 +980,13 @@ export default definePlugin({
     },
 
     async start() {
-        addContextMenuPatch("user-context", userContextPatch)
+        addContextMenuPatch("user-context", ctxPatch)
 
         if (typeof Notification !== "undefined" && Notification.permission === "default") {
             Notification.requestPermission()
         }
 
-        // pre-fetch everyone's profile so the first poll doesn't spam false positives
+        // pre-fetch all watched profiles as baseline so first poll doesn't spam false positives
         for (const wu of getWatchlist(settings)) {
             try {
                 const { body } = await RestAPI.get({
@@ -881,13 +1000,13 @@ export default definePlugin({
         pollTimer = setInterval(pollProfiles, 5 * 60 * 1000)
 
         tryLoadLoggedMsgs().then(m => {
-            if (m) log.info("hooked into message logger")
-            else   log.warn("message logger not found — delete content won't be available")
+            if (m) log.info("connected to message logger")
+            else   log.warn("message logger not found — delete content unavailable")
         })
     },
 
     stop() {
-        removeContextMenuPatch("user-context", userContextPatch)
+        removeContextMenuPatch("user-context", ctxPatch)
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
         for (const k in profileCache)  delete profileCache[k]
         for (const k in vcCache)       delete vcCache[k]
@@ -896,50 +1015,53 @@ export default definePlugin({
         loggedMsgs = null
     },
 
-    async watchUser(id: string) {
-        addUser(settings, id)
-        const u = UserStore.getUser(id)
+    async watchUser(uid: string) {
+        addUser(settings, uid)
+        const u = UserStore.getUser(uid)
         Toasts.show({ type: Toasts.Type.SUCCESS, message: `now watching ${displayName(u)}`, id: Toasts.genId() })
         try {
             const { body } = await RestAPI.get({
-                url: `/users/${id}/profile`,
+                url: `/users/${uid}/profile`,
                 query: { with_mutual_guilds: false, with_mutual_friends_count: false },
             })
-            profileCache[id] = camelize(body)
+            profileCache[uid] = camelize(body)
         } catch { }
     },
 
-    unwatchUser(id: string) {
-        const u = UserStore.getUser(id)
-        removeUser(settings, id)
-        delete profileCache[id]; delete vcCache[id]; delete statusCache[id]; delete activityCache[id]
+    unwatchUser(uid: string) {
+        const u = UserStore.getUser(uid)
+        removeUser(settings, uid)
+        delete profileCache[uid]
+        delete vcCache[uid]
+        delete statusCache[uid]
+        delete activityCache[uid]
         Toasts.show({ type: Toasts.Type.SUCCESS, message: `stopped watching ${displayName(u)}`, id: Toasts.genId() })
     },
 })
 
-// right-click context menu patch
-const userContextPatch: NavContextMenuPatchCallback = (children, props) => {
+// right-click context menu
+const ctxPatch: NavContextMenuPatchCallback = (children, props) => {
     if (!props?.user) return
     if (props.user.id === UserStore.getCurrentUser()?.id) return  // don't watch yourself lol
-    if (children.some((c: any) => c?.props?.id === "userradar-group")) return
+    if (children.some((c: any) => c?.props?.id === "ur-ctx")) return
 
-    const { id } = props.user
-    const watching = isWatched(settings, id)
+    const uid      = props.user.id
+    const watching = isWatched(settings, uid)
 
     children.push(
         <Menu.MenuSeparator />,
-        <Menu.MenuGroup id="userradar-group">
+        <Menu.MenuGroup id="ur-ctx">
             <Menu.MenuItem
-                id="userradar-toggle"
+                id="ur-toggle"
                 label={watching ? "👁 stop watching" : "👁 watch user"}
                 action={() => {
-                    const p = Vencord.Plugins.plugins["UserRadar"] as any
-                    watching ? p.unwatchUser(id) : p.watchUser(id)
+                    const plugin = Vencord.Plugins.plugins["UserRadar"] as any
+                    watching ? plugin.unwatchUser(uid) : plugin.watchUser(uid)
                 }}
             />
             {watching && (
                 <Menu.MenuItem
-                    id="userradar-manage"
+                    id="ur-open"
                     label="⚙ manage watchlist"
                     action={() => openModal(p => <WatchlistModal modalProps={p} />)}
                 />
