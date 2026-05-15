@@ -40,18 +40,38 @@ const guildCache: Record<string, Set<string>> = {}  // uid -> Set<guildId>
 let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
 
-// hook into vc-message-logger-enhanced for deleted message content
-// if not installed, deletes just say "message was deleted"
-async function tryLoadLoggedMsgs() {
+// grab deleted message content from message logger if installed
+// findByProps throws if nothing found so we wrap everything
+function tryLoadLoggedMsgs() {
     if (loggedMsgs) return loggedMsgs
-    for (const prefix of ["plugins", "userplugins"]) {
-        try {
-            // @ts-ignore
-            const m = await import(`${prefix}/vc-message-logger-enhanced/LoggedMessageManager`)
-            loggedMsgs = m.loggedMessages ?? null
+
+    // try the plugin's exported store directly via Vencord's plugin registry
+    try {
+        const plugin = (Vencord as any)?.Plugins?.plugins?.["vc-message-logger-enhanced"]
+            ?? (Vencord as any)?.Plugins?.plugins?.["MessageLoggerEnhanced"]
+            ?? (Vencord as any)?.Plugins?.plugins?.["messageLoggerEnhanced"]
+        if (plugin?.loggedMessages) {
+            loggedMsgs = plugin.loggedMessages
             return loggedMsgs
-        } catch { }
-    }
+        }
+        // some versions store it on a separate exported object
+        if (plugin?.store?.loggedMessages) {
+            loggedMsgs = plugin.store.loggedMessages
+            return loggedMsgs
+        }
+    } catch { }
+
+    // fallback: check all webpack modules safely without throwing
+    try {
+        const { wreq } = (window as any).webpackChunkdiscord_app?.find?.(
+            (x: any) => x?.[1]?.["loggedMessages"]
+        )?.[1] ?? {}
+        if (wreq?.["loggedMessages"]) {
+            loggedMsgs = wreq["loggedMessages"]
+            return loggedMsgs
+        }
+    } catch { }
+
     return null
 }
 
@@ -98,17 +118,9 @@ function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
 function notify(opts: { title: string; body: string; icon?: string; onClick?: () => void }) {
     if (inQuietHours(settings)) return
     if (settings.store.debugLog) log.info(`[notif] ${opts.title} — ${opts.body}`)
-
-    if (document.hasFocus()) {
-        Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
-    } else {
-        try {
-            const n = new window.Notification(opts.title, { body: opts.body, icon: opts.icon })
-            if (opts.onClick) n.onclick = () => { window.focus(); opts.onClick!() }
-        } catch {
-            Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
-        }
-    }
+    // Vencord's Notifications.showNotification handles both in-app toast and os notif
+    // internally depending on focus state — don't use window.Notification on top of it
+    Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
 }
 
 // -- avatar helpers --
@@ -145,17 +157,13 @@ const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
 // all three mean "no color" but they'd fail a !== check
 // normalizing to null before comparing fixes it
 
-function normColor(v: any): string | null {
-    if (v == null || v === 0) return null
-    return String(v)
-}
-
-const PROFILE_TEXT   = ["username", "globalName", "bio", "banner"] as const
-const PROFILE_COLORS = ["bannerColor", "accentColor"] as const
+// only track fields that actually matter and don't have false positive issues
+// accentColor and bannerColor removed — USER_UPDATE doesn't always include them
+// so you get undefined vs number mismatches that normColor can't reliably fix
+const PROFILE_TEXT = ["username", "globalName", "bio", "banner"] as const
 const FIELD_NAME: Record<string, string> = {
     username: "username", globalName: "display name",
     bio: "bio", banner: "banner",
-    bannerColor: "banner color", accentColor: "accent color",
 }
 
 function checkProfileChanged(uid: string, fresh: any) {
@@ -190,10 +198,8 @@ function checkProfileChanged(uid: string, fresh: any) {
     for (const f of PROFILE_TEXT) {
         if ((fresh.user?.[f] ?? null) !== (old.user?.[f] ?? null)) changed.push(f)
     }
-    for (const f of PROFILE_COLORS) {
-        // normalize colors before comparing to avoid null/0/undefined false positives
-        if (normColor(fresh.user?.[f]) !== normColor(old.user?.[f])) changed.push(f)
-    }
+    // color fields (accentColor, bannerColor) intentionally skipped
+    // they spam false positives because USER_UPDATE omits them when unchanged
 
     if (changed.length > 0 && featureOn(settings, uid, "profile", "globalProfile")) {
         const u     = UserStore.getUser(uid)
@@ -1082,6 +1088,9 @@ export default definePlugin({
         MESSAGE_UPDATE(evt: MsgUpdateEvent) {
             const { message, guildId } = evt
             if (!message?.author?.id) return
+            // MESSAGE_UPDATE fires for embed resolution and pin events too, not just real edits
+            // edited_timestamp is only set when the user actually changed the message content
+            if (!message.edited_timestamp) return
             if (!featureOn(settings, message.author.id, "edits", "globalEdits")) return
             if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === message.channel_id) return
 
@@ -1090,9 +1099,15 @@ export default definePlugin({
             const label = getWatchedUser(settings, message.author.id)?.nick
             const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
 
+            // try to get original content for a "before → after" body
+            const cached = MessageStore.getMessage(message.channel_id, message.id)
+            const before = cached?.content ? `"${trunc(cached.content, 60)}"` : null
+            const after  = msgPreview(message.content, message.attachments?.[0]?.filename)
+            const body   = before && before !== `"${after}"` ? `${before} → ${after}` : after
+
             notify({
                 title: `${label ? `${label} (${name})` : name} edited a message`,
-                body: msgPreview(message.content, message.attachments?.[0]?.filename),
+                body,
                 icon,
                 onClick: () => jumpTo(guildId, message.channel_id, message.id),
             })
@@ -1100,11 +1115,26 @@ export default definePlugin({
 
         async MESSAGE_DELETE(evt: MsgDeleteEvent) {
             if (!evt?.channelId || !evt?.id) return
+
+            // try discord's own cache first (works if message is still in memory)
             let msg: Message | undefined = MessageStore.getMessage(evt.channelId, evt.id)
+
+            // if not in discord cache, check message logger
+            // loggedMessages can be keyed by msgId directly OR nested as { [channelId]: { [msgId]: msg } }
             if (!msg) {
-                const store = await tryLoadLoggedMsgs()
-                msg = store?.[evt.id] as Message | undefined
+                const store = tryLoadLoggedMsgs()
+                if (store) {
+                    // try flat key first (most common)
+                    msg = store[evt.id] as Message | undefined
+                    // try nested key if flat didn't work
+                    if (!msg) {
+                        const channelLog = store[evt.channelId] as any
+                        msg = channelLog?.[evt.id] as Message | undefined
+                    }
+                }
             }
+
+            // if we still don't have it, we can't know who sent it — skip
             if (!msg?.author?.id) return
             if (!featureOn(settings, msg.author.id, "deletes", "globalDeletes")) return
             if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === msg.channel_id) return
@@ -1348,10 +1378,8 @@ export default definePlugin({
 
         pollTimer = setInterval(pollProfiles, 5 * 60 * 1000)
 
-        tryLoadLoggedMsgs().then(m => {
-            if (m) log.info("connected to message logger")
-            else   log.warn("message logger not found — delete content unavailable")
-        })
+        // don't check for message logger here — it may not be registered into webpack yet
+        // we try lazily in MESSAGE_DELETE when we actually need it
     },
 
     stop() {
