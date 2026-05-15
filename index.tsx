@@ -616,17 +616,17 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
 }
 
 const OV_ROWS = [
-    { label: "messages",  key: "msgs",     gk: "globalMsgs",     Icon: ico.msg      },
-    { label: "edits",     key: "edits",    gk: "globalEdits",    Icon: ico.edit     },
-    { label: "deletes",   key: "deletes",  gk: "globalDeletes",  Icon: ico.del      },
-    { label: "typing",    key: "typing",   gk: "globalTyping",   Icon: ico.typing   },
-    { label: "profile",   key: "profile",  gk: "globalProfile",  Icon: ico.profile  },
-    { label: "avatar",    key: "avatar",   gk: "globalAvatar",   Icon: ico.avatar   },
-    { label: "voice",     key: "voice",    gk: "globalVoice",    Icon: ico.voice    },
-    { label: "status",    key: "status",   gk: "globalStatus",   Icon: ico.status   },
-    { label: "boosts",    key: "boosts",   gk: "globalBoosts",   Icon: ico.boosts   },
-    { label: "activity",  key: "activity", gk: "globalActivity", Icon: ico.activity },
-    { label: "joins",     key: "joins",    gk: "globalJoins",    Icon: ico.joins    },
+    { label: "messages",  key: "msgs",     gk: "globalMsgs",     Icon: ico.msg,      desc: "new messages" },
+    { label: "edits",     key: "edits",    gk: "globalEdits",    Icon: ico.edit,     desc: "message edits" },
+    { label: "deletes",   key: "deletes",  gk: "globalDeletes",  Icon: ico.del,      desc: "deleted messages" },
+    { label: "typing",    key: "typing",   gk: "globalTyping",   Icon: ico.typing,   desc: "typing indicator" },
+    { label: "profile",   key: "profile",  gk: "globalProfile",  Icon: ico.profile,  desc: "bio, banner, username" },
+    { label: "avatar",    key: "avatar",   gk: "globalAvatar",   Icon: ico.avatar,   desc: "profile picture" },
+    { label: "voice",     key: "voice",    gk: "globalVoice",    Icon: ico.voice,    desc: "vc joins / leaves" },
+    { label: "status",    key: "status",   gk: "globalStatus",   Icon: ico.status,   desc: "online status" },
+    { label: "boosts",    key: "boosts",   gk: "globalBoosts",   Icon: ico.boosts,   desc: "server boosts" },
+    { label: "activity",  key: "activity", gk: "globalActivity", Icon: ico.activity, desc: "games, spotify, etc." },
+    { label: "joins",     key: "joins",    gk: "globalJoins",    Icon: ico.joins,    desc: "server joins / leaves" },
 ] as const
 
 function LabelInput({ nick, setNick, saveNick }: { nick: string; setNick: (v: string) => void; saveNick: () => void }) {
@@ -736,11 +736,11 @@ function WatchedRow({ user, refresh, onRemove }: { user: WatchedUser; refresh: (
     }
 
     return (
-        <div style={{ background: C.bg2, borderRadius: 12, marginBottom: 8, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+        <div style={{ background: C.bg2, borderRadius: 20, marginBottom: 8, border: `1px solid ${C.border}`, overflow: "hidden" }}>
             {/* main row */}
             <div className="ur-row-hover" onClick={() => setExp(v => !v)} style={{
-                display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", cursor: "pointer",
-                borderRadius: expanded ? "12px 12px 0 0" : 12, transition: "background 100ms",
+                display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer",
+                borderRadius: expanded ? "20px 20px 0 0" : 20, transition: "background 100ms",
             }}>
                 <img src={av} style={{ width: 44, height: 44, borderRadius: "50%", flexShrink: 0 }}
                     onError={(e: any) => { e.target.src = FALLBACK_AV }} />
@@ -794,43 +794,67 @@ function WatchedRow({ user, refresh, onRemove }: { user: WatchedUser; refresh: (
             {/* override panel — css grid animation */}
             <div className={`ur-expand${expanded ? " open" : ""}`}>
                 <div>
-                    <div style={{ padding: "10px 14px 14px", borderTop: `1px solid ${C.border}` }}>
+                    <div style={{ padding: "10px 16px 14px", borderTop: `1px solid ${C.border}` }}>
                         <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.8, color: C.subheader, marginBottom: 10 }}>
                             per-user overrides
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                             {OV_ROWS.map(row => {
                                 const isOn = featureOn(settings, user.id, row.key as any, row.gk)
                                 const isOv = (user.overrides as any)[row.key] !== null && (user.overrides as any)[row.key] !== undefined
                                 return (
                                     <div key={row.key}
-                                        className="ur-row-hover"
                                         onClick={() => setOv(row.key as any, !isOn)}
-                                        style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", borderRadius: 8, cursor: "pointer", transition: "background 100ms" }}
+                                        style={{
+                                            background: C.bg1,
+                                            borderRadius: 14,
+                                            border: `1px solid ${isOv ? C.brand : C.border}`,
+                                            padding: "10px 12px",
+                                            cursor: "pointer",
+                                            transition: "border-color 150ms ease, background 150ms ease",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 10,
+                                        }}
+                                        onMouseEnter={e => {
+                                            e.currentTarget.style.background = "rgba(255,255,255,0.03)"
+                                            e.currentTarget.style.borderColor = isOv ? C.brandLight : C.bgEl
+                                        }}
+                                        onMouseLeave={e => {
+                                            e.currentTarget.style.background = C.bg1
+                                            e.currentTarget.style.borderColor = isOv ? C.brand : C.border
+                                        }}
                                     >
                                         <div style={{ color: C.muted, display: "flex", alignItems: "center", flexShrink: 0 }}>
                                             <row.Icon />
                                         </div>
-                                        <div style={{ flex: 1, fontSize: 13, color: C.text, fontWeight: 500, userSelect: "none" }}>
-                                            {row.label}
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                            <div style={{ fontSize: 13, color: C.text, fontWeight: 600, userSelect: "none", lineHeight: 1.3 }}>
+                                                {row.label}
+                                                {isOv && (
+                                                    <span style={{ color: C.brandLight, marginLeft: 5, fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                                                        custom
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div style={{ fontSize: 11, color: C.muted, userSelect: "none", marginTop: 2, lineHeight: 1.2 }}>
+                                                {row.desc}
+                                            </div>
+                                        </div>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                            <Toggle on={isOn} onChange={v => setOv(row.key as any, v)} />
                                             {isOv && (
-                                                <span style={{ color: C.brandLight, marginLeft: 5, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>
-                                                    custom
-                                                </span>
+                                                <div role="button" tabIndex={0} title="reset to global"
+                                                    onClick={(e: any) => { e.stopPropagation(); setOv(row.key as any, null) }}
+                                                    onKeyDown={(e: any) => { if (e.key === "Enter") { e.stopPropagation(); setOv(row.key as any, null) } }}
+                                                    style={{ color: C.muted, cursor: "pointer", fontSize: 11, padding: "2px 4px", borderRadius: 4, userSelect: "none" }}
+                                                    onMouseEnter={e => (e.currentTarget.style.background = C.hov)}
+                                                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                                                >
+                                                    ↩
+                                                </div>
                                             )}
                                         </div>
-                                        <Toggle on={isOn} onChange={v => setOv(row.key as any, v)} />
-                                        {isOv && (
-                                            <div role="button" tabIndex={0} title="reset to global"
-                                                onClick={(e: any) => { e.stopPropagation(); setOv(row.key as any, null) }}
-                                                onKeyDown={(e: any) => { if (e.key === "Enter") { e.stopPropagation(); setOv(row.key as any, null) } }}
-                                                style={{ color: C.muted, cursor: "pointer", fontSize: 13, padding: "2px 4px", borderRadius: 4, userSelect: "none" }}
-                                                onMouseEnter={e => (e.currentTarget.style.background = C.hov)}
-                                                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-                                            >
-                                                ↩
-                                            </div>
-                                        )}
                                     </div>
                                 )
                             })}
