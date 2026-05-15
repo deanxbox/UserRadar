@@ -327,7 +327,7 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
             onClick={() => onChange(!on)}
             style={{
                 width: 36, height: 22, borderRadius: 11, flexShrink: 0,
-                background: on ? C.green : "#4e5058",
+                background: on ? "#5865f2" : "#4e5058",
                 cursor: "pointer", position: "relative",
                 transition: "background 150ms ease",
             }}
@@ -435,16 +435,16 @@ function AddLabelInput({ label, setLabel, doAdd }: {
             onBlur={() => setFocused(false)}
             autoFocus
             style={{
-                background: C.bg1,
+                background: "#1e1f22",
                 borderRadius: 20,
-                border: `1px solid ${focused ? C.brand : C.border}`,
+                border: `1px solid ${focused ? C.brand : "#3f4147"}`,
                 height: 40,
                 boxSizing: "border-box",
                 padding: "0 14px",
                 transition: "border-color 150ms ease",
                 width: "100%",
                 fontSize: 14,
-                color: C.text,
+                color: "#dbdee1",
                 outline: "none",
                 fontFamily: "inherit",
                 marginBottom: 14,
@@ -616,17 +616,17 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
 }
 
 const OV_ROWS = [
-    { label: "messages",  key: "msgs",     gk: "globalMsgs",     Icon: ico.msg,      desc: "new messages" },
-    { label: "edits",     key: "edits",    gk: "globalEdits",    Icon: ico.edit,     desc: "message edits" },
-    { label: "deletes",   key: "deletes",  gk: "globalDeletes",  Icon: ico.del,      desc: "deleted messages" },
-    { label: "typing",    key: "typing",   gk: "globalTyping",   Icon: ico.typing,   desc: "typing indicator" },
-    { label: "profile",   key: "profile",  gk: "globalProfile",  Icon: ico.profile,  desc: "bio, banner, username" },
-    { label: "avatar",    key: "avatar",   gk: "globalAvatar",   Icon: ico.avatar,   desc: "profile picture" },
-    { label: "voice",     key: "voice",    gk: "globalVoice",    Icon: ico.voice,    desc: "vc joins / leaves" },
-    { label: "status",    key: "status",   gk: "globalStatus",   Icon: ico.status,   desc: "online status" },
-    { label: "boosts",    key: "boosts",   gk: "globalBoosts",   Icon: ico.boosts,   desc: "server boosts" },
-    { label: "activity",  key: "activity", gk: "globalActivity", Icon: ico.activity, desc: "games, spotify, etc." },
-    { label: "joins",     key: "joins",    gk: "globalJoins",    Icon: ico.joins,    desc: "server joins / leaves" },
+    { label: "messages",  key: "msgs",     gk: "globalMsgs",     Icon: ico.msg,      desc: "Notify on new messages" },
+    { label: "edits",     key: "edits",    gk: "globalEdits",    Icon: ico.edit,     desc: "Notify on message edits" },
+    { label: "deletes",   key: "deletes",  gk: "globalDeletes",  Icon: ico.del,      desc: "Notify on deleted messages" },
+    { label: "typing",    key: "typing",   gk: "globalTyping",   Icon: ico.typing,   desc: "Notify when typing starts" },
+    { label: "profile",   key: "profile",  gk: "globalProfile",  Icon: ico.profile,  desc: "Notify on profile changes" },
+    { label: "avatar",    key: "avatar",   gk: "globalAvatar",   Icon: ico.avatar,   desc: "Notify on avatar updates" },
+    { label: "voice",     key: "voice",    gk: "globalVoice",    Icon: ico.voice,    desc: "Notify on voice channel activity" },
+    { label: "status",    key: "status",   gk: "globalStatus",   Icon: ico.status,   desc: "Notify on status changes" },
+    { label: "boosts",    key: "boosts",   gk: "globalBoosts",   Icon: ico.boosts,   desc: "Notify on server boosts" },
+    { label: "activity",  key: "activity", gk: "globalActivity", Icon: ico.activity, desc: "Notify on activity changes" },
+    { label: "joins",     key: "joins",    gk: "globalJoins",    Icon: ico.joins,    desc: "Notify on server joins / leaves" },
 ] as const
 
 function LabelInput({ nick, setNick, saveNick }: { nick: string; setNick: (v: string) => void; saveNick: () => void }) {
@@ -662,50 +662,56 @@ function LabelInput({ nick, setNick, saveNick }: { nick: string; setNick: (v: st
 
 function SearchInput({ query, setQuery }: { query: string; setQuery: (v: string) => void }) {
     const [focused, setFocused] = React.useState(false)
-    const inputRef = React.useRef<HTMLInputElement>(null)
     return (
-        <div
-            onClick={() => inputRef.current?.focus()}
-            style={{
-                display: "flex", alignItems: "center", gap: 6,
-                width: 160,
-                background: C.bg1,
-                borderRadius: 20,
-                border: `1px solid ${focused ? C.brand : C.border}`,
-                padding: "0 10px",
-                height: 28,
-                boxSizing: "border-box",
-                transition: "border-color 150ms ease",
-                cursor: "text",
-            }}
-        >
-            <div style={{ color: C.muted, display: "flex", alignItems: "center", flexShrink: 0 }}><ico.search /></div>
+        <div style={{ position: "relative", width: 160, flexShrink: 0 }}>
             <input
-                ref={inputRef}
                 placeholder="search…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onBlur={() => setFocused(false)}
                 onFocus={() => setFocused(true)}
                 style={{
-                    background: "transparent",
-                    border: "none",
-                    outline: "none",
-                    flex: 1,
+                    background: "#1e1f22",
+                    borderRadius: 20,
+                    border: `1px solid ${focused ? C.brand : "#3f4147"}`,
+                    height: 28,
+                    boxSizing: "border-box",
+                    padding: "0 28px 0 12px",
+                    width: "100%",
                     fontSize: 13,
-                    padding: 0,
-                    margin: 0,
-                    height: "100%",
-                    minHeight: "auto",
-                    color: C.text,
+                    color: "#dbdee1",
+                    outline: "none",
                     fontFamily: "inherit",
+                    transition: "border-color 150ms ease",
                 }}
             />
+            <div style={{
+                position: "absolute",
+                right: 8,
+                top: "50%",
+                transform: "translateY(-50%)",
+                color: "#949ba4",
+                display: "flex",
+                alignItems: "center",
+                pointerEvents: "none",
+            }}>
+                <ico.search />
+            </div>
             {query && (
                 <div
                     role="button"
-                    onClick={(e) => { e.stopPropagation(); setQuery("") }}
-                    style={{ color: C.muted, cursor: "pointer", display: "flex", alignItems: "center", lineHeight: 1, flexShrink: 0 }}
+                    onClick={() => setQuery("")}
+                    style={{
+                        position: "absolute",
+                        right: 8,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        color: "#949ba4",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        lineHeight: 1,
+                    }}
                 >
                     <ico.x />
                 </div>
