@@ -284,7 +284,7 @@ const ico = {
     external: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>,
     sortAz:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M3 6h12M3 12h8M3 18h4M16 8l4-4 4 4M20 4v16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
     sortDate: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/><path d="M12 6v6l4 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>,
-    eye:      () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={C.white} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+    eye:      () => <svg width="20" height="20" viewBox="0 0 24 24" fill={C.white}><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>,
     ghost:    () => <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" opacity=".25"><path d="M12 2a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-4h6v4h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9zm-3 8a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm6 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>,
     msg:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M2 22V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6l-4 4z"/></svg>,
     edit:     () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 20h9" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
@@ -419,6 +419,40 @@ function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
     )
 }
 
+function AddLabelInput({ label, setLabel, doAdd }: {
+    label: string
+    setLabel: (v: string) => void
+    doAdd: () => void
+}) {
+    const [focused, setFocused] = React.useState(false)
+    return (
+        <input
+            placeholder='e.g. "bestie", "the rat", "ex"'
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") doAdd() }}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            autoFocus
+            style={{
+                background: C.bg1,
+                borderRadius: 20,
+                border: `1px solid ${focused ? C.brand : C.border}`,
+                height: 40,
+                boxSizing: "border-box",
+                padding: "0 14px",
+                transition: "border-color 150ms ease",
+                width: "100%",
+                fontSize: 14,
+                color: C.text,
+                outline: "none",
+                fontFamily: "inherit",
+                marginBottom: 14,
+            }}
+        />
+    )
+}
+
 function AddUserSection({ onAdded }: { onAdded: () => void }) {
     const [rawId, setRawId] = React.useState("")
     const [label, setLabel] = React.useState("")
@@ -477,38 +511,103 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
             {lk.s === "done" && (
                 <div className="ur-fade-in">
                     {/* preview card */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 14, padding: 14, background: C.bg2, borderRadius: 12, border: `1px solid ${C.border}`, marginBottom: 14 }}>
-                        <img src={lk.av} style={{ width: 52, height: 52, borderRadius: "50%", flexShrink: 0 }}
-                            onError={(e: any) => { e.target.src = FALLBACK_AV }} />
+                    <div style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 14,
+                        padding: "12px 16px",
+                        background: C.bg1,
+                        borderRadius: 20,
+                        border: `1px solid ${C.border}`,
+                        marginBottom: 14,
+                    }}>
+                        <img
+                            src={lk.av}
+                            style={{ width: 48, height: 48, borderRadius: "50%", flexShrink: 0 }}
+                            onError={(e: any) => { e.target.src = FALLBACK_AV }}
+                        />
                         <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 16, fontWeight: 700, color: C.header }}>{lk.user.globalName || lk.user.username}</div>
-                            {lk.user.globalName && <div style={{ fontSize: 13, color: C.muted }}>@{lk.user.username}</div>}
-                            <div style={{ fontSize: 11, color: C.muted, marginTop: 2, fontFamily: "monospace", opacity: .75 }}>{lk.user.id}</div>
+                            <div style={{ fontSize: 15, fontWeight: 700, color: C.header }}>
+                                {lk.user.globalName || lk.user.username}
+                            </div>
+                            {lk.user.globalName && (
+                                <div style={{ fontSize: 13, color: C.muted, marginTop: 1 }}>
+                                    @{lk.user.username}
+                                </div>
+                            )}
+                            <div style={{ fontSize: 11, color: C.muted, marginTop: 3, fontFamily: "monospace", opacity: .6 }}>
+                                {lk.user.id}
+                            </div>
                         </div>
-                        <div style={{ color: C.green, flexShrink: 0 }}><ico.check /></div>
+                        <div style={{
+                            width: 28,
+                            height: 28,
+                            borderRadius: "50%",
+                            background: "rgba(36,128,70,0.15)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            flexShrink: 0,
+                        }}>
+                            <div style={{ color: C.green }}><ico.check /></div>
+                        </div>
                     </div>
 
                     <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 6 }}>
                         label <span style={{ fontWeight: 500, color: C.muted, textTransform: "none" }}>(optional, only you see this)</span>
                     </div>
-                    <div style={{ background: C.bg1, borderRadius: 8, border: `1px solid ${C.border}`, marginBottom: 14 }}>
-                        <TextInput
-                            placeholder='e.g. "bestie", "the rat", "ex"'
-                            value={label}
-                            onChange={(v: string) => setLabel(v)}
-                            onKeyDown={(e: any) => { if (e.key === "Enter") doAdd() }}
-                            autoFocus
-                            style={{ background: "transparent", border: "none" }}
-                        />
-                    </div>
+                    <AddLabelInput label={label} setLabel={setLabel} doAdd={doAdd} />
 
                     <div style={{ display: "flex", gap: 8 }}>
-                        <Button onClick={doAdd} size={Button.Sizes.MEDIUM} color={Button.Colors.GREEN} style={{ flex: 1 }}>
+                        <button
+                            onClick={doAdd}
+                            style={{
+                                flex: 1,
+                                borderRadius: 20,
+                                height: 40,
+                                boxSizing: "border-box",
+                                padding: "0 20px",
+                                background: C.green,
+                                color: "#fff",
+                                border: "none",
+                                fontSize: 14,
+                                fontWeight: 600,
+                                cursor: "pointer",
+                                fontFamily: "inherit",
+                                transition: "background 150ms ease",
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.background = "#2d9c5a" }}
+                            onMouseLeave={e => { e.currentTarget.style.background = C.green }}
+                        >
                             add to watchlist
-                        </Button>
-                        <Button onClick={() => { setLk({ s: "idle" }); setLabel("") }} size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT}>
+                        </button>
+                        <button
+                            onClick={() => { setLk({ s: "idle" }); setLabel("") }}
+                            style={{
+                                borderRadius: 20,
+                                height: 40,
+                                boxSizing: "border-box",
+                                padding: "0 18px",
+                                background: "transparent",
+                                color: C.text,
+                                border: `1px solid ${C.border}`,
+                                fontSize: 14,
+                                fontWeight: 500,
+                                cursor: "pointer",
+                                fontFamily: "inherit",
+                                transition: "background 150ms ease, border-color 150ms ease",
+                            }}
+                            onMouseEnter={e => {
+                                e.currentTarget.style.background = "rgba(255,255,255,0.05)"
+                                e.currentTarget.style.borderColor = C.bgEl
+                            }}
+                            onMouseLeave={e => {
+                                e.currentTarget.style.background = "transparent"
+                                e.currentTarget.style.borderColor = C.border
+                            }}
+                        >
                             cancel
-                        </Button>
+                        </button>
                     </div>
                 </div>
             )}
@@ -770,7 +869,17 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
         <ModalRoot {...modalProps} size={ModalSize.LARGE}>
             <ModalHeader separator={false}>
                 <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 12 }}>
-                    <div style={{ width: 36, height: 36, borderRadius: 10, background: C.brandGrad, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <div style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 12,
+                        background: C.brandGrad,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                        boxShadow: "0 2px 8px rgba(88,101,242,0.3)",
+                    }}>
                         <ico.eye />
                     </div>
                     <div>
