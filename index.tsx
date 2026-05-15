@@ -458,6 +458,91 @@ const OV_ROWS = [
     { label: "joins",     key: "joins",    gk: "globalJoins",    Icon: ico.joins    },
 ] as const
 
+function LabelInput({ nick, setNick, saveNick }: { nick: string; setNick: (v: string) => void; saveNick: () => void }) {
+    const [focused, setFocused] = React.useState(false)
+    return (
+        <input
+            placeholder="label"
+            value={nick}
+            onChange={(e) => setNick(e.target.value)}
+            onBlur={() => { setFocused(false); saveNick() }}
+            onFocus={() => setFocused(true)}
+            onKeyDown={(e) => { if (e.key === "Enter") { setFocused(false); saveNick() } }}
+            style={{
+                background: C.bg1,
+                borderRadius: 20,
+                border: `1px solid ${focused ? C.brand : C.border}`,
+                height: 26,
+                boxSizing: "border-box",
+                display: "flex",
+                alignItems: "center",
+                padding: "0 10px",
+                fontSize: 12,
+                width: "100%",
+                margin: 0,
+                color: C.text,
+                outline: "none",
+                transition: "border-color 150ms ease",
+                fontFamily: "inherit",
+            }}
+        />
+    )
+}
+
+function SearchInput({ query, setQuery }: { query: string; setQuery: (v: string) => void }) {
+    const [focused, setFocused] = React.useState(false)
+    const inputRef = React.useRef<HTMLInputElement>(null)
+    return (
+        <div
+            onClick={() => inputRef.current?.focus()}
+            style={{
+                display: "flex", alignItems: "center", gap: 6,
+                width: 160,
+                background: C.bg1,
+                borderRadius: 20,
+                border: `1px solid ${focused ? C.brand : C.border}`,
+                padding: "0 10px",
+                height: 28,
+                boxSizing: "border-box",
+                transition: "border-color 150ms ease",
+                cursor: "text",
+            }}
+        >
+            <div style={{ color: C.muted, display: "flex", alignItems: "center", flexShrink: 0 }}><ico.search /></div>
+            <input
+                ref={inputRef}
+                placeholder="search…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onBlur={() => setFocused(false)}
+                onFocus={() => setFocused(true)}
+                style={{
+                    background: "transparent",
+                    border: "none",
+                    outline: "none",
+                    flex: 1,
+                    fontSize: 13,
+                    padding: 0,
+                    margin: 0,
+                    height: "100%",
+                    minHeight: "auto",
+                    color: C.text,
+                    fontFamily: "inherit",
+                }}
+            />
+            {query && (
+                <div
+                    role="button"
+                    onClick={(e) => { e.stopPropagation(); setQuery("") }}
+                    style={{ color: C.muted, cursor: "pointer", display: "flex", alignItems: "center", lineHeight: 1, flexShrink: 0 }}
+                >
+                    <ico.x />
+                </div>
+            )}
+        </div>
+    )
+}
+
 function WatchedRow({ user, refresh, onRemove }: { user: WatchedUser; refresh: () => void; onRemove: () => void }) {
     const [nick,     setNick] = React.useState(user.nick || "")
     const [expanded, setExp]  = React.useState(false)
@@ -507,36 +592,7 @@ function WatchedRow({ user, refresh, onRemove }: { user: WatchedUser; refresh: (
 
                 {/* label input */}
                 <div onClick={(e: any) => e.stopPropagation()} style={{ width: 80, flexShrink: 0 }}>
-                    <div style={{
-                        background: C.bg1,
-                        borderRadius: 20,
-                        border: `1px solid ${C.border}`,
-                        height: 26,
-                        boxSizing: "border-box",
-                        display: "flex",
-                        alignItems: "center",
-                        overflow: "hidden",
-                        transition: "border-color 150ms ease",
-                    }}>
-                        <TextInput
-                            placeholder="label"
-                            value={nick}
-                            onChange={(v: string) => setNick(v)}
-                            onBlur={(e: any) => { saveNick(); e.currentTarget.parentElement.style.borderColor = C.border }}
-                            onFocus={(e: any) => { e.currentTarget.parentElement.style.borderColor = C.brand }}
-                            onKeyDown={(e: any) => { if (e.key === "Enter") saveNick() }}
-                            style={{
-                                background: "transparent",
-                                border: "none",
-                                padding: "0 8px",
-                                fontSize: 12,
-                                height: "100%",
-                                minHeight: "auto",
-                                width: "100%",
-                                margin: 0,
-                            }}
-                        />
-                    </div>
+                    <LabelInput nick={nick} setNick={setNick} saveNick={saveNick} />
                 </div>
 
                 {/* chevron */}
@@ -695,39 +751,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
 
                         {/* search */}
                         {(
-                            <div style={{
-                                display: "flex", alignItems: "center", gap: 5,
-                                width: 160,
-                                background: C.bg1,
-                                borderRadius: 20,
-                                border: `1px solid ${C.border}`,
-                                padding: "0 9px",
-                                height: 28,
-                                boxSizing: "border-box",
-                                overflow: "hidden",
-                            }}>
-                                <div style={{ color: C.muted, display: "flex", alignItems: "center" }}><ico.search /></div>
-                                <TextInput
-                                    placeholder="search…"
-                                    value={query}
-                                    onChange={(v: string) => setQuery(v)}
-                                    style={{
-                                        background: "transparent",
-                                        border: "none",
-                                        flex: 1,
-                                        fontSize: 13,
-                                        padding: 0,
-                                        margin: 0,
-                                        height: "100%",
-                                        minHeight: "auto",
-                                    }}
-                                />
-                                {query && (
-                                    <div role="button" onClick={() => setQuery("")} style={{ color: C.muted, cursor: "pointer", display: "flex", alignItems: "center" }}>
-                                        <ico.x />
-                                    </div>
-                                )}
-                            </div>
+                            <SearchInput query={query} setQuery={setQuery} />
                         )}
                     </div>
 
