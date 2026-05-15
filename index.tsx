@@ -2,16 +2,6 @@
 // k1ng_op — userradar
 // basically a stalker plugin lol, tracks people and notifies you when they do stuff
 // messages, edits, deletes, typing, profile/avatar, voice, status, activity, boosts, server joins
-//
-// bugs fixed in this version:
-// - accent color false positives: discord sends null/0/undefined interchangeably, normalized now
-// - guild join/leave false positives: was using MESSAGE_CREATE type 7 for joins which fires
-//   for anyone in the channel seeing the join message — switched to GUILD_MEMBER_ADD/REMOVE
-//   which only fires for the actual member event
-// - typing not working in servers: TYPING_START fires for all channels but we need to check
-//   if user is actually watched, not just bail early on skipCurrentChannel
-// - activity cache init bug: was checking `uid in activityCache` but cache starts empty
-//   so first presence update always fired a notif — fixed with explicit undefined check
 
 import { addContextMenuPatch, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu"
 import { Notifications } from "@api/index"
@@ -42,6 +32,10 @@ const statusCache:   Record<string, string>          = {}
 // activityCache stores undefined = never seen, null = no activity, string = has activity
 // this distinction matters so we don't fire a notif on the very first presence update
 const activityCache: Record<string, string | null | undefined> = {}
+// guildCache tracks which servers a watched user is already in
+// GUILD_MEMBER_ADD fires on discord reconnect/re-sync for users already in the server
+// so we snapshot their guilds on start and skip any add event for guilds already in cache
+const guildCache: Record<string, Set<string>> = {}  // uid -> Set<guildId>
 
 let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
@@ -511,16 +505,36 @@ function WatchedRow({ user, refresh, onRemove }: { user: WatchedUser; refresh: (
                     </div>
                 </div>
 
-                {/* label input — stopPropagation so clicking it doesn't toggle expand */}
-                <div onClick={(e: any) => e.stopPropagation()} style={{ width: 110, flexShrink: 0 }}>
-                    <div style={{ background: C.bg1, borderRadius: 6, border: `1px solid ${C.border}` }}>
+                {/* label input */}
+                <div onClick={(e: any) => e.stopPropagation()} style={{ width: 80, flexShrink: 0 }}>
+                    <div style={{
+                        background: C.bg1,
+                        borderRadius: 20,
+                        border: `1px solid ${C.border}`,
+                        height: 26,
+                        boxSizing: "border-box",
+                        display: "flex",
+                        alignItems: "center",
+                        overflow: "hidden",
+                        transition: "border-color 150ms ease",
+                    }}>
                         <TextInput
                             placeholder="label"
                             value={nick}
                             onChange={(v: string) => setNick(v)}
-                            onBlur={saveNick}
+                            onBlur={(e: any) => { saveNick(); e.currentTarget.parentElement.style.borderColor = C.border }}
+                            onFocus={(e: any) => { e.currentTarget.parentElement.style.borderColor = C.brand }}
                             onKeyDown={(e: any) => { if (e.key === "Enter") saveNick() }}
-                            style={{ background: "transparent", border: "none", padding: "6px 8px", fontSize: 13 }}
+                            style={{
+                                background: "transparent",
+                                border: "none",
+                                padding: "0 8px",
+                                fontSize: 12,
+                                height: "100%",
+                                minHeight: "auto",
+                                width: "100%",
+                                margin: 0,
+                            }}
                         />
                     </div>
                 </div>
@@ -652,11 +666,25 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                         </div>
 
                         {/* sort toggle */}
-                        {users.length > 1 && (
+                        {(
                             <div role="button" tabIndex={0}
                                 onClick={() => setSort(s => s === "az" ? "date" : "az")}
                                 title={sort === "az" ? "sort by date" : "sort a-z"}
-                                style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 6, cursor: "pointer", background: C.bg2, border: `1px solid ${C.border}`, color: C.muted, fontSize: 12, fontWeight: 600, userSelect: "none" }}
+                                style={{
+                                    display: "flex", alignItems: "center", gap: 4,
+                                    padding: "0 9px",
+                                    borderRadius: 20,
+                                    cursor: "pointer",
+                                    background: C.bg2,
+                                    border: `1px solid ${C.border}`,
+                                    color: C.muted,
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    userSelect: "none",
+                                    height: 28,
+                                    boxSizing: "border-box",
+                                    overflow: "hidden",
+                                }}
                                 onMouseEnter={e => (e.currentTarget.style.borderColor = C.bgEl)}
                                 onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}
                             >
@@ -666,14 +694,33 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                         )}
 
                         {/* search */}
-                        {users.length > 3 && (
-                            <div style={{ display: "flex", alignItems: "center", gap: 6, width: 200, background: C.bg1, borderRadius: 8, border: `1px solid ${C.border}`, padding: "5px 10px" }}>
+                        {(
+                            <div style={{
+                                display: "flex", alignItems: "center", gap: 5,
+                                width: 160,
+                                background: C.bg1,
+                                borderRadius: 20,
+                                border: `1px solid ${C.border}`,
+                                padding: "0 9px",
+                                height: 28,
+                                boxSizing: "border-box",
+                                overflow: "hidden",
+                            }}>
                                 <div style={{ color: C.muted, display: "flex", alignItems: "center" }}><ico.search /></div>
                                 <TextInput
                                     placeholder="search…"
                                     value={query}
                                     onChange={(v: string) => setQuery(v)}
-                                    style={{ background: "transparent", border: "none", flex: 1, fontSize: 13, padding: 0 }}
+                                    style={{
+                                        background: "transparent",
+                                        border: "none",
+                                        flex: 1,
+                                        fontSize: 13,
+                                        padding: 0,
+                                        margin: 0,
+                                        height: "100%",
+                                        minHeight: "auto",
+                                    }}
                                 />
                                 {query && (
                                     <div role="button" onClick={() => setQuery("")} style={{ color: C.muted, cursor: "pointer", display: "flex", alignItems: "center" }}>
@@ -706,9 +753,6 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             </ModalContent>
 
             <ModalFooter>
-                <span style={{ flex: 1, fontSize: 12, color: C.muted, fontWeight: 500 }}>
-                    {users.length} user{users.length !== 1 ? "s" : ""} watched
-                </span>
                 <Button onClick={modalProps.onClose} size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT}>
                     close
                 </Button>
@@ -940,11 +984,15 @@ export default definePlugin({
             }
         },
 
-        // GUILD_MEMBER_ADD is the correct event for server joins — more reliable than
-        // watching for type 7 messages which have false positive issues
         GUILD_MEMBER_ADD(evt: GuildMemberEvent) {
             if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
             if (!featureOn(settings, evt.user.id, "joins", "globalJoins")) return
+
+            // skip if we already knew they were in this guild — happens on discord reconnect
+            // where GUILD_MEMBER_ADD fires for everyone already in the server
+            if (!guildCache[evt.user.id]) guildCache[evt.user.id] = new Set()
+            if (guildCache[evt.user.id].has(evt.guildId)) return
+            guildCache[evt.user.id].add(evt.guildId)
 
             const u     = UserStore.getUser(evt.user.id)
             const label = getWatchedUser(settings, evt.user.id)?.nick
@@ -963,6 +1011,10 @@ export default definePlugin({
         GUILD_MEMBER_REMOVE(evt: GuildMemberEvent) {
             if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
             if (!featureOn(settings, evt.user.id, "joins", "globalJoins")) return
+
+            // only fire if we knew they were in this guild
+            if (!guildCache[evt.user.id]?.has(evt.guildId)) return
+            guildCache[evt.user.id].delete(evt.guildId)
 
             const u     = UserStore.getUser(evt.user.id)
             const label = getWatchedUser(settings, evt.user.id)?.nick
@@ -986,7 +1038,10 @@ export default definePlugin({
             Notification.requestPermission()
         }
 
-        // pre-fetch all watched profiles as baseline so first poll doesn't spam false positives
+        // pre-fetch profiles as baseline (so first poll doesn't spam false positives)
+        // also snapshot current vc/status/activity state for everyone on the watchlist
+        // without this, if a user is already in vc when the plugin loads, the first
+        // VOICE_STATE_UPDATES event looks like a "join" even though they were already there
         for (const wu of getWatchlist(settings)) {
             try {
                 const { body } = await RestAPI.get({
@@ -994,6 +1049,41 @@ export default definePlugin({
                     query: { with_mutual_guilds: false, with_mutual_friends_count: false },
                 })
                 profileCache[wu.id] = camelize(body)
+            } catch { }
+
+            // snapshot current voice state so we don't false-positive on plugin load
+            try {
+                const vStates = findByProps("getVoiceStateForUser")
+                const vs = vStates?.getVoiceStateForUser(wu.id)
+                vcCache[wu.id] = vs?.channelId ?? null
+            } catch { vcCache[wu.id] = null }
+
+            // snapshot current status/activity so first PRESENCE_UPDATES doesn't fire
+            try {
+                const presence = findByProps("getStatus", "getActivities")
+                if (presence) {
+                    const status = presence.getStatus(wu.id)
+                    if (status) statusCache[wu.id] = status
+
+                    const activities: any[] = presence.getActivities(wu.id) ?? []
+                    const act = activities.find((a: any) => a.type !== 4) ?? null
+                    activityCache[wu.id] = act ? `${act.type}:${act.name}` : null
+                }
+            } catch { }
+
+            // snapshot which guilds they're already in so GUILD_MEMBER_ADD doesn't
+            // false-positive on discord reconnect re-sync
+            try {
+                const GuildStore = findByProps("getGuildIds", "getGuild")
+                if (GuildStore) {
+                    const guildIds: string[] = GuildStore.getGuildIds() ?? []
+                    const MemberStore = findByProps("getMember", "isMember")
+                    if (MemberStore) {
+                        guildCache[wu.id] = new Set(
+                            guildIds.filter(gid => MemberStore.isMember(gid, wu.id))
+                        )
+                    }
+                }
             } catch { }
         }
 
@@ -1012,6 +1102,7 @@ export default definePlugin({
         for (const k in vcCache)       delete vcCache[k]
         for (const k in statusCache)   delete statusCache[k]
         for (const k in activityCache) delete activityCache[k]
+        for (const k in guildCache)    delete guildCache[k]
         loggedMsgs = null
     },
 
