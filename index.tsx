@@ -349,6 +349,76 @@ type LookupStage =
     | { s: "done"; user: any; av: string }
     | { s: "err"; msg: string }
 
+function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
+    rawId: string
+    setRawId: (v: string) => void
+    hasErr: boolean
+    lk: LookupStage
+    setLk: (v: LookupStage) => void
+    doLookup: () => void
+}) {
+    const [focused, setFocused] = React.useState(false)
+    const borderColor = hasErr ? C.red : focused ? C.brand : C.border
+
+    return (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <div style={{ flex: 1 }}>
+                <input
+                    placeholder="paste a discord user id"
+                    value={rawId}
+                    onChange={(e) => { setRawId(e.target.value); if (hasErr) setLk({ s: "idle" }) }}
+                    onKeyDown={(e) => { if (e.key === "Enter") doLookup() }}
+                    onFocus={() => setFocused(true)}
+                    onBlur={() => setFocused(false)}
+                    autoFocus
+                    style={{
+                        background: C.bg1,
+                        borderRadius: 20,
+                        border: `1px solid ${borderColor}`,
+                        height: 40,
+                        boxSizing: "border-box",
+                        padding: "0 14px",
+                        transition: "border-color 150ms ease",
+                        width: "100%",
+                        fontSize: 14,
+                        color: C.text,
+                        outline: "none",
+                        fontFamily: "inherit",
+                    }}
+                />
+                <div style={{ fontSize: 11, color: hasErr ? C.danger : C.muted, marginTop: 5, display: "flex", alignItems: "center", gap: 4 }}>
+                    {hasErr ? <ico.x /> : null}
+                    {hasErr ? (lk as any).msg : "developer mode → right-click user → copy user id"}
+                </div>
+            </div>
+            <button
+                onClick={doLookup}
+                disabled={lk.s === "loading"}
+                style={{
+                    borderRadius: 20,
+                    height: 40,
+                    boxSizing: "border-box",
+                    padding: "0 20px",
+                    background: lk.s === "loading" ? "#4752c4" : C.brand,
+                    color: "#fff",
+                    border: "none",
+                    fontSize: 14,
+                    fontWeight: 600,
+                    cursor: lk.s === "loading" ? "not-allowed" : "pointer",
+                    flexShrink: 0,
+                    fontFamily: "inherit",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    opacity: lk.s === "loading" ? 0.7 : 1,
+                }}
+            >
+                {lk.s === "loading" ? <><span className="ur-spin" style={{ marginRight: 6 }} />looking…</> : "look up"}
+            </button>
+        </div>
+    )
+}
+
 function AddUserSection({ onAdded }: { onAdded: () => void }) {
     const [rawId, setRawId] = React.useState("")
     const [label, setLabel] = React.useState("")
@@ -394,32 +464,14 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
             </div>
 
             {lk.s !== "done" && (
-                <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                    <div style={{ flex: 1 }}>
-                        <div style={{
-                            display: "flex", alignItems: "center",
-                            background: C.bg1, borderRadius: 8,
-                            border: `1px solid ${hasErr ? C.red : C.border}`,
-                            transition: "border-color 150ms",
-                        }}>
-                            <TextInput
-                                placeholder="paste a discord user id"
-                                value={rawId}
-                                onChange={(v: string) => { setRawId(v); if (hasErr) setLk({ s: "idle" }) }}
-                                onKeyDown={(e: any) => { if (e.key === "Enter") doLookup() }}
-                                autoFocus
-                                style={{ background: "transparent", border: "none", flex: 1 }}
-                            />
-                        </div>
-                        <div style={{ fontSize: 11, color: hasErr ? C.danger : C.muted, marginTop: 5, display: "flex", alignItems: "center", gap: 4 }}>
-                            {hasErr ? <ico.x /> : null}
-                            {hasErr ? (lk as any).msg : "developer mode → right-click user → copy user id"}
-                        </div>
-                    </div>
-                    <Button onClick={doLookup} disabled={lk.s === "loading"} size={Button.Sizes.MEDIUM} color={Button.Colors.BRAND}>
-                        {lk.s === "loading" ? <><span className="ur-spin" style={{ marginRight: 6 }} />looking…</> : "look up"}
-                    </Button>
-                </div>
+                <AddUserInput
+                    rawId={rawId}
+                    setRawId={setRawId}
+                    hasErr={hasErr}
+                    lk={lk}
+                    setLk={setLk}
+                    doLookup={doLookup}
+                />
             )}
 
             {lk.s === "done" && (
@@ -797,9 +849,33 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             </ModalContent>
 
             <ModalFooter>
-                <Button onClick={modalProps.onClose} size={Button.Sizes.MEDIUM} color={Button.Colors.TRANSPARENT}>
+                <button
+                    onClick={modalProps.onClose}
+                    style={{
+                        borderRadius: 20,
+                        height: 36,
+                        boxSizing: "border-box",
+                        padding: "0 18px",
+                        background: "transparent",
+                        color: C.text,
+                        border: `1px solid ${C.border}`,
+                        fontSize: 14,
+                        fontWeight: 500,
+                        cursor: "pointer",
+                        fontFamily: "inherit",
+                        transition: "background 150ms ease, border-color 150ms ease",
+                    }}
+                    onMouseEnter={e => {
+                        e.currentTarget.style.background = "rgba(255,255,255,0.05)"
+                        e.currentTarget.style.borderColor = C.bgEl
+                    }}
+                    onMouseLeave={e => {
+                        e.currentTarget.style.background = "transparent"
+                        e.currentTarget.style.borderColor = C.border
+                    }}
+                >
                     close
-                </Button>
+                </button>
             </ModalFooter>
         </ModalRoot>
     )
