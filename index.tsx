@@ -1601,11 +1601,34 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     async function checkForUpdate() {
         setUpdateStatus("checking")
         try {
-            // Get local file content via native.ts
             const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
-            if (!native?.getLocalFileContent) {
-                throw new Error("native.ts not loaded. Rebuild Vencord: pnpm build && pnpm inject")
+
+            // Diagnostic: log what's available
+            console.log("[UserRadar] VencordNative.pluginHelpers:", Object.keys((window as any).VencordNative?.pluginHelpers || {}))
+            console.log("[UserRadar] UserRadar native:", native)
+            console.log("[UserRadar] ping:", native?.ping?.())
+
+            if (!native) {
+                // Fallback: can't compare local vs remote, just fetch remote and show info
+                const res = await fetch(RAW_URL + "?t=" + Date.now())
+                if (!res.ok) throw new Error(`GitHub raw ${res.status}`)
+                const remote = await res.text()
+                if (!remote || remote.length < 500) throw new Error("Remote file empty")
+
+                // Show modal with remote info — user must manually check
+                setUpdateStatus("available")
+                Toasts.show({
+                    type: Toasts.Type.DEFAULT,
+                    message: "native.ts not loaded — manual update required",
+                    id: Toasts.genId()
+                })
+                return
             }
+
+            if (!native.getLocalFileContent) {
+                throw new Error("native.ts loaded but getLocalFileContent missing. Rebuild.")
+            }
+
             const local = native.getLocalFileContent("index.tsx")
             if (local.error) {
                 throw new Error(`Failed to read local file: ${local.error}`)
@@ -1614,7 +1637,6 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                 throw new Error("Local index.tsx not found")
             }
 
-            // Fetch remote content
             const res = await fetch(RAW_URL + "?t=" + Date.now())
             if (!res.ok) throw new Error(`GitHub raw ${res.status}`)
             const remote = await res.text()
@@ -1622,7 +1644,6 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                 throw new Error("Remote file empty or invalid")
             }
 
-            // Compare content directly — no SHA needed
             const isSame = local.content.trim() === remote.trim()
             setUpdateStatus(isSame ? "uptodate" : "available")
         } catch (err: any) {
@@ -1639,7 +1660,14 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
 
             if (!native) {
-                throw new Error("native.ts not loaded. Rebuild Vencord: pnpm build && pnpm inject")
+                window.open(RAW_URL, "_blank")
+                setUpdateStatus("error")
+                Toasts.show({
+                    type: Toasts.Type.FAILURE,
+                    message: "native.ts not loaded — open raw file for manual update",
+                    id: Toasts.genId()
+                })
+                return
             }
 
             if (!native.updatePluginFile) {
@@ -1658,9 +1686,6 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                     console.log("[UserRadar] Update details:\n" + result.details)
                 }
             } else {
-                if (result.triedPaths) {
-                    console.error("[UserRadar] Tried paths:", result.triedPaths)
-                }
                 throw new Error(result.message)
             }
         } catch (err: any) {
