@@ -1,8 +1,6 @@
-// store.ts
-// k1ng_op
-//
-// all watchlist helpers live here
-// keeping it separate from index.tsx so the file doesn't become 2000 lines
+// store.ts — k1ng_op
+// watchlist crud + misc helpers
+// split out so index.tsx doesn't hit 3000 lines
 
 import { Logger } from "@utils/Logger"
 import { WatchedUser } from "./types"
@@ -19,8 +17,8 @@ function parseList(raw: string): WatchedUser[] {
     }
 }
 
-// never cache the watchlist in a variable — stale state has caused
-// so many bugs where adds/removes don't stick until restart
+// always read fresh from settings — never cache in a local var
+// learned this the hard way after "why isn't this user removed" bugs
 export function getWatchlist(s: any): WatchedUser[] {
     return parseList(s.store.watchlist ?? "[]")
 }
@@ -92,7 +90,7 @@ export function camelize(obj: any): any {
     return obj
 }
 
-// quiet hours check — returns true if we should suppress notifs right now
+// true if notifications should be muted right now
 export function inQuietHours(s: any): boolean {
     if (!s.store.quietHours) return false
     const now = new Date()
