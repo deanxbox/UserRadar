@@ -1594,37 +1594,39 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     const [query, setQuery] = React.useState("")
     const [sort,  setSort]  = React.useState<SortMode>("date")
     const [expandedId, setExpandedId] = React.useState<string | null>(null)
-    // BUILD_SHA is baked in at build time — update this when you push to GitHub
-    // Format: first 7 chars of the commit SHA
-    const BUILD_SHA = "a958417"   // <-- change this to your commit SHA after pushing
-
     const [updateStatus, setUpdateStatus] = React.useState<"idle"|"checking"|"uptodate"|"available"|"updating"|"restart"|"error">("idle")
-    const [latestSha, setLatestSha] = React.useState<string>("—")
-    const [lastCheck, setLastCheck] = React.useState<string>("never")
 
     const RAW_URL = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
-    const COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
 
     async function checkForUpdate() {
         setUpdateStatus("checking")
         try {
-            const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
-            if (!res.ok) throw new Error(`GitHub API ${res.status}`)
-            const data = await res.json()
-            if (!Array.isArray(data) || !data[0]) { setUpdateStatus("uptodate"); return }
-            const remoteSha = (data[0].sha as string).slice(0, 7)
-            setLatestSha(remoteSha)
-            setLastCheck(new Date().toLocaleTimeString())
-            const localSha = BUILD_SHA === "LOCAL" ? null : BUILD_SHA
-            if (!localSha) {
-                // If BUILD_SHA is still "LOCAL", we can't compare — show as available to be safe
-                setUpdateStatus("available")
-            } else {
-                setUpdateStatus(remoteSha !== localSha ? "available" : "uptodate")
+            // Get local file content via native.ts
+            const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
+            if (!native?.getLocalFileContent) {
+                throw new Error("native.ts not loaded. Rebuild Vencord: pnpm build && pnpm inject")
             }
+            const local = native.getLocalFileContent("index.tsx")
+            if (local.error) {
+                throw new Error(`Failed to read local file: ${local.error}`)
+            }
+            if (!local.content) {
+                throw new Error("Local index.tsx not found")
+            }
+
+            // Fetch remote content
+            const res = await fetch(RAW_URL + "?t=" + Date.now())
+            if (!res.ok) throw new Error(`GitHub raw ${res.status}`)
+            const remote = await res.text()
+            if (!remote || remote.length < 500) {
+                throw new Error("Remote file empty or invalid")
+            }
+
+            // Compare content directly — no SHA needed
+            const isSame = local.content.trim() === remote.trim()
+            setUpdateStatus(isSame ? "uptodate" : "available")
         } catch (err: any) {
             setUpdateStatus("error")
-            setLatestSha("err")
             console.error("[UserRadar] Update check failed:", err?.message || err)
         }
     }
@@ -1656,6 +1658,9 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                     console.log("[UserRadar] Update details:\n" + result.details)
                 }
             } else {
+                if (result.triedPaths) {
+                    console.error("[UserRadar] Tried paths:", result.triedPaths)
+                }
                 throw new Error(result.message)
             }
         } catch (err: any) {
@@ -1832,14 +1837,11 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                                 {updateStatus === "error" && "⚠ retry"}
                                 {updateStatus === "restart" && "↺ restart discord"}
                             </button>
-                            <span style={{ fontSize: 11, color: C.muted, fontFamily: "monospace" }}>
-                                v{BUILD_SHA === "LOCAL" ? "?" : BUILD_SHA}
-                            </span>
                         </div>
-                        {updateStatus === "restart" && <span style={{ fontSize: 11, color: C.muted }}>code copied — paste into index.tsx</span>}
-                        {updateStatus === "available" && <span style={{ fontSize: 11, color: C.muted }}>new version ready</span>}
-                        {updateStatus === "uptodate" && <span style={{ fontSize: 11, color: C.muted }}>checked {lastCheck}</span>}
-                        {updateStatus === "error" && <span style={{ fontSize: 11, color: C.red }}>failed</span>}
+                        {updateStatus === "restart" && <span style={{ fontSize: 11, color: C.muted }}>restart discord to apply</span>}
+                        {updateStatus === "available" && <span style={{ fontSize: 11, color: C.muted }}>new version available</span>}
+                        {updateStatus === "uptodate" && <span style={{ fontSize: 11, color: C.muted }}>up to date</span>}
+                        {updateStatus === "error" && <span style={{ fontSize: 11, color: C.red }}>check failed</span>}
                     </div>
                     </div>
 
