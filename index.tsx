@@ -1594,7 +1594,13 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     const [query, setQuery] = React.useState("")
     const [sort,  setSort]  = React.useState<SortMode>("date")
     const [expandedId, setExpandedId] = React.useState<string | null>(null)
+    // BUILD_SHA is baked in at build time — update this when you push to GitHub
+    // Format: first 7 chars of the commit SHA
+    const BUILD_SHA = "a958417"   // <-- change this to your commit SHA after pushing
+
     const [updateStatus, setUpdateStatus] = React.useState<"idle"|"checking"|"uptodate"|"available"|"updating"|"restart"|"error">("idle")
+    const [latestSha, setLatestSha] = React.useState<string>("—")
+    const [lastCheck, setLastCheck] = React.useState<string>("never")
 
     const RAW_URL = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
     const COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
@@ -1603,28 +1609,35 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
         setUpdateStatus("checking")
         try {
             const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
-            if (!res.ok) throw new Error("github api error")
+            if (!res.ok) throw new Error(`GitHub API ${res.status}`)
             const data = await res.json()
             if (!Array.isArray(data) || !data[0]) { setUpdateStatus("uptodate"); return }
-            const latestSha = data[0].sha as string
-            // compare against the sha baked into this build
-            // if you don't update this on each push it will always show available
-            // which is fine — better to prompt than miss an update
-            const currentSha = (Vencord.Plugins.plugins["UserRadar"] as any)?.__updateSha ?? "none"
-            setUpdateStatus(latestSha !== currentSha ? "available" : "uptodate")
-        } catch { setUpdateStatus("error") }
+            const remoteSha = (data[0].sha as string).slice(0, 7)
+            setLatestSha(remoteSha)
+            setLastCheck(new Date().toLocaleTimeString())
+            const localSha = BUILD_SHA === "LOCAL" ? null : BUILD_SHA
+            if (!localSha) {
+                // If BUILD_SHA is still "LOCAL", we can't compare — show as available to be safe
+                setUpdateStatus("available")
+            } else {
+                setUpdateStatus(remoteSha !== localSha ? "available" : "uptodate")
+            }
+        } catch (err: any) {
+            setUpdateStatus("error")
+            setLatestSha("err")
+            console.error("[UserRadar] Update check failed:", err?.message || err)
+        }
     }
 
     async function doUpdate() {
         setUpdateStatus("updating")
         try {
-            const res = await fetch(RAW_URL + "?t=" + Date.now())  // bust cache
-            if (!res.ok) throw new Error("fetch failed")
+            const res = await fetch(RAW_URL + "?t=" + Date.now())
+            if (!res.ok) throw new Error(`HTTP ${res.status}`)
             const code = await res.text()
-            if (!code || code.length < 500) throw new Error("empty")
+            if (!code || code.length < 500) throw new Error("Empty response")
 
-            // VencordNative.pluginManager.updatePlugin is the real API
-            // it writes the file and schedules a rebuild
+            // Try Vencord's native plugin manager first
             const pm = (window as any).VencordNative?.pluginManager
             if (pm?.updatePlugin) {
                 await pm.updatePlugin("UserRadar", code)
@@ -1632,7 +1645,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                 return
             }
 
-            // older builds: write via the settings native module
+            // Fallback: write directly to file
             const native = (window as any).VencordNative
             const dir = await native?.settings?.getSettingsDir?.()
             if (dir) {
@@ -1641,13 +1654,16 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                 return
             }
 
+            throw new Error("No write method available")
+        } catch (err: any) {
             setUpdateStatus("error")
-        } catch { setUpdateStatus("error") }
+            console.error("[UserRadar] Update failed:", err?.message || err)
+        }
     }
 
     function doRestart() {
-        try { (window as any).DiscordNative.app.relaunch() } catch { }
-        try { (window as any).VencordNative.native.relaunch() } catch { }
+        try { (window as any).DiscordNative?.app?.relaunch?.() } catch { }
+        try { (window as any).VencordNative?.native?.relaunch?.() } catch { }
     }
 
     const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) } }
@@ -1766,30 +1782,54 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             <ModalFooter>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <button onClick={() => {
-                            if (updateStatus === "available") doUpdate()
-                            else if (updateStatus === "restart") doRestart()
-                            else checkForUpdate()
-                        }} disabled={updateStatus === "checking" || updateStatus === "updating"}
-                        style={{
-                            borderRadius: 20, height: 32, padding: "0 14px", boxSizing: "border-box",
-                            background: updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent",
-                            color: updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted,
-                            border: `1px solid ${updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border}`,
-                            fontSize: 12, fontWeight: 600, cursor: (updateStatus === "checking" || updateStatus === "updating") ? "wait" : "pointer",
-                            fontFamily: "inherit", transition: "all 150ms", display: "flex", alignItems: "center", gap: 5,
-                        }}>
-                            {(updateStatus === "checking" || updateStatus === "updating") && <span className="ur-spin" />}
-                            {updateStatus === "idle" && "check for updates"}
-                            {updateStatus === "checking" && "checking…"}
-                            {updateStatus === "available" && "↓ update"}
-                            {updateStatus === "updating" && "updating…"}
-                            {updateStatus === "uptodate" && "✓ up to date"}
-                            {updateStatus === "error" && "⚠ retry"}
-                            {updateStatus === "restart" && "↺ restart discord"}
-                        </button>
-                        {updateStatus === "restart" && <span style={{ fontSize: 11, color: C.muted }}>saved — restart to apply</span>}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <button
+                                onClick={() => {
+                                    if (updateStatus === "available") doUpdate()
+                                    else if (updateStatus === "restart") doRestart()
+                                    else checkForUpdate()
+                                }}
+                                disabled={updateStatus === "checking" || updateStatus === "updating"}
+                                style={{
+                                    borderRadius: 20, height: 32, padding: "0 14px", boxSizing: "border-box",
+                                    background: updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent",
+                                    color: updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted,
+                                    border: `1px solid ${updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border}`,
+                                    fontSize: 12, fontWeight: 600, cursor: (updateStatus === "checking" || updateStatus === "updating") ? "wait" : "pointer",
+                                    fontFamily: "inherit", transition: "all 150ms ease", display: "flex", alignItems: "center", gap: 5,
+                                }}
+                                onMouseEnter={e => {
+                                    if (updateStatus !== "checking" && updateStatus !== "updating") {
+                                        e.currentTarget.style.background = C.brand
+                                        e.currentTarget.style.borderColor = C.brand
+                                        e.currentTarget.style.color = "#ffffff"
+                                    }
+                                }}
+                                onMouseLeave={e => {
+                                    e.currentTarget.style.background = updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent"
+                                    e.currentTarget.style.borderColor = updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border
+                                    e.currentTarget.style.color = updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted
+                                }}
+                            >
+                                {(updateStatus === "checking" || updateStatus === "updating") && <span className="ur-spin" />}
+                                {updateStatus === "idle" && "check for updates"}
+                                {updateStatus === "checking" && "checking…"}
+                                {updateStatus === "available" && "↓ update"}
+                                {updateStatus === "updating" && "updating…"}
+                                {updateStatus === "uptodate" && "✓ up to date"}
+                                {updateStatus === "error" && "⚠ retry"}
+                                {updateStatus === "restart" && "↺ restart discord"}
+                            </button>
+                            <span style={{ fontSize: 11, color: C.muted, fontFamily: "monospace" }}>
+                                v{BUILD_SHA === "LOCAL" ? "?" : BUILD_SHA}
+                            </span>
+                        </div>
+                        {updateStatus === "restart" && <span style={{ fontSize: 11, color: C.muted }}>restart to apply</span>}
                         {updateStatus === "available" && <span style={{ fontSize: 11, color: C.muted }}>new version ready</span>}
+                        {updateStatus === "uptodate" && <span style={{ fontSize: 11, color: C.muted }}>checked {lastCheck}</span>}
+                        {updateStatus === "error" && <span style={{ fontSize: 11, color: C.red }}>failed</span>}
+                    </div>
                     </div>
 
                     <button
