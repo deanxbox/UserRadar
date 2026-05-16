@@ -1132,10 +1132,49 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                                     <div style={{ fontSize: 13, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.8, color: C.header }}>
                                         Recent user Activity
                                     </div>
-                                    <div style={{ fontSize: 11, color: C.muted, marginLeft: "auto" }}>
-                                        {logs.length} event{logs.length !== 1 ? "s" : ""}
+                                    <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+                                        {logs.length > 0 && (
+                                            <div
+                                                role="button"
+                                                tabIndex={0}
+                                                onClick={() => { delete activityLog[user.id]; setShowLog(false); setTimeout(() => setShowLog(true), 10) }}
+                                                onKeyDown={(e: any) => { if (e.key === "Enter") { delete activityLog[user.id]; setShowLog(false); setTimeout(() => setShowLog(true), 10) } }}
+                                                style={{
+                                                    fontSize: 11,
+                                                    fontWeight: 700,
+                                                    color: C.danger,
+                                                    cursor: "pointer",
+                                                    padding: "4px 12px",
+                                                    borderRadius: 20,
+                                                    border: `1px solid ${C.danger}30`,
+                                                    background: `${C.danger}10`,
+                                                    transition: "all 150ms ease",
+                                                    userSelect: "none",
+                                                    display: "flex",
+                                                    alignItems: "center",
+                                                    gap: 4,
+                                                    height: 24,
+                                                    boxSizing: "border-box",
+                                                }}
+                                                onMouseEnter={e => {
+                                                    e.currentTarget.style.background = `${C.danger}20`
+                                                    e.currentTarget.style.borderColor = `${C.danger}50`
+                                                }}
+                                                onMouseLeave={e => {
+                                                    e.currentTarget.style.background = `${C.danger}10`
+                                                    e.currentTarget.style.borderColor = `${C.danger}30`
+                                                }}
+                                            >
+                                                <ico.x />
+                                                Clear logs
+                                            </div>
+                                        )}
+                                        <div style={{ fontSize: 11, color: C.muted }}>
+                                            {logs.length} event{logs.length !== 1 ? "s" : ""}
+                                        </div>
                                     </div>
                                 </div>
+
                                 {logs.length === 0 ? (
                                     <div style={{ fontSize: 14, color: C.muted, padding: "20px 0", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
                                         <div style={{ opacity: 0.4 }}><ico.ghost /></div>
@@ -1366,19 +1405,31 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                                                         onClick={(e: any) => { e.stopPropagation(); previewNotification(user.id, row.key) }}
                                                         onKeyDown={(e: any) => { if (e.key === "Enter") { e.stopPropagation(); previewNotification(user.id, row.key) } }}
                                                         style={{
-                                                            color: "#949ba4",
+                                                            color: C.muted,
                                                             cursor: "pointer",
-                                                            width: 22,
-                                                            height: 22,
-                                                            borderRadius: "50%",
+                                                            width: 26,
+                                                            height: 26,
+                                                            borderRadius: 20,
                                                             display: "flex",
                                                             alignItems: "center",
                                                             justifyContent: "center",
-                                                            transition: "background 100ms, color 100ms",
+                                                            transition: "all 150ms cubic-bezier(0.4,0,0.2,1)",
                                                             flexShrink: 0,
+                                                            background: C.bg1,
+                                                            border: `1px solid ${C.border}`,
                                                         }}
-                                                        onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "#b5bac1" }}
-                                                        onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#949ba4" }}
+                                                        onMouseEnter={e => {
+                                                            e.currentTarget.style.background = `${C.brand}18`
+                                                            e.currentTarget.style.borderColor = `${C.brand}60`
+                                                            e.currentTarget.style.color = C.brandLight
+                                                            e.currentTarget.style.transform = "scale(1.08)"
+                                                        }}
+                                                        onMouseLeave={e => {
+                                                            e.currentTarget.style.background = C.bg1
+                                                            e.currentTarget.style.borderColor = C.border
+                                                            e.currentTarget.style.color = C.muted
+                                                            e.currentTarget.style.transform = "scale(1)"
+                                                        }}
                                                     >
                                                         <ico.preview />
                                                     </div>
@@ -1750,16 +1801,59 @@ export default definePlugin({
         addContextMenuPatch("message", msgCtxPatch)
         if (settings.store.showToolbarIcon) startToolbarObserver()
 
+        // snapshot current vc/status/activity/guild state BEFORE flux handlers start receiving events
+        // this prevents false "joined vc", "now online", "joined server" notifs on plugin load
+        try {
+            const vsMod    = findByProps("getVoiceStateForUser")
+            const presMod  = findByProps("getStatus", "getActivities")
+            const guildMod = findByProps("getGuildIds", "getGuild")
+            const memMod   = findByProps("getMember", "isMember")
+            const allGuilds: string[] = guildMod?.getGuildIds?.() ?? []
+
+            for (const wu of getWatchlist(settings)) {
+                // voice
+                try {
+                    const vs = vsMod?.getVoiceStateForUser?.(wu.id)
+                    vcCache[wu.id] = vs?.channelId ?? null
+                } catch { vcCache[wu.id] = null }
+
+                // status + activity
+                try {
+                    const status = presMod?.getStatus?.(wu.id)
+                    if (status) statusCache[wu.id] = status
+                    const acts: any[] = presMod?.getActivities?.(wu.id) ?? []
+                    const realAct = acts.find((a: any) => a.type !== 4) ?? null
+                    activityCache[wu.id] = realAct ? `${realAct.type}:${realAct.name}` : null
+                } catch { }
+
+                // guild membership
+                try {
+                    if (memMod && allGuilds.length) {
+                        guildCache[wu.id] = new Set(
+                            allGuilds.filter(gid => { try { return memMod.isMember(gid, wu.id) } catch { return false } })
+                        )
+                    }
+                } catch { }
+            }
+        } catch (e) { log.warn("snapshot failed", e) }
+
+        // fetch profiles in background — don't block start(), flux handlers need to be active asap
         const list = getWatchlist(settings)
-        for (const wu of list) {
-            try {
-                RestAPI.get({
-                    url: `/users/${wu.id}/profile`,
-                    query: { with_mutual_guilds: false, with_mutual_friends_count: false },
-                }).then((res: any) => { profileCache[wu.id] = camelize(res.body) }).catch(() => {})
-            } catch { }
+        let i = 0
+        const fetchNext = () => {
+            if (i >= list.length) return
+            const wu = list[i++]
+            RestAPI.get({
+                url: `/users/${wu.id}/profile`,
+                query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+            }).then((res: any) => {
+                profileCache[wu.id] = camelize(res.body)
+                setTimeout(fetchNext, 800)  // stagger requests
+            }).catch(() => setTimeout(fetchNext, 800))
         }
-        pollTimer = setInterval(pollProfiles, 60000)
+        setTimeout(fetchNext, 500)  // small delay so discord finishes its own startup first
+
+        pollTimer = setInterval(pollProfiles, 5 * 60 * 1000)
     },
 
     stop() {
@@ -1833,8 +1927,10 @@ export default definePlugin({
 
         MESSAGE_DELETE({ id, channelId }: MsgDeleteEvent) {
             const store = tryLoadLoggedMsgs()
-            const key   = `${channelId}-${id}`
-            const msg   = store?.[key] ?? MessageStore.getMessage(channelId, id)
+            // try discord's cache first, then message logger (keyed by msgId, or nested channelId->msgId)
+            const msg = MessageStore.getMessage(channelId, id)
+                ?? store?.[id]
+                ?? (store as any)?.[channelId]?.[id]
             if (!msg?.author) return
             const uid = msg.author.id
             if (!isWatched(settings, uid)) return
@@ -1887,7 +1983,7 @@ export default definePlugin({
             }
         },
 
-        VOICE_STATE_UPDATE({ voiceStates }: VoiceStateEvent) {
+        VOICE_STATE_UPDATES({ voiceStates }: VoiceStateEvent) {
             for (const vs of voiceStates || []) {
                 const uid = vs.userId
                 if (!isWatched(settings, uid)) continue
@@ -1934,33 +2030,55 @@ export default definePlugin({
                     logActivity(uid, "status", STATUS_EMOJI[newStatus] || "🔵", `status changed to ${newStatus} (was ${oldStatus})`)
                 }
                 statusCache[uid] = newStatus
+                // skip type 4 = custom status, only track real activities
+                const realAct = (u.activities || []).find((a: any) => a.type !== 4) ?? null
+                const newActKey = realAct ? `${realAct.type}:${realAct.name}` : null
                 const oldAct = activityCache[uid]
-                const newAct = u.activities?.[0]?.name
-                if (oldAct !== undefined && oldAct !== newAct && isFeatureOn(uid, "activity", "globalActivity")) {
+
+                if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity")) {
+                    const ACT_VERB: Record<number, string> = { 0: "playing", 2: "listening to", 3: "watching", 5: "competing in" }
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
                     const name  = displayName(user) || uid
                     const dn    = label ? `${label} (${name})` : name
-                    if (newAct) {
+                    if (realAct) {
+                        const verb = ACT_VERB[realAct.type] ?? "playing"
                         notify({
-                            title: `${dn} is ${u.activities?.[0]?.type === 2 ? "listening to" : "playing"} ${newAct}`,
-                            body: u.activities?.[0]?.details || "",
+                            title: `${dn} is ${verb} ${realAct.name}`,
+                            body: realAct.details || realAct.state || "",
                             icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
                             onClick: () => openUserProfile(uid),
                         })
-                        logActivity(uid, "activity", "🎮", `${u.activities?.[0]?.type === 2 ? "listening to" : "playing"} ${newAct}`)
+                        logActivity(uid, "activity", "🎮", `${verb} ${realAct.name}`)
                     } else if (oldAct) {
+                        const [typeStr, ...nameParts] = oldAct.split(":")
+                        const oldName = nameParts.join(":")
+                        const verb = ACT_VERB[parseInt(typeStr)] ?? "playing"
                         notify({
-                            title: `${dn} stopped ${u.activities?.[0]?.type === 2 ? "listening to" : "playing"} ${oldAct}`,
+                            title: `${dn} stopped ${verb} ${oldName}`,
                             body: "",
                             icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
                             onClick: () => openUserProfile(uid),
                         })
-                        logActivity(uid, "activity", "🛑", `stopped ${u.activities?.[0]?.type === 2 ? "listening to" : "playing"} ${oldAct}`)
+                        logActivity(uid, "activity", "🛑", `stopped ${verb} ${oldName}`)
                     }
                 }
-                activityCache[uid] = newAct
+                activityCache[uid] = newActKey
             }
+        },
+
+        // websocket fires this instantly when username/avatar changes
+        USER_UPDATE({ user }: { user: any }) {
+            if (!user?.id || !isWatched(settings, user.id)) return
+            const old = profileCache[user.id]
+            if (!old) return
+            checkProfileChanged(user.id, { ...old, user: { ...old.user, ...camelize(user) } })
+        },
+
+        // fires when discord fetches a full profile (opening popout, profile page etc)
+        USER_PROFILE_FETCH_SUCCESS(rawEvt: any) {
+            if (!rawEvt?.user?.id) return
+            checkProfileChanged(rawEvt.user.id, camelize(rawEvt))
         },
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
