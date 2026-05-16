@@ -99,6 +99,7 @@ const settings = definePluginSettings({
     debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "log all events to console" },
     globalPresetMode:   { type: OptionType.STRING,  default: "custom",               description: "global preset mode — custom, stalker, lite, silent" },
     showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "show watchlist icon in toolbar" },
+    lastKnownRemoteSha: { type: OptionType.STRING,  hidden: true,  default: "",        description: "last known remote commit sha — managed by update checker" },
 })
 
 // -- notif helpers --
@@ -1598,23 +1599,25 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
 
     const RAW_URL = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
 
+    const COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?per_page=1"
+
+    async function getRemoteSha(): Promise<string | null> {
+        try {
+            const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
+            if (!res.ok) return null
+            const data = await res.json()
+            return data[0]?.sha?.slice(0, 7) || null
+        } catch { return null }
+    }
+
     async function checkForUpdate() {
         setUpdateStatus("checking")
         try {
             const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
+            const storedSha = settings.store.lastKnownRemoteSha || ""
 
-            if (!native) {
-                // No native.ts at all — fetch remote for manual comparison
-                const res = await fetch(RAW_URL + "?t=" + Date.now())
-                if (!res.ok) throw new Error(`GitHub raw ${res.status}`)
-                const remote = await res.text()
-                if (!remote || remote.length < 500) throw new Error("Remote file empty")
-                setUpdateStatus("available")
-                return
-            }
-
-            // If getLocalFileContent exists, do content comparison
-            if (native.getLocalFileContent) {
+            // Best case: native.ts works — do content comparison
+            if (native?.getLocalFileContent) {
                 const local = native.getLocalFileContent("index.tsx")
                 if (local.content) {
                     const res = await fetch(RAW_URL + "?t=" + Date.now())
@@ -1622,19 +1625,29 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                     const remote = await res.text()
                     if (!remote || remote.length < 500) throw new Error("Remote file empty")
                     const isSame = local.content.trim() === remote.trim()
-                    setUpdateStatus(isSame ? "uptodate" : "available")
+                    if (isSame) {
+                        // Also sync the stored SHA for future fallback checks
+                        const remoteSha = await getRemoteSha()
+                        if (remoteSha) settings.store.lastKnownRemoteSha = remoteSha
+                        setUpdateStatus("uptodate")
+                    } else {
+                        setUpdateStatus("available")
+                    }
                     return
                 }
             }
 
-            // native.ts loaded but getLocalFileContent missing — stale build
-            // Just show available to be safe, user can click update
-            setUpdateStatus("available")
-            Toasts.show({
-                type: Toasts.Type.DEFAULT,
-                message: "Rebuild Vencord to enable update check: pnpm build && pnpm inject",
-                id: Toasts.genId()
-            })
+            // Fallback: SHA comparison via GitHub API (works even without native.ts)
+            const remoteSha = await getRemoteSha()
+            if (!remoteSha) {
+                throw new Error("Could not reach GitHub API")
+            }
+
+            if (storedSha && storedSha === remoteSha) {
+                setUpdateStatus("uptodate")
+            } else {
+                setUpdateStatus("available")
+            }
         } catch (err: any) {
             setUpdateStatus("error")
             console.error("[UserRadar] Update check failed:", err?.message || err)
