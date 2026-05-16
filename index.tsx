@@ -1634,21 +1634,17 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
         try {
             // Access native.ts exports via Vencord's plugin system
             // native.ts functions are exposed on plugin.native after build
-            const plugin = (window as any).VencordNative?.pluginManager?.getPlugin?.("UserRadar")
+            const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
 
-            if (!plugin) {
-                throw new Error("Plugin not found in Vencord registry")
+            if (!native) {
+                throw new Error("native.ts not loaded. Rebuild Vencord: pnpm build && pnpm inject")
             }
 
-            if (!plugin.native) {
-                throw new Error("native.ts not loaded. Check: (1) native.ts exists in plugin folder, (2) no syntax errors in native.ts, (3) rebuilt with 'pnpm build && pnpm inject'")
+            if (!native.updatePluginFile) {
+                throw new Error("updatePluginFile not exported from native.ts")
             }
 
-            if (!plugin.native.updatePluginFile) {
-                throw new Error("updatePluginFile not found in native.ts. Check native.ts exports.")
-            }
-
-            const result = await plugin.native.updatePluginFile()
+            const result = await native.updatePluginFile()
             if (result.success) {
                 setUpdateStatus("restart")
                 Toasts.show({
