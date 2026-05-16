@@ -29,23 +29,14 @@ import {
 const profileCache:  Record<string, any>           = {}
 const vcCache:       Record<string, string | null>  = {}
 const statusCache:   Record<string, string>          = {}
-// activityCache stores undefined = never seen, null = no activity, string = has activity
-// this distinction matters so we don't fire a notif on the very first presence update
 const activityCache: Record<string, string | null | undefined> = {}
-// guildCache tracks which servers a watched user is already in
-// GUILD_MEMBER_ADD fires on discord reconnect/re-sync for users already in the server
-// so we snapshot their guilds on start and skip any add event for guilds already in cache
-const guildCache: Record<string, Set<string>> = {}  // uid -> Set<guildId>
+const guildCache: Record<string, Set<string>> = {}
 
 let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
 
-// grab deleted message content from message logger if installed
-// findByProps throws if nothing found so we wrap everything
 function tryLoadLoggedMsgs() {
     if (loggedMsgs) return loggedMsgs
-
-    // try the plugin's exported store directly via Vencord's plugin registry
     try {
         const plugin = (Vencord as any)?.Plugins?.plugins?.["vc-message-logger-enhanced"]
             ?? (Vencord as any)?.Plugins?.plugins?.["MessageLoggerEnhanced"]
@@ -54,14 +45,11 @@ function tryLoadLoggedMsgs() {
             loggedMsgs = plugin.loggedMessages
             return loggedMsgs
         }
-        // some versions store it on a separate exported object
         if (plugin?.store?.loggedMessages) {
             loggedMsgs = plugin.store.loggedMessages
             return loggedMsgs
         }
     } catch { }
-
-    // fallback: check all webpack modules safely without throwing
     try {
         const { wreq } = (window as any).webpackChunkdiscord_app?.find?.(
             (x: any) => x?.[1]?.["loggedMessages"]
@@ -71,7 +59,6 @@ function tryLoadLoggedMsgs() {
             return loggedMsgs
         }
     } catch { }
-
     return null
 }
 
@@ -99,7 +86,7 @@ const settings = definePluginSettings({
     debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "log all events to console" },
     globalPresetMode:   { type: OptionType.STRING,  default: "custom",               description: "global preset mode — custom, stalker, lite, silent" },
     showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "show watchlist icon in toolbar" },
-    lastKnownRemoteSha: { type: OptionType.STRING,  hidden: true,  default: "",        description: "last known remote commit sha — managed by update checker" },
+    lastKnownRemoteSha: { type: OptionType.STRING,  hidden: true,  default: "",        description: "last known remote sha" },
 })
 
 // -- notif helpers --
@@ -118,7 +105,6 @@ function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
     if (channelId) findByProps("selectChannel")?.selectChannel({ guildId: guildId ?? "@me", channelId, messageId: msgId })
 }
 
-// wrapper that respects global preset mode
 function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globalKey: string): boolean {
     if (!isWatched(settings, uid)) return false
     const mode = settings.store.globalPresetMode
@@ -136,13 +122,10 @@ function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globa
 function notify(opts: { title: string; body: string; icon?: string; onClick?: () => void }) {
     if (inQuietHours(settings)) return
     if (settings.store.debugLog) log.info(`[notif] ${opts.title} — ${opts.body}`)
-    // Vencord's Notifications.showNotification handles both in-app toast and os notif
-    // internally depending on focus state — don't use window.Notification on top of it
     Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
 }
 
 // -- avatar helpers --
-// manually building cdn urls because getAvatarURL() signature keeps changing
 
 function avatarUrl(id: string, hash?: string | null, size = 80): string {
     try {
@@ -168,16 +151,7 @@ function hexColor(n?: number | null): string | null {
 const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
 
 // -- profile diffing --
-//
-// the accent color / banner color false positive issue:
-// discord sends these as null from /profile endpoint, 0 from websocket USER_UPDATE,
-// and sometimes undefined if the user never set one
-// all three mean "no color" but they'd fail a !== check
-// normalizing to null before comparing fixes it
 
-// only track fields that actually matter and don't have false positive issues
-// accentColor and bannerColor removed — USER_UPDATE doesn't always include them
-// so you get undefined vs number mismatches that normColor can't reliably fix
 const PROFILE_TEXT = ["username", "globalName", "bio", "banner"] as const
 const FIELD_NAME: Record<string, string> = {
     username: "username", globalName: "display name",
@@ -186,14 +160,11 @@ const FIELD_NAME: Record<string, string> = {
 
 function checkProfileChanged(uid: string, fresh: any) {
     if (!isWatched(settings, uid)) return
-
     const old = profileCache[uid]
     if (!old) {
         profileCache[uid] = fresh
-        return  // first time, just save baseline
+        return
     }
-
-    // avatar is its own separate notification with its own toggle
     if (fresh.user?.avatar !== old.user?.avatar) {
         if (isFeatureOn( uid, "avatar", "globalAvatar")) {
             const name  = displayName(fresh.user)
@@ -208,17 +179,12 @@ function checkProfileChanged(uid: string, fresh: any) {
                 onClick: () => openUserProfile(uid),
             })
         }
-        // always update avatar in cache regardless of notif, keeps future diffs clean
         profileCache[uid] = { ...profileCache[uid], user: { ...profileCache[uid].user, avatar: fresh.user?.avatar } }
     }
-
     const changed: string[] = []
     for (const f of PROFILE_TEXT) {
         if ((fresh.user?.[f] ?? null) !== (old.user?.[f] ?? null)) changed.push(f)
     }
-    // color fields (accentColor, bannerColor) intentionally skipped
-    // they spam false positives because USER_UPDATE omits them when unchanged
-
     if (changed.length > 0 && isFeatureOn( uid, "profile", "globalProfile")) {
         const u     = UserStore.getUser(uid)
         const name  = displayName(fresh.user)
@@ -231,12 +197,9 @@ function checkProfileChanged(uid: string, fresh: any) {
             onClick: () => openUserProfile(uid),
         })
     }
-
     profileCache[uid] = fresh
 }
 
-// poll bio/banner every 5 mins
-// discord doesn't push those fields over websocket, this is the only way to catch them
 async function pollProfiles() {
     const list = getWatchlist(settings)
     if (!list.length) return
@@ -309,7 +272,6 @@ const C = {
     expanded:    "#232428",
 } as const
 
-// svg icons — functions so they don't cause module-level jsx issues
 const ico = {
     search:   () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>,
     check:    () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M20 6 9 17l-5-5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>,
@@ -336,9 +298,10 @@ const ico = {
     history:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
     monitor:  () => <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
     preview:  () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+    download: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+    refresh:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>,
 }
 
-// context menu icons — module-level so they don't glitch on re-render
 const CtxEyeIcon = () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
@@ -358,7 +321,6 @@ const CtxGearIcon = () => (
     </svg>
 )
 
-// discord's own Switch import is unreliable, just making my own
 function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
     return (
         <div
@@ -381,7 +343,6 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
     )
 }
 
-// add user — step 1: type id, step 2: preview + confirm
 type LookupStage =
     | { s: "idle" }
     | { s: "loading" }
@@ -404,7 +365,6 @@ function exactTime(ts: number): string {
     return new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
 }
 
-// activity log storage (in-memory, per session)
 const activityLog: Record<string, { ts: number; type: string; icon: string; body: string; guildId?: string; channelId?: string; msgId?: string }[]> = {}
 
 function logActivity(uid: string, type: string, icon: string, body: string, guildId?: string, channelId?: string, msgId?: string) {
@@ -611,7 +571,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
 
             {lk.s === "done" && (
                 <div className="ur-fade-in">
-                    
                     <div style={{
                         display: "flex",
                         alignItems: "center",
@@ -830,7 +789,6 @@ function SearchInput({ query, setQuery }: { query: string; setQuery: (v: string)
     )
 }
 
-// preview a fake notification for a specific feature type
 function previewNotification(uid: string, type: string) {
     const u = UserStore.getUser(uid)
     const label = getWatchedUser(settings, uid)?.nick
@@ -1468,11 +1426,9 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
         </div>
     )
 }
+
 type SortMode = "az" | "date"
 
-
-
-// Toolbar button — injected into Discord's native toolbar via DOM
 function createToolbarButton() {
     const btn = document.createElement("div")
     btn.id = "ur-toolbar-btn"
@@ -1492,11 +1448,9 @@ let __urToolbarTimer: ReturnType<typeof setInterval> | null = null
 
 function injectToolbarButton() {
     if (document.getElementById("ur-toolbar-btn")) return true
-    // Discord's toolbar is inside the header area. Look for the container that holds icons.
     const toolbar = document.querySelector('[class^="toolbar"], [class*="toolbar_"]') as HTMLElement
     if (!toolbar) return false
     const btn = createToolbarButton()
-    // Insert at the BEGINNING of the toolbar (left side, before inbox/help icons)
     const firstChild = toolbar.firstElementChild
     if (firstChild) {
         toolbar.insertBefore(btn, firstChild)
@@ -1507,7 +1461,6 @@ function injectToolbarButton() {
 }
 
 function startToolbarObserver() {
-    // Try immediately and keep retrying until the toolbar exists
     let attempts = 0
     const tryInject = () => {
         if (injectToolbarButton() || attempts++ > 30) {
@@ -1519,7 +1472,6 @@ function startToolbarObserver() {
     }
     tryInject()
     __urToolbarTimer = setInterval(tryInject, 500)
-    // Also watch for DOM mutations in case Discord re-renders
     const observer = new MutationObserver(() => {
         if (!document.getElementById("ur-toolbar-btn")) injectToolbarButton()
     })
@@ -1541,7 +1493,6 @@ function stopToolbarObserver() {
     if (btn) btn.remove()
 }
 
-// Discord-style animated global preset tabs
 function GlobalPresetControl({ refresh }: { refresh: () => void }) {
     const mode = settings.store.globalPresetMode || "custom"
     const presets = [
@@ -1595,112 +1546,96 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     const [query, setQuery] = React.useState("")
     const [sort,  setSort]  = React.useState<SortMode>("date")
     const [expandedId, setExpandedId] = React.useState<string | null>(null)
-    const [updateStatus, setUpdateStatus] = React.useState<"idle"|"checking"|"uptodate"|"available"|"updating"|"restart"|"error">("idle")
 
-    const RAW_URL = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
+    const [updateStatus, setUpdateStatus] = React.useState<"idle"|"checking"|"uptodate"|"available"|"updating"|"restart"|"error">("idle")
+    const [updateMsg, setUpdateMsg] = React.useState<string>("")
 
     const COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?per_page=1"
-
-    async function getRemoteSha(): Promise<string | null> {
-        try {
-            const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
-            if (!res.ok) return null
-            const data = await res.json()
-            return data[0]?.sha?.slice(0, 7) || null
-        } catch { return null }
-    }
+    const RAW_URL = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
 
     async function checkForUpdate() {
         setUpdateStatus("checking")
+        setUpdateMsg("")
         try {
-            const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
+            const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
+            if (!res.ok) throw new Error(`GitHub API ${res.status}`)
+            const data = await res.json()
+            if (!Array.isArray(data) || !data[0]) { setUpdateStatus("uptodate"); return }
+
+            const remoteSha = (data[0].sha as string).slice(0, 7)
             const storedSha = settings.store.lastKnownRemoteSha || ""
-
-            // Best case: native.ts works — do content comparison
-            if (native?.getLocalFileContent) {
-                const local = native.getLocalFileContent("index.tsx")
-                if (local.content) {
-                    const res = await fetch(RAW_URL + "?t=" + Date.now())
-                    if (!res.ok) throw new Error(`GitHub raw ${res.status}`)
-                    const remote = await res.text()
-                    if (!remote || remote.length < 500) throw new Error("Remote file empty")
-                    const isSame = local.content.trim() === remote.trim()
-                    if (isSame) {
-                        // Also sync the stored SHA for future fallback checks
-                        const remoteSha = await getRemoteSha()
-                        if (remoteSha) settings.store.lastKnownRemoteSha = remoteSha
-                        setUpdateStatus("uptodate")
-                    } else {
-                        setUpdateStatus("available")
-                    }
-                    return
-                }
-            }
-
-            // Fallback: SHA comparison via GitHub API (works even without native.ts)
-            const remoteSha = await getRemoteSha()
-            if (!remoteSha) {
-                throw new Error("Could not reach GitHub API")
-            }
 
             if (storedSha && storedSha === remoteSha) {
                 setUpdateStatus("uptodate")
+                setUpdateMsg(`checked ${new Date().toLocaleTimeString()}`)
             } else {
                 setUpdateStatus("available")
+                setUpdateMsg(`new: ${remoteSha}`)
             }
         } catch (err: any) {
             setUpdateStatus("error")
+            setUpdateMsg("check failed")
             console.error("[UserRadar] Update check failed:", err?.message || err)
         }
     }
 
     async function doUpdate() {
         setUpdateStatus("updating")
+        setUpdateMsg("")
         try {
-            // Access native.ts exports via Vencord's plugin system
-            // native.ts functions are exposed on plugin.native after build
+            // Try native.ts first
             const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
 
-            if (!native) {
-                window.open(RAW_URL, "_blank")
-                setUpdateStatus("error")
-                Toasts.show({
-                    type: Toasts.Type.FAILURE,
-                    message: "native.ts not loaded — open raw file for manual update",
-                    id: Toasts.genId()
-                })
-                return
-            }
+            if (native?.updatePluginFile) {
+                const result = await native.updatePluginFile()
+                if (result.success) {
+                    // Save the remote SHA after successful update
+                    try {
+                        const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
+                        if (res.ok) {
+                            const data = await res.json()
+                            if (data[0]?.sha) {
+                                settings.store.lastKnownRemoteSha = (data[0].sha as string).slice(0, 7)
+                            }
+                        }
+                    } catch {}
 
-            if (!native.updatePluginFile) {
-                throw new Error("updatePluginFile not exported from native.ts")
-            }
-
-            const result = await native.updatePluginFile()
-            if (result.success) {
-                setUpdateStatus("restart")
-                Toasts.show({
-                    type: Toasts.Type.SUCCESS,
-                    message: result.message,
-                    id: Toasts.genId()
-                })
-                if (result.details) {
-                    console.log("[UserRadar] Update details:\n" + result.details)
+                    setUpdateStatus("restart")
+                    setUpdateMsg("restart discord to apply")
+                    Toasts.show({
+                        type: Toasts.Type.SUCCESS,
+                        message: result.message,
+                        id: Toasts.genId()
+                    })
+                    if (result.details) {
+                        console.log("[UserRadar] Update details:
+" + result.details)
+                    }
+                    return
+                } else {
+                    throw new Error(result.message)
                 }
-            } else {
-                throw new Error(result.message)
             }
+
+            // Fallback: open raw file for manual update
+            window.open(RAW_URL, "_blank")
+            setUpdateStatus("error")
+            setUpdateMsg("auto-update unavailable — open raw file for manual update")
+            Toasts.show({
+                type: Toasts.Type.FAILURE,
+                message: "Auto-update unavailable — open raw file for manual update",
+                id: Toasts.genId()
+            })
         } catch (err: any) {
             setUpdateStatus("error")
+            setUpdateMsg("update failed")
             console.error("[UserRadar] Update failed:", err?.message || err)
         }
     }
 
     function doRestart() {
-        // Try multiple methods to restart Discord
         try { (window as any).DiscordNative?.app?.relaunch?.() } catch { }
         try { (window as any).VencordNative?.native?.relaunch?.() } catch { }
-        // Fallback: close modal and tell user to reload
         modalProps.onClose()
         Toasts.show({
             type: Toasts.Type.SUCCESS,
@@ -1761,38 +1696,32 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                             watchlist <span style={{ fontWeight: 500, color: C.muted }}>({users.length})</span>
                         </div>
 
-                        
-                        {(
-                            <div role="button" tabIndex={0}
-                                onClick={() => setSort(s => s === "az" ? "date" : "az")}
-                                title={sort === "az" ? "sort by date" : "sort a-z"}
-                                style={{
-                                    display: "flex", alignItems: "center", gap: 4,
-                                    padding: "0 9px",
-                                    borderRadius: 20,
-                                    cursor: "pointer",
-                                    background: C.bg2,
-                                    border: `1px solid ${C.border}`,
-                                    color: C.muted,
-                                    fontSize: 11,
-                                    fontWeight: 600,
-                                    userSelect: "none",
-                                    height: 28,
-                                    boxSizing: "border-box",
-                                    overflow: "hidden",
-                                }}
-                                onMouseEnter={e => (e.currentTarget.style.borderColor = C.bgEl)}
-                                onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}
-                            >
-                                {sort === "az" ? <ico.sortAz /> : <ico.sortDate />}
-                                {sort === "az" ? "a-z" : "newest"}
-                            </div>
-                        )}
+                        <div role="button" tabIndex={0}
+                            onClick={() => setSort(s => s === "az" ? "date" : "az")}
+                            title={sort === "az" ? "sort by date" : "sort a-z"}
+                            style={{
+                                display: "flex", alignItems: "center", gap: 4,
+                                padding: "0 9px",
+                                borderRadius: 20,
+                                cursor: "pointer",
+                                background: C.bg2,
+                                border: `1px solid ${C.border}`,
+                                color: C.muted,
+                                fontSize: 11,
+                                fontWeight: 600,
+                                userSelect: "none",
+                                height: 28,
+                                boxSizing: "border-box",
+                                overflow: "hidden",
+                            }}
+                            onMouseEnter={e => (e.currentTarget.style.borderColor = C.bgEl)}
+                            onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}
+                        >
+                            {sort === "az" ? <ico.sortAz /> : <ico.sortDate />}
+                            {sort === "az" ? "a-z" : "newest"}
+                        </div>
 
-                        
-                        {(
-                            <SearchInput query={query} setQuery={setQuery} />
-                        )}
+                        <SearchInput query={query} setQuery={setQuery} />
                     </div>
 
                     {users.length === 0 && (
@@ -1825,51 +1754,44 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             <ModalFooter>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <button
-                                onClick={() => {
-                                    if (updateStatus === "available") doUpdate()
-                                    else if (updateStatus === "restart") doRestart()
-                                    else checkForUpdate()
-                                }}
-                                disabled={updateStatus === "checking" || updateStatus === "updating"}
-                                style={{
-                                    borderRadius: 20, height: 32, padding: "0 14px", boxSizing: "border-box",
-                                    background: updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent",
-                                    color: updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted,
-                                    border: `1px solid ${updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border}`,
-                                    fontSize: 12, fontWeight: 600, cursor: (updateStatus === "checking" || updateStatus === "updating") ? "wait" : "pointer",
-                                    fontFamily: "inherit", transition: "all 150ms ease", display: "flex", alignItems: "center", gap: 5,
-                                }}
-                                onMouseEnter={e => {
-                                    if (updateStatus !== "checking" && updateStatus !== "updating") {
-                                        e.currentTarget.style.background = C.brand
-                                        e.currentTarget.style.borderColor = C.brand
-                                        e.currentTarget.style.color = "#ffffff"
-                                    }
-                                }}
-                                onMouseLeave={e => {
-                                    e.currentTarget.style.background = updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent"
-                                    e.currentTarget.style.borderColor = updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border
-                                    e.currentTarget.style.color = updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted
-                                }}
-                            >
-                                {(updateStatus === "checking" || updateStatus === "updating") && <span className="ur-spin" />}
-                                {updateStatus === "idle" && "check for updates"}
-                                {updateStatus === "checking" && "checking…"}
-                                {updateStatus === "available" && "↓ update"}
-                                {updateStatus === "updating" && "updating…"}
-                                {updateStatus === "uptodate" && "✓ up to date"}
-                                {updateStatus === "error" && "⚠ retry"}
-                                {updateStatus === "restart" && "↺ restart discord"}
-                            </button>
-                        </div>
-                        {updateStatus === "restart" && <span style={{ fontSize: 11, color: C.muted }}>restart discord to apply</span>}
-                        {updateStatus === "available" && <span style={{ fontSize: 11, color: C.muted }}>new version available</span>}
-                        {updateStatus === "uptodate" && <span style={{ fontSize: 11, color: C.muted }}>up to date</span>}
-                        {updateStatus === "error" && <span style={{ fontSize: 11, color: C.red }}>check failed</span>}
-                    </div>
+                        <button
+                            onClick={() => {
+                                if (updateStatus === "available") doUpdate()
+                                else if (updateStatus === "restart") doRestart()
+                                else checkForUpdate()
+                            }}
+                            disabled={updateStatus === "checking" || updateStatus === "updating"}
+                            style={{
+                                borderRadius: 20, height: 32, padding: "0 14px", boxSizing: "border-box",
+                                background: updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent",
+                                color: updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted,
+                                border: `1px solid ${updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border}`,
+                                fontSize: 12, fontWeight: 600, cursor: (updateStatus === "checking" || updateStatus === "updating") ? "wait" : "pointer",
+                                fontFamily: "inherit", transition: "all 150ms ease", display: "flex", alignItems: "center", gap: 5,
+                            }}
+                            onMouseEnter={e => {
+                                if (updateStatus !== "checking" && updateStatus !== "updating") {
+                                    e.currentTarget.style.background = C.brand
+                                    e.currentTarget.style.borderColor = C.brand
+                                    e.currentTarget.style.color = "#ffffff"
+                                }
+                            }}
+                            onMouseLeave={e => {
+                                e.currentTarget.style.background = updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent"
+                                e.currentTarget.style.borderColor = updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border
+                                e.currentTarget.style.color = updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted
+                            }}
+                        >
+                            {(updateStatus === "checking" || updateStatus === "updating") && <span className="ur-spin" />}
+                            {updateStatus === "idle" && "check for updates"}
+                            {updateStatus === "checking" && "checking…"}
+                            {updateStatus === "available" && <><ico.download /> update</>}
+                            {updateStatus === "updating" && "updating…"}
+                            {updateStatus === "uptodate" && "✓ up to date"}
+                            {updateStatus === "error" && "⚠ retry"}
+                            {updateStatus === "restart" && <><ico.refresh /> restart discord</>}
+                        </button>
+                        {updateMsg && <span style={{ fontSize: 11, color: C.muted }}>{updateMsg}</span>}
                     </div>
 
                     <button
@@ -1907,450 +1829,336 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     )
 }
 
-// -- plugin --
+// -- context menu patches --
 
-// snapshot vc/status/activity/guild state for all watched users
-// called synchronously on start so we have baselines before any flux events arrive
-function snapshotState() {
-    const list = getWatchlist(settings)
-    if (!list.length) return
-
-    let vStates: any = null
-    let presence: any = null
-    let GuildStore: any = null
-    let MemberStore: any = null
-
-    try { vStates   = findByProps("getVoiceStateForUser") } catch { }
-    try { presence  = findByProps("getStatus", "getActivities") } catch { }
-    try { GuildStore = findByProps("getGuildIds", "getGuild") } catch { }
-    try { MemberStore = findByProps("getMember", "isMember") } catch { }
-
-    const allGuildIds: string[] = GuildStore ? (GuildStore.getGuildIds() ?? []) : []
-
-    for (const wu of list) {
-        // vc state
-        try {
-            const vs = vStates?.getVoiceStateForUser(wu.id)
-            vcCache[wu.id] = vs?.channelId ?? null
-        } catch { vcCache[wu.id] = null }
-
-        // status + activity
-        try {
-            if (presence) {
-                const status = presence.getStatus(wu.id)
-                if (status) statusCache[wu.id] = status
-
-                const activities: any[] = presence.getActivities(wu.id) ?? []
-                const act = activities.find((a: any) => a.type !== 4) ?? null
-                activityCache[wu.id] = act ? `${act.type}:${act.name}` : null
-            }
-        } catch { }
-
-        // guild membership — which servers they're already in
-        try {
-            if (MemberStore && allGuildIds.length) {
-                guildCache[wu.id] = new Set(
-                    allGuildIds.filter(gid => { try { return MemberStore.isMember(gid, wu.id) } catch { return false } })
-                )
-            }
-        } catch { }
-    }
-}
-
-// fetch profile baselines in background so profile diff doesn't false-positive on first poll
-// runs async after start() returns so it doesn't delay flux handler registration
-async function fetchProfileBaselines() {
-    const list = getWatchlist(settings)
-    for (const wu of list) {
-        try {
-            const { body } = await RestAPI.get({
-                url: `/users/${wu.id}/profile`,
-                query: { with_mutual_guilds: false, with_mutual_friends_count: false },
-            })
-            profileCache[wu.id] = camelize(body)
-        } catch { }
-        // small delay between requests so we don't get ratelimited
-        await new Promise(r => setTimeout(r, 800))
-    }
-}
-
-export default definePlugin({
-    name: "UserRadar",
-    description: "track users and get notified when they message, edit/delete, type, change profile/avatar, join vc, change status/activity, boost, join/leave servers",
-    authors: [{ id: 641266820187160576n, name: "k1ng_op" }],
-    settings,
-
-    settingsAboutComponent() {
-        return (
-            <div>
-                <Text variant="heading-sm/semibold" style={{ marginBottom: 8 }}>watchlist</Text>
-                <Text variant="text-sm/normal" style={{ color: "#949ba4", marginBottom: 12 }}>
-                    manage who you're tracking, or right-click any user → watch user
-                </Text>
-                <button
-                    onClick={() => openModal(p => <WatchlistModal modalProps={p} />)}
-                    style={{ width: "100%", padding: "8px 14px", background: "#5865f2", color: "#ffffff", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600, fontSize: 14 }}
-                >
-                    open watchlist
-                </button>
-            </div>
-        )
-    },
-
-    flux: {
-        MESSAGE_CREATE(evt: MsgCreateEvent) {
-            const { message, guildId, channelId } = evt
-            if (!message?.author?.id) return
-            if (evt.optimistic) return
-            if (!isFeatureOn( message.author.id, "msgs", "globalMsgs")) return
-            if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId) return
-
-            const u     = UserStore.getUser(message.author.id)
-            const name  = displayName(u ?? message.author)
-            const label = getWatchedUser(settings, message.author.id)?.nick
-            const dn    = label ? `${label} (${name})` : name
-            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
-
-            if (message.type === 8) {
-                if (!isFeatureOn( message.author.id, "boosts", "globalBoosts")) return
-                logActivity(message.author.id, "boost", "🚀", "Boosted a server", guildId, channelId)
-                notify({ title: `${dn} boosted a server 🚀`, body: "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
-                return
-            }
-
-            if (message.type !== 0 && message.type !== 19) return
-
-            const preview = msgPreview(message.content, message.attachments?.[0]?.filename)
-            logActivity(message.author.id, "msg", "💬", `Sent: ${preview}`, guildId, channelId, message.id)
-            notify({
-                title: `${dn} sent a message`,
-                body: preview,
-                icon,
-                onClick: () => jumpTo(guildId, channelId, message.id),
-            })
-        },
-
-        MESSAGE_UPDATE(evt: MsgUpdateEvent) {
-            const { message, guildId } = evt
-            if (!message?.author?.id) return
-            if (!message.edited_timestamp) return
-            if (!isFeatureOn( message.author.id, "edits", "globalEdits")) return
-            if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === message.channel_id) return
-
-            const u     = UserStore.getUser(message.author.id)
-            const name  = displayName(u ?? message.author)
-            const label = getWatchedUser(settings, message.author.id)?.nick
-            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
-
-            const cached = MessageStore.getMessage(message.channel_id, message.id)
-            const before = cached?.content ? `"${trunc(cached.content, 60)}"` : null
-            const after  = msgPreview(message.content, message.attachments?.[0]?.filename)
-            const body   = before && before !== `"${after}"` ? `${before} → ${after}` : after
-
-            logActivity(message.author.id, "edit", "✏️", `Edited in #${ChannelStore.getChannel(message.channel_id)?.name || "unknown"}`, guildId, message.channel_id, message.id)
-            notify({
-                title: `${label ? `${label} (${name})` : name} edited a message`,
-                body,
-                icon,
-                onClick: () => jumpTo(guildId, message.channel_id, message.id),
-            })
-        },
-
-        async MESSAGE_DELETE(evt: MsgDeleteEvent) {
-            if (!evt?.channelId || !evt?.id) return
-            let msg: Message | undefined = MessageStore.getMessage(evt.channelId, evt.id)
-            if (!msg) {
-                const store = tryLoadLoggedMsgs()
-                if (store) {
-                    msg = store[evt.id] as Message | undefined
-                    if (!msg) {
-                        const channelLog = store[evt.channelId] as any
-                        msg = channelLog?.[evt.id] as Message | undefined
-                    }
-                }
-            }
-            if (!msg?.author?.id) return
-            if (!isFeatureOn( msg.author.id, "deletes", "globalDeletes")) return
-            if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === msg.channel_id) return
-
-            const u     = UserStore.getUser(msg.author.id)
-            const name  = displayName(u ?? msg.author)
-            const label = getWatchedUser(settings, msg.author.id)?.nick
-            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
-            const body  = settings.store.showPreview && msg.content
-                ? `"${trunc(msg.content, settings.store.previewLen)}"`
-                : "message was deleted"
-
-            logActivity(msg.author.id, "delete", "🗑️", "Deleted a message", evt.guildId, msg.channel_id, msg.id)
-            notify({
-                title: `${label ? `${label} (${name})` : name} deleted a message`,
-                body, icon,
-                onClick: () => jumpTo(evt.guildId, msg!.channel_id, msg!.id),
-            })
-        },
-
-        TYPING_START(evt: TypingEvent) {
-            if (!evt?.userId || !evt?.channelId) return
-            if (!isWatched(settings, evt.userId)) return
-            if (!isFeatureOn( evt.userId, "typing", "globalTyping")) return
-            if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === evt.channelId) return
-
-            const u = UserStore.getUser(evt.userId)
-            if (!u) return
-
-            const label = getWatchedUser(settings, evt.userId)?.nick
-            const ch    = ChannelStore.getChannel(evt.channelId)
-
-            logActivity(evt.userId, "typing", "⌨️", `Typing in #${ch?.name || "unknown"}`, ch?.guild_id, evt.channelId)
-            notify({
-                title: `${label ? `${label} (${displayName(u)})` : displayName(u)} is typing…`,
-                body: ch?.name ? `in #${ch.name}` : "click to jump",
-                icon: safeAvatar(u.id, (u as any).avatar),
-                onClick: () => jumpTo(ch?.guild_id, evt.channelId),
-            })
-        },
-
-        // fast path for username/avatar changes (comes over websocket instantly)
-        USER_UPDATE(evt: { user: any }) {
-            if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
-            const old = profileCache[evt.user.id]
-            if (!old) return
-            checkProfileChanged(evt.user.id, { ...old, user: { ...old.user, ...camelize(evt.user) } })
-        },
-
-        // fires when discord fetches a full profile (opening popout, profile page, etc)
-        async USER_PROFILE_FETCH_SUCCESS(rawEvt: ProfileFetchEvent) {
-            if (!rawEvt?.user?.id) return
-            checkProfileChanged(rawEvt.user.id, camelize(rawEvt))
-        },
-
-        VOICE_STATE_UPDATES(evt: VoiceStateEvent) {
-            for (const state of evt.voiceStates ?? []) {
-                const { userId, channelId, guildId } = state
-                if (!isFeatureOn( userId, "voice", "globalVoice")) continue
-
-                const prev = vcCache[userId] ?? null
-                vcCache[userId] = channelId ?? null
-                if (prev === (channelId ?? null)) continue
-
-                const u     = UserStore.getUser(userId)
-                const label = getWatchedUser(settings, userId)?.nick
-                const dn    = label ? `${label} (${displayName(u)})` : displayName(u)
-                const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
-                const ch = channelId ? ChannelStore.getChannel(channelId) : null
-
-                if (!prev && channelId) {
-                    logActivity(userId, "voice", "🎙️", `Joined #${ch?.name || "voice"}`, guildId, channelId)
-                    notify({ title: `${dn} joined voice`, body: ch ? `#${ch.name}` : "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
-                } else if (prev && !channelId) {
-                    logActivity(userId, "voice", "🔴", "Left voice channel")
-                    notify({ title: `${dn} left voice`, body: "disconnected", icon, onClick: () => openUserProfile(userId) })
-                } else if (prev && channelId && prev !== channelId) {
-                    logActivity(userId, "voice", "🎙️", `Moved to #${ch?.name || "voice"}`, guildId, channelId)
-                    notify({ title: `${dn} moved vc`, body: ch ? `now in #${ch.name}` : "click to view", icon, onClick: () => jumpTo(guildId, channelId) })
-                }
-            }
-        },
-
-        PRESENCE_UPDATES(evt: PresenceEvent) {
-            for (const update of evt.updates ?? []) {
-                const uid = update.user.id
-                if (!isWatched(settings, uid)) continue
-
-                const u     = UserStore.getUser(uid)
-                const label = getWatchedUser(settings, uid)?.nick
-                const dn    = label ? `${label} (${displayName(u)})` : displayName(u)
-                const icon  = u ? safeAvatar(u.id, (u as any).avatar) : undefined
-
-                if (isFeatureOn( uid, "status", "globalStatus")) {
-                    const prev = statusCache[uid]
-                    statusCache[uid] = update.status
-                    if (prev && prev !== update.status) {
-                        const emoji = STATUS_EMOJI[update.status] ?? ""
-                        logActivity(uid, "status", emoji || "🔵", `Now ${update.status} (was ${prev})`)
-                        notify({
-                            title: `${dn} is now ${update.status} ${emoji}`,
-                            body:  `was: ${prev} ${STATUS_EMOJI[prev] ?? ""}`,
-                            icon,
-                            onClick: () => openUserProfile(uid),
-                        })
-                    }
-                }
-
-                if (isFeatureOn( uid, "activity", "globalActivity")) {
-                    const VERB: Record<number, string> = { 0: "playing", 2: "listening to", 3: "watching", 5: "competing in" }
-                    const act    = (update.activities ?? []).find(a => a.type !== 4) ?? null
-                    const newKey = act ? `${act.type}:${act.name}` : null
-                    const oldKey = activityCache[uid]
-                    activityCache[uid] = newKey
-                    if (oldKey !== undefined && oldKey !== newKey) {
-                        if (act) {
-                            const verb = VERB[act.type] ?? "doing"
-                            logActivity(uid, "activity", "🎮", `${verb} ${act.name}`)
-                            const detail = act.details ? ` — ${act.details}` : ""
-                            notify({
-                                title: `${dn} is ${verb} ${act.name}`,
-                                body:  (`${act.state ?? ""}${detail}`).trim() || `${verb} ${act.name}`,
-                                icon,
-                                onClick: () => openUserProfile(uid),
-                            })
-                        } else if (oldKey) {
-                            logActivity(uid, "activity", "⏹️", "Stopped activity")
-                            notify({
-                                title: `${dn} stopped their activity`,
-                                body: "no longer active",
-                                icon,
-                                onClick: () => openUserProfile(uid),
-                            })
-                        }
-                    }
-                }
-            }
-        },
-
-        GUILD_MEMBER_ADD(evt: GuildMemberEvent) {
-            if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
-            if (!isFeatureOn( evt.user.id, "joins", "globalJoins")) return
-            if (!guildCache[evt.user.id]) guildCache[evt.user.id] = new Set()
-            if (guildCache[evt.user.id].has(evt.guildId)) return
-            guildCache[evt.user.id].add(evt.guildId)
-
-            const u     = UserStore.getUser(evt.user.id)
-            const label = getWatchedUser(settings, evt.user.id)?.nick
-            const dn    = label ? `${label} (${displayName(u ?? evt.user)})` : displayName(u ?? evt.user)
-            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : safeAvatar(evt.user.id, evt.user.avatar)
-            const guild = (findByProps("getGuild")?.getGuild(evt.guildId) as any)
-
-            logActivity(evt.user.id, "join", "📥", `Joined ${guild?.name || "a server"}`, evt.guildId)
-            notify({
-                title: `${dn} joined a server`,
-                body: guild?.name ?? "click to view",
-                icon,
-                onClick: () => jumpTo(evt.guildId),
-            })
-        },
-
-        GUILD_MEMBER_REMOVE(evt: GuildMemberEvent) {
-            if (!evt?.user?.id || !isWatched(settings, evt.user.id)) return
-            if (!isFeatureOn( evt.user.id, "joins", "globalJoins")) return
-            if (!guildCache[evt.user.id]?.has(evt.guildId)) return
-            guildCache[evt.user.id].delete(evt.guildId)
-
-            const u     = UserStore.getUser(evt.user.id)
-            const label = getWatchedUser(settings, evt.user.id)?.nick
-            const dn    = label ? `${label} (${displayName(u ?? evt.user)})` : displayName(u ?? evt.user)
-            const icon  = u ? safeAvatar(u.id, (u as any).avatar) : safeAvatar(evt.user.id, evt.user.avatar)
-            const guild = (findByProps("getGuild")?.getGuild(evt.guildId) as any)
-
-            logActivity(evt.user.id, "leave", "📤", `Left ${guild?.name || "a server"}`, evt.guildId)
-            notify({
-                title: `${dn} left a server`,
-                body: guild?.name ?? "click to view",
-                icon,
-                onClick: () => openUserProfile(evt.user.id),
-            })
-        },
-    },
-
-    async start() {
-        addContextMenuPatch("user-context", ctxPatch)
-        if (settings.store.showToolbarIcon !== false) {
-            startToolbarObserver()
-        }
-
-        if (typeof Notification !== "undefined" && Notification.permission === "default") {
-            Notification.requestPermission()
-        }
-
-        // snapshot state immediately (sync) so flux handlers don't false-positive on startup
-        // do this BEFORE the async profile fetches so events that arrive during fetching are correct
-        snapshotState()
-
-        // fetch profiles in background — don't await here, we want flux handlers active asap
-        // 500ms delay so discord finishes its own startup before we hammer the api
-        setTimeout(() => { fetchProfileBaselines().catch(() => {}) }, 500)
-
-        pollTimer = setInterval(pollProfiles, 5 * 60 * 1000)
-    },
-
-    stop() {
-        removeContextMenuPatch("user-context", ctxPatch)
-        stopToolbarObserver()
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-        for (const k in profileCache)  delete profileCache[k]
-        for (const k in vcCache)       delete vcCache[k]
-        for (const k in statusCache)   delete statusCache[k]
-        for (const k in activityCache) delete activityCache[k]
-        for (const k in guildCache)    delete guildCache[k]
-        loggedMsgs = null
-    },
-
-    async watchUser(uid: string) {
-        addUser(settings, uid)
-        const u = UserStore.getUser(uid)
-        Toasts.show({ type: Toasts.Type.SUCCESS, message: `now watching ${displayName(u)}`, id: Toasts.genId() })
-        try {
-            const { body } = await RestAPI.get({
-                url: `/users/${uid}/profile`,
-                query: { with_mutual_guilds: false, with_mutual_friends_count: false },
-            })
-            profileCache[uid] = camelize(body)
-        } catch { }
-    },
-
-    unwatchUser(uid: string) {
-        const u = UserStore.getUser(uid)
-        removeUser(settings, uid)
-        delete profileCache[uid]
-        delete vcCache[uid]
-        delete statusCache[uid]
-        delete activityCache[uid]
-        Toasts.show({ type: Toasts.Type.SUCCESS, message: `stopped watching ${displayName(u)}`, id: Toasts.genId() })
-    },
-})
-
-// right-click context menu
-const ctxPatch: NavContextMenuPatchCallback = (children, props) => {
-    if (!props?.user) return
-    if (props.user.id === UserStore.getCurrentUser()?.id) return
-    if (children.some((c: any) => c?.props?.id === "ur-ctx")) return
-
-    const uid      = props.user.id
-    const watching = isWatched(settings, uid)
-
-    const eyeIcon = watching
-        ? <CtxEyeOffIcon />
-        : <CtxEyeIcon />
-    const gearIcon = <CtxGearIcon />
-
-    children.push(
-        <Menu.MenuSeparator />,
-        <Menu.MenuGroup id="ur-ctx">
+const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
+    if (!user) return
+    const isW = isWatched(settings, user.id)
+    const idx = children.findIndex(c => c?.props?.id === "user-context-devmode-copy-id")
+    children.splice(idx >= 0 ? idx + 1 : children.length, 0,
+        <Menu.MenuGroup>
             <Menu.MenuItem
-                id="ur-toggle"
-                label={(
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
-                        <span>{watching ? "Stop watching" : "Watch user"}</span>
-                        <span style={{ marginLeft: 12, opacity: 0.6, display: "flex", alignItems: "center" }}>{eyeIcon}</span>
-                    </div>
-                )}
+                id="ur-watch"
+                label={isW ? "remove from watchlist" : "add to watchlist"}
                 action={() => {
-                    const plugin = Vencord.Plugins.plugins["UserRadar"] as any
-                    watching ? plugin.unwatchUser(uid) : plugin.watchUser(uid)
+                    if (isW) { removeUser(settings, user.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(user)} from watchlist`, id: Toasts.genId() }) }
+                    else { addUser(settings, user.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(user)} to watchlist`, id: Toasts.genId() }) }
                 }}
+                icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
             />
-            {watching && (
-                <Menu.MenuItem
-                    id="ur-open"
-                    label={(
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
-                            <span>Manage watchlist</span>
-                            <span style={{ marginLeft: 12, opacity: 0.6, display: "flex", alignItems: "center" }}>{gearIcon}</span>
-                        </div>
-                    )}
-                    action={() => openModal(p => <WatchlistModal modalProps={p} />)}
-                />
-            )}
+            <Menu.MenuItem
+                id="ur-config"
+                label="configure watchlist"
+                action={() => openModal(p => <WatchlistModal modalProps={p} />)}
+                icon={CtxGearIcon}
+            />
         </Menu.MenuGroup>
     )
 }
+
+const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
+    if (!message?.author) return
+    const isW = isWatched(settings, message.author.id)
+    const idx = children.findIndex(c => c?.props?.id === "message-devmode-copy-id")
+    children.splice(idx >= 0 ? idx + 1 : children.length, 0,
+        <Menu.MenuGroup>
+            <Menu.MenuItem
+                id="ur-msg-watch"
+                label={isW ? "remove author from watchlist" : "add author to watchlist"}
+                action={() => {
+                    if (isW) { removeUser(settings, message.author.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(message.author)} from watchlist`, id: Toasts.genId() }) }
+                    else { addUser(settings, message.author.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(message.author)} to watchlist`, id: Toasts.genId() }) }
+                }}
+                icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
+            />
+        </Menu.MenuGroup>
+    )
+}
+
+// -- main plugin --
+
+export default definePlugin({
+    name: "UserRadar",
+    description: "track watched users and get notified on messages, edits, deletes, typing, profile/avatar changes, voice, status, activity, boosts, and server joins",
+    authors: [{ name: "k1ng_op", id: 1337n }],
+    dependencies: ["MessageLoggerEnhanced"],
+
+    settings,
+
+    start() {
+        addContextMenuPatch("user-context", userCtxPatch)
+        addContextMenuPatch("message", msgCtxPatch)
+        if (settings.store.showToolbarIcon) startToolbarObserver()
+
+        const list = getWatchlist(settings)
+        for (const wu of list) {
+            try {
+                RestAPI.get({
+                    url: `/users/${wu.id}/profile`,
+                    query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+                }).then((res: any) => { profileCache[wu.id] = camelize(res.body) }).catch(() => {})
+            } catch { }
+        }
+        pollTimer = setInterval(pollProfiles, 60000)
+    },
+
+    stop() {
+        removeContextMenuPatch("user-context", userCtxPatch)
+        removeContextMenuPatch("message", msgCtxPatch)
+        stopToolbarObserver()
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+        Object.keys(profileCache).forEach(k => delete profileCache[k])
+        Object.keys(vcCache).forEach(k => delete vcCache[k])
+        Object.keys(statusCache).forEach(k => delete statusCache[k])
+        Object.keys(activityCache).forEach(k => delete activityCache[k])
+        Object.keys(guildCache).forEach(k => delete guildCache[k])
+        loggedMsgs = null
+    },
+
+    flux: {
+        MESSAGE_CREATE({ optimistic, type, message, channelId }: MsgCreateEvent) {
+            if (optimistic || type !== "MESSAGE_CREATE") return
+            const uid = message.author?.id
+            if (!uid || !isWatched(settings, uid)) return
+            if (isFeatureOn(uid, "msgs", "globalMsgs")) {
+                const label = getWatchedUser(settings, uid)?.nick
+                const name  = displayName(message.author)
+                const dn    = label ? `${label} (${name})` : name
+                const ch    = ChannelStore.getChannel(channelId)
+                const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
+                const chName = ch?.name || "dm"
+                const gName = g?.name || ""
+                const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
+                if (settings.store.skipCurrentChannel) {
+                    const cur = getCurrentChannel()
+                    if (cur?.id === channelId) return
+                }
+                notify({
+                    title: `${dn} sent a message`,
+                    body: msgPreview(message.content, message.attachments?.[0]?.filename),
+                    icon: avatarUrl(uid, message.author?.avatar, 80),
+                    onClick: () => jumpTo(ch?.guild_id, channelId, message.id),
+                })
+                logActivity(uid, "msg", "💬", `sent a message in ${location}`, ch?.guild_id, channelId, message.id)
+            }
+        },
+
+        MESSAGE_UPDATE({ message }: MsgUpdateEvent) {
+            const uid = message?.author?.id
+            if (!uid || !isWatched(settings, uid)) return
+            const old = MessageStore.getMessage(message.channel_id, message.id)
+            if (!old || old.content === message.content) return
+            if (isFeatureOn(uid, "edits", "globalEdits")) {
+                const label = getWatchedUser(settings, uid)?.nick
+                const name  = displayName(message.author)
+                const dn    = label ? `${label} (${name})` : name
+                const ch    = ChannelStore.getChannel(message.channel_id)
+                const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
+                const chName = ch?.name || "dm"
+                const gName = g?.name || ""
+                const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
+                if (settings.store.skipCurrentChannel) {
+                    const cur = getCurrentChannel()
+                    if (cur?.id === message.channel_id) return
+                }
+                notify({
+                    title: `${dn} edited a message`,
+                    body: `"${trunc(old.content, 60)}" → "${trunc(message.content, 60)}"`,
+                    icon: avatarUrl(uid, message.author?.avatar, 80),
+                    onClick: () => jumpTo(ch?.guild_id, message.channel_id, message.id),
+                })
+                logActivity(uid, "edit", "✏️", `edited a message in ${location}`, ch?.guild_id, message.channel_id, message.id)
+            }
+        },
+
+        MESSAGE_DELETE({ id, channelId }: MsgDeleteEvent) {
+            const store = tryLoadLoggedMsgs()
+            const key   = `${channelId}-${id}`
+            const msg   = store?.[key] ?? MessageStore.getMessage(channelId, id)
+            if (!msg?.author) return
+            const uid = msg.author.id
+            if (!isWatched(settings, uid)) return
+            if (isFeatureOn(uid, "deletes", "globalDeletes")) {
+                const label = getWatchedUser(settings, uid)?.nick
+                const name  = displayName(msg.author)
+                const dn    = label ? `${label} (${name})` : name
+                const ch    = ChannelStore.getChannel(channelId)
+                const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
+                const chName = ch?.name || "dm"
+                const gName = g?.name || ""
+                const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
+                if (settings.store.skipCurrentChannel) {
+                    const cur = getCurrentChannel()
+                    if (cur?.id === channelId) return
+                }
+                notify({
+                    title: `${dn} deleted a message`,
+                    body: msgPreview(msg.content, msg.attachments?.[0]?.filename),
+                    icon: avatarUrl(uid, msg.author?.avatar, 80),
+                    onClick: () => jumpTo(ch?.guild_id, channelId, msg.id),
+                })
+                logActivity(uid, "delete", "🗑️", `deleted a message in ${location}`, ch?.guild_id, channelId, msg.id)
+            }
+        },
+
+        TYPING_START({ channelId, userId }: TypingEvent) {
+            if (!isWatched(settings, userId)) return
+            if (isFeatureOn(userId, "typing", "globalTyping")) {
+                const label = getWatchedUser(settings, userId)?.nick
+                const u     = UserStore.getUser(userId)
+                const name  = displayName(u) || userId
+                const dn    = label ? `${label} (${name})` : name
+                const ch    = ChannelStore.getChannel(channelId)
+                const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
+                const chName = ch?.name || "dm"
+                const gName = g?.name || ""
+                const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
+                if (settings.store.skipCurrentChannel) {
+                    const cur = getCurrentChannel()
+                    if (cur?.id === channelId) return
+                }
+                notify({
+                    title: `${dn} is typing…`,
+                    body: `in ${location}`,
+                    icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                    onClick: () => jumpTo(ch?.guild_id, channelId),
+                })
+                logActivity(userId, "typing", "💭", `is typing in ${location}`, ch?.guild_id, channelId)
+            }
+        },
+
+        VOICE_STATE_UPDATE({ voiceStates }: VoiceStateEvent) {
+            for (const vs of voiceStates || []) {
+                const uid = vs.userId
+                if (!isWatched(settings, uid)) continue
+                const old = vcCache[uid]
+                const now = vs.channelId || null
+                if (old === undefined) { vcCache[uid] = now; continue }
+                if (old === now) continue
+                vcCache[uid] = now
+                if (!isFeatureOn(uid, "voice", "globalVoice")) continue
+                const label = getWatchedUser(settings, uid)?.nick
+                const u     = UserStore.getUser(uid)
+                const name  = displayName(u) || uid
+                const dn    = label ? `${label} (${name})` : name
+                const ch    = now ? ChannelStore.getChannel(now) : (old ? ChannelStore.getChannel(old) : null)
+                const chName = ch?.name || "unknown"
+                const action = !old && now ? "joined" : old && !now ? "left" : "moved in"
+                notify({
+                    title: `${dn} ${action} voice`,
+                    body: `#${chName}`,
+                    icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                    onClick: () => { if (now) jumpTo(ch?.guild_id, now) },
+                })
+                logActivity(uid, "voice", "🎙️", `${action} voice in #${chName}`, ch?.guild_id, now || old)
+            }
+        },
+
+        PRESENCE_UPDATES({ updates }: PresenceEvent) {
+            for (const u of updates || []) {
+                const uid = u.user?.id
+                if (!uid || !isWatched(settings, uid)) continue
+                const oldStatus = statusCache[uid]
+                const newStatus = u.status
+                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus")) {
+                    const label = getWatchedUser(settings, uid)?.nick
+                    const user  = UserStore.getUser(uid)
+                    const name  = displayName(user) || uid
+                    const dn    = label ? `${label} (${name})` : name
+                    notify({
+                        title: `${dn} is now ${newStatus}`,
+                        body: `was: ${oldStatus}`,
+                        icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                        onClick: () => openUserProfile(uid),
+                    })
+                    logActivity(uid, "status", STATUS_EMOJI[newStatus] || "🔵", `status changed to ${newStatus} (was ${oldStatus})`)
+                }
+                statusCache[uid] = newStatus
+                const oldAct = activityCache[uid]
+                const newAct = u.activities?.[0]?.name
+                if (oldAct !== undefined && oldAct !== newAct && isFeatureOn(uid, "activity", "globalActivity")) {
+                    const label = getWatchedUser(settings, uid)?.nick
+                    const user  = UserStore.getUser(uid)
+                    const name  = displayName(user) || uid
+                    const dn    = label ? `${label} (${name})` : name
+                    if (newAct) {
+                        notify({
+                            title: `${dn} is ${u.activities?.[0]?.type === 2 ? "listening to" : "playing"} ${newAct}`,
+                            body: u.activities?.[0]?.details || "",
+                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                        logActivity(uid, "activity", "🎮", `${u.activities?.[0]?.type === 2 ? "listening to" : "playing"} ${newAct}`)
+                    } else if (oldAct) {
+                        notify({
+                            title: `${dn} stopped ${u.activities?.[0]?.type === 2 ? "listening to" : "playing"} ${oldAct}`,
+                            body: "",
+                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                        logActivity(uid, "activity", "🛑", `stopped ${u.activities?.[0]?.type === 2 ? "listening to" : "playing"} ${oldAct}`)
+                    }
+                }
+                activityCache[uid] = newAct
+            }
+        },
+
+        GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
+            if (!user?.id || !isWatched(settings, user.id)) return
+            if (!guildCache[user.id]) guildCache[user.id] = new Set()
+            const wasIn = guildCache[user.id].has(guildId)
+            guildCache[user.id].add(guildId)
+            if (!wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
+                const g = findByProps("getGuild").getGuild(guildId)
+                const label = getWatchedUser(settings, user.id)?.nick
+                const name  = displayName(user)
+                const dn    = label ? `${label} (${name})` : name
+                notify({
+                    title: `${dn} joined a server`,
+                    body: g?.name || guildId,
+                    icon: avatarUrl(user.id, user.avatar, 80),
+                    onClick: () => jumpTo(guildId),
+                })
+                logActivity(user.id, "join", "📥", `joined ${g?.name || guildId}`, guildId)
+            }
+        },
+
+        GUILD_MEMBER_REMOVE({ guildId, user }: GuildMemberEvent) {
+            if (!user?.id || !isWatched(settings, user.id)) return
+            if (!guildCache[user.id]) guildCache[user.id] = new Set()
+            const wasIn = guildCache[user.id].has(guildId)
+            guildCache[user.id].delete(guildId)
+            if (wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
+                const g = findByProps("getGuild").getGuild(guildId)
+                const label = getWatchedUser(settings, user.id)?.nick
+                const name  = displayName(user)
+                const dn    = label ? `${label} (${name})` : name
+                notify({
+                    title: `${dn} left a server`,
+                    body: g?.name || guildId,
+                    icon: avatarUrl(user.id, user.avatar, 80),
+                    onClick: () => jumpTo(guildId),
+                })
+                logActivity(user.id, "leave", "📤", `left ${g?.name || guildId}`, guildId)
+            }
+        },
+
+        GUILD_BOOST_CREATE({ guildId, userId }: any) {
+            if (!userId || !isWatched(settings, userId)) return
+            if (isFeatureOn(userId, "boosts", "globalBoosts")) {
+                const g = findByProps("getGuild").getGuild(guildId)
+                const u = UserStore.getUser(userId)
+                const label = getWatchedUser(settings, userId)?.nick
+                const name  = displayName(u) || userId
+                const dn    = label ? `${label} (${name})` : name
+                notify({
+                    title: `${dn} boosted a server`,
+                    body: g?.name || guildId,
+                    icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                    onClick: () => jumpTo(guildId),
+                })
+                logActivity(userId, "boost", "🚀", `boosted ${g?.name || guildId}`, guildId)
+            }
+        },
+    },
+})
