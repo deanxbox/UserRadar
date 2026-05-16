@@ -2,13 +2,12 @@
 // Node.js side of UserRadar — handles file system operations
 // This file runs in the main process, not the browser
 
-import { writeFileSync, existsSync } from "fs"
-import { join } from "path"
-import https from "https"
+import { IpcMainInvokeEvent, net } from "electron"
+import { writeFileSync, existsSync, mkdirSync } from "fs"
+import { join, dirname } from "path"
 
 const PLUGIN_NAME = "UserRadar"
-const REPO_BASE = "raw.githubusercontent.com"
-const REPO_PATH = "/k1ng0p/UserRadar/main"
+const REPO_BASE = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main"
 
 const PLUGIN_FILES = [
     "index.tsx",
@@ -18,39 +17,16 @@ const PLUGIN_FILES = [
     "README.md",
 ]
 
-function fetchFile(fileName: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const url = `https://${REPO_BASE}${REPO_PATH}/${fileName}?t=${Date.now()}`
-        https.get(url, { headers: { "User-Agent": "Vencord-UserRadar" } }, (res) => {
-            if (res.statusCode === 301 || res.statusCode === 302) {
-                // Follow redirect
-                const redirectUrl = res.headers.location
-                if (!redirectUrl) { reject(new Error("Redirect without location")); return }
-                https.get(redirectUrl, { headers: { "User-Agent": "Vencord-UserRadar" } }, (res2) => {
-                    if (res2.statusCode !== 200) {
-                        reject(new Error(`${fileName}: HTTP ${res2.statusCode}`))
-                        return
-                    }
-                    let data = ""
-                    res2.on("data", chunk => data += chunk)
-                    res2.on("end", () => resolve(data))
-                    res2.on("error", err => reject(err))
-                }).on("error", err => reject(err))
-                return
-            }
-            if (res.statusCode !== 200) {
-                reject(new Error(`${fileName}: HTTP ${res.statusCode}`))
-                return
-            }
-            let data = ""
-            res.on("data", chunk => data += chunk)
-            res.on("end", () => resolve(data))
-            res.on("error", err => reject(err))
-        }).on("error", err => reject(err))
-    })
+async function fetchFile(fileName: string): Promise<string> {
+    const url = `${REPO_BASE}/${fileName}?t=${Date.now()}`
+    const response = await net.fetch(url)
+    if (!response.ok) {
+        throw new Error(`${fileName}: HTTP ${response.status}`)
+    }
+    return await response.text()
 }
 
-export async function updatePluginFile() {
+export async function updatePluginFile(_event: IpcMainInvokeEvent): Promise<{ success: boolean; message: string; details?: string }> {
     try {
         const results: string[] = []
 
@@ -97,6 +73,6 @@ export async function updatePluginFile() {
             details: results.join("\n")
         }
     } catch (err: any) {
-        return { success: false, message: err?.message || String(err), details: "" }
+        return { success: false, message: err?.message || String(err) }
     }
 }
