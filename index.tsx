@@ -1632,29 +1632,30 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     async function doUpdate() {
         setUpdateStatus("updating")
         try {
-            const res = await fetch(RAW_URL + "?t=" + Date.now())
-            if (!res.ok) throw new Error(`HTTP ${res.status}`)
-            const code = await res.text()
-            if (!code || code.length < 500) throw new Error("Empty response")
+            // Call native.ts function via Vencord's IPC bridge
+            // Vencord automatically handles the IpcMainInvokeEvent parameter
+            const plugin = (window as any).VencordNative?.pluginManager?.getPlugin?.("UserRadar")
+            const native = plugin?.native
 
-            // Try Vencord's native plugin manager first
-            const pm = (window as any).VencordNative?.pluginManager
-            if (pm?.updatePlugin) {
-                await pm.updatePlugin("UserRadar", code)
-                setUpdateStatus("restart")
+            if (native?.updatePluginFile) {
+                const result = await native.updatePluginFile()
+                if (result.success) {
+                    setUpdateStatus("restart")
+                    Toasts.show({
+                        type: Toasts.Type.SUCCESS,
+                        message: result.message,
+                        id: Toasts.genId()
+                    })
+                    if (result.details) {
+                        console.log("[UserRadar] Update details:\n" + result.details)
+                    }
+                } else {
+                    throw new Error(result.message)
+                }
                 return
             }
 
-            // Fallback: write directly to file
-            const native = (window as any).VencordNative
-            const dir = await native?.settings?.getSettingsDir?.()
-            if (dir) {
-                await native.ipc.invoke("writeFile", `${dir}/userplugins/UserRadar/index.tsx`, code)
-                setUpdateStatus("restart")
-                return
-            }
-
-            throw new Error("No write method available")
+            throw new Error("native.ts not loaded. Make sure native.ts exists and rebuild with: pnpm build && pnpm inject")
         } catch (err: any) {
             setUpdateStatus("error")
             console.error("[UserRadar] Update failed:", err?.message || err)
@@ -1662,8 +1663,16 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     }
 
     function doRestart() {
+        // Try multiple methods to restart Discord
         try { (window as any).DiscordNative?.app?.relaunch?.() } catch { }
         try { (window as any).VencordNative?.native?.relaunch?.() } catch { }
+        // Fallback: close modal and tell user to reload
+        modalProps.onClose()
+        Toasts.show({
+            type: Toasts.Type.SUCCESS,
+            message: "Updated! Please reload Discord (Ctrl+R) to apply changes.",
+            id: Toasts.genId()
+        })
     }
 
     const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) } }
@@ -1825,7 +1834,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                                 v{BUILD_SHA === "LOCAL" ? "?" : BUILD_SHA}
                             </span>
                         </div>
-                        {updateStatus === "restart" && <span style={{ fontSize: 11, color: C.muted }}>restart to apply</span>}
+                        {updateStatus === "restart" && <span style={{ fontSize: 11, color: C.muted }}>code copied — paste into index.tsx</span>}
                         {updateStatus === "available" && <span style={{ fontSize: 11, color: C.muted }}>new version ready</span>}
                         {updateStatus === "uptodate" && <span style={{ fontSize: 11, color: C.muted }}>checked {lastCheck}</span>}
                         {updateStatus === "error" && <span style={{ fontSize: 11, color: C.red }}>failed</span>}
