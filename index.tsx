@@ -1608,8 +1608,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                         id: Toasts.genId()
                     })
                     if (result.details) {
-                        console.log("[UserRadar] Update details:
-" + result.details)
+                        console.log("[UserRadar] Update details:\n" + result.details)
                     }
                     return
                 } else {
