@@ -1,5 +1,5 @@
-// types for userradar
-// k1ng_op
+// types.ts — k1ng_op
+// keeping types minimal, only what i actually use
 
 export type Status = "online" | "idle" | "dnd" | "offline" | "invisible"
 
