@@ -1,6 +1,5 @@
 // native.ts
-// Node.js side of UserRadar — handles file system operations
-// This file runs in the main process, not the browser
+// Node.js side of UserRadar — must be rebuilt with pnpm build && pnpm inject
 
 import { writeFileSync, existsSync, readFileSync } from "fs"
 import { join } from "path"
@@ -10,203 +9,72 @@ const PLUGIN_NAME = "UserRadar"
 const REPO_BASE = "raw.githubusercontent.com"
 const REPO_PATH = "/k1ng0p/UserRadar/main"
 
-const PLUGIN_FILES = [
-    "index.tsx",
-    "store.ts",
-    "types.ts",
-    "native.ts",
-    "README.md",
+const PLUGIN_FILES = ["index.tsx", "store.ts", "types.ts", "native.ts", "README.md"]
+
+// Hardcoded common paths — add your own if different
+const POSSIBLE_PATHS = [
+    join(process.cwd(), "src", "userplugins", PLUGIN_NAME),
+    join(process.cwd(), "..", "src", "userplugins", PLUGIN_NAME),
+    join(process.cwd(), "..", "..", "src", "userplugins", PLUGIN_NAME),
+    join(process.cwd(), "Vencord", "src", "userplugins", PLUGIN_NAME),
+    join(process.cwd(), "..", "Vencord", "src", "userplugins", PLUGIN_NAME),
 ]
 
-function fetchFile(fileName: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const url = `https://${REPO_BASE}${REPO_PATH}/${fileName}?t=${Date.now()}`
-
-        const doRequest = (targetUrl: string) => {
-            https.get(targetUrl, { 
-                headers: { "User-Agent": "Vencord-UserRadar" },
-                timeout: 15000 
-            }, (res) => {
-                if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
-                    const redirect = res.headers.location
-                    if (!redirect) { reject(new Error("Redirect missing location")); return }
-                    doRequest(redirect)
-                    return
-                }
-
-                if (res.statusCode !== 200) {
-                    reject(new Error(`${fileName}: HTTP ${res.statusCode}`))
-                    return
-                }
-
-                let data = ""
-                res.setEncoding("utf8")
-                res.on("data", chunk => data += chunk)
-                res.on("end", () => resolve(data))
-                res.on("error", err => reject(err))
-            }).on("error", err => reject(err))
-        }
-
-        doRequest(url)
-    })
-}
-
-function findPluginDir(): string | null {
-    const tried: string[] = []
-
-    const check = (base: string, ...segs: string[]): string | null => {
-        const p = join(base, ...segs)
-        tried.push(p)
+function findDir(): string | null {
+    for (const p of POSSIBLE_PATHS) {
         if (existsSync(p)) return p
-        return null
     }
-
-    // 1. process.cwd() and relatives
-    const cwd = process.cwd()
-    let found = check(cwd, "src", "userplugins", PLUGIN_NAME)
-    if (found) return found
-    found = check(cwd, "..", "src", "userplugins", PLUGIN_NAME)
-    if (found) return found
-    found = check(cwd, "..", "..", "src", "userplugins", PLUGIN_NAME)
-    if (found) return found
-    found = check(cwd, "Vencord", "src", "userplugins", PLUGIN_NAME)
-    if (found) return found
-
-    // 2. __dirname and relatives (where bundled native.ts lives)
-    const nativeDir = __dirname
-    found = check(nativeDir, "..", "..", "..", "src", "userplugins", PLUGIN_NAME)
-    if (found) return found
-    found = check(nativeDir, "..", "..", "src", "userplugins", PLUGIN_NAME)
-    if (found) return found
-    found = check(nativeDir, "..", "src", "userplugins", PLUGIN_NAME)
-    if (found) return found
-
-    // 3. Walk up from __dirname looking for Vencord package.json
-    let current = nativeDir
-    for (let i = 0; i < 8; i++) {
-        const pkgPath = join(current, "package.json")
-        if (existsSync(pkgPath)) {
-            try {
-                const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"))
-                if (pkg.name?.toLowerCase()?.includes("vencord")) {
-                    found = check(current, "src", "userplugins", PLUGIN_NAME)
-                    if (found) return found
-                }
-            } catch {}
-        }
-        const parent = join(current, "..")
-        if (parent === current) break
-        current = parent
-    }
-
-    // 4. Walk up from cwd looking for Vencord
-    current = cwd
-    for (let i = 0; i < 8; i++) {
-        const pkgPath = join(current, "package.json")
-        if (existsSync(pkgPath)) {
-            try {
-                const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"))
-                if (pkg.name?.toLowerCase()?.includes("vencord")) {
-                    found = check(current, "src", "userplugins", PLUGIN_NAME)
-                    if (found) return found
-                }
-            } catch {}
-        }
-        const parent = join(current, "..")
-        if (parent === current) break
-        current = parent
-    }
-
-    // 5. Common home directory locations
-    const home = process.env.HOME || process.env.USERPROFILE
-    if (home) {
-        found = check(home, "Vencord", "src", "userplugins", PLUGIN_NAME)
-        if (found) return found
-        found = check(home, "Documents", "Vencord", "src", "userplugins", PLUGIN_NAME)
-        if (found) return found
-        found = check(home, "dev", "Vencord", "src", "userplugins", PLUGIN_NAME)
-        if (found) return found
-        found = check(home, "projects", "Vencord", "src", "userplugins", PLUGIN_NAME)
-        if (found) return found
-        found = check(home, "Desktop", "Vencord", "src", "userplugins", PLUGIN_NAME)
-        if (found) return found
-        found = check(home, "Downloads", "Vencord", "src", "userplugins", PLUGIN_NAME)
-        if (found) return found
-    }
-
-    // 6. AppData / config locations
-    const appData = process.env.APPDATA || (process.platform === "darwin" ? join(home || "", "Library", "Application Support") : join(home || "", ".config"))
-    if (appData) {
-        found = check(appData, "Vencord", "src", "userplugins", PLUGIN_NAME)
-        if (found) return found
-    }
-
-    // 7. Discord-specific paths (where Vencord might be cloned)
-    const discordData = process.env.DISCORD_USER_DATA_DIR || join(appData || "", "discord")
-    if (existsSync(discordData)) {
-        found = check(discordData, "..", "Vencord", "src", "userplugins", PLUGIN_NAME)
-        if (found) return found
-    }
-
-    // Store tried paths for error reporting
-    ;(globalThis as any).__urTriedPaths = tried
     return null
 }
 
-export function getLocalFileContent(fileName: string): { content: string | null; error?: string } {
-    try {
-        const pluginDir = findPluginDir()
-        if (!pluginDir) {
-            return { content: null, error: "Could not find plugin directory" }
-        }
-        const filePath = join(pluginDir, fileName)
-        if (!existsSync(filePath)) {
-            return { content: null, error: `File not found: ${filePath}` }
-        }
-        return { content: readFileSync(filePath, "utf-8") }
-    } catch (err: any) {
-        return { content: null, error: err?.message || String(err) }
-    }
+function fetchFile(file: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const url = `https://${REPO_BASE}${REPO_PATH}/${file}?t=${Date.now()}`
+        https.get(url, { headers: { "User-Agent": "Vencord-UserRadar" } }, (res) => {
+            if (res.statusCode === 301 || res.statusCode === 302) {
+                const loc = res.headers.location
+                if (!loc) { reject(new Error("no redirect location")); return }
+                https.get(loc, { headers: { "User-Agent": "Vencord-UserRadar" } }, (r2) => {
+                    if (r2.statusCode !== 200) { reject(new Error(`HTTP ${r2.statusCode}`)); return }
+                    let d = ""; r2.on("data", c => d += c); r2.on("end", () => resolve(d)); r2.on("error", e => reject(e))
+                }).on("error", e => reject(e))
+                return
+            }
+            if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return }
+            let d = ""; res.on("data", c => d += c); res.on("end", () => resolve(d)); res.on("error", e => reject(e))
+        }).on("error", e => reject(e))
+    })
 }
 
-export async function updatePluginFile(): Promise<{ success: boolean; message: string; details?: string; triedPaths?: string[] }> {
-    try {
-        const results: string[] = []
+// Diagnostic — call this from browser to test if native.ts is loaded
+export function ping(): string {
+    return "pong"
+}
 
-        const pluginDir = findPluginDir()
-        if (!pluginDir) {
-            const tried = (globalThis as any).__urTriedPaths as string[] || []
-            return { 
-                success: false, 
-                message: `Could not find plugin directory. Vencord source not found after searching ${tried.length} locations. Make sure your plugin is at: Vencord/src/userplugins/UserRadar/`,
-                triedPaths: tried
-            }
-        }
+export function getLocalFileContent(fileName: string): { content: string | null; error?: string } {
+    const dir = findDir()
+    if (!dir) return { content: null, error: "plugin dir not found" }
+    const p = join(dir, fileName)
+    if (!existsSync(p)) return { content: null, error: `file not found: ${p}` }
+    try { return { content: readFileSync(p, "utf-8") } }
+    catch (e: any) { return { content: null, error: e.message } }
+}
 
-        for (const fileName of PLUGIN_FILES) {
-            try {
-                const code = await fetchFile(fileName)
-                if (!code || code.length < 10) {
-                    results.push(`⚠ ${fileName}: empty (skipped)`)
-                    continue
-                }
-                writeFileSync(join(pluginDir, fileName), code, "utf-8")
-                results.push(`✓ ${fileName}`)
-            } catch (err: any) {
-                if (err?.message?.includes("404") || err?.message?.includes("HTTP 404")) {
-                    results.push(`⚠ ${fileName}: not found on remote (skipped)`)
-                } else {
-                    results.push(`✗ ${fileName}: ${err?.message || String(err)}`)
-                }
-            }
-        }
+export async function updatePluginFile(): Promise<{ success: boolean; message: string; details?: string }> {
+    const dir = findDir()
+    if (!dir) return { success: false, message: "plugin dir not found. Searched: " + POSSIBLE_PATHS.join(", ") }
 
-        return { 
-            success: true, 
-            message: `Updated ${results.filter(r => r.startsWith("✓")).length} files. Restart Discord to apply.`,
-            details: results.join("\n")
+    const results: string[] = []
+    for (const file of PLUGIN_FILES) {
+        try {
+            const code = await fetchFile(file)
+            if (!code || code.length < 10) { results.push(`skip ${file}`); continue }
+            writeFileSync(join(dir, file), code, "utf-8")
+            results.push(`ok ${file}`)
+        } catch (e: any) {
+            results.push(`err ${file}: ${e.message}`)
         }
-    } catch (err: any) {
-        return { success: false, message: err?.message || String(err) }
     }
+    const ok = results.filter(r => r.startsWith("ok")).length
+    return { success: ok > 0, message: `Updated ${ok} files. Restart Discord.`, details: results.join("\n") }
 }
