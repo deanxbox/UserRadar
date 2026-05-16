@@ -86,8 +86,6 @@ const settings = definePluginSettings({
     debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "log all events to console" },
     globalPresetMode:   { type: OptionType.STRING,  default: "custom",               description: "global preset mode — custom, stalker, lite, silent" },
     showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "show watchlist icon in toolbar" },
-    lastKnownRemoteSha: { type: OptionType.STRING,  hidden: true,  default: "",        description: "last known remote sha" },
-    updatePendingRestart: { type: OptionType.BOOLEAN, hidden: true, default: false,    description: "update downloaded, restart required" },
 })
 
 // -- notif helpers --
@@ -299,8 +297,6 @@ const ico = {
     history:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
     monitor:  () => <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
     preview:  () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
-    download: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
-    refresh:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>,
 }
 
 const CtxEyeIcon = () => (
@@ -1548,110 +1544,6 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     const [sort,  setSort]  = React.useState<SortMode>("date")
     const [expandedId, setExpandedId] = React.useState<string | null>(null)
 
-    const [updateStatus, setUpdateStatus] = React.useState<"idle"|"checking"|"uptodate"|"available"|"updating"|"restart"|"error">("idle")
-    const [updateMsg, setUpdateMsg] = React.useState<string>("")
-
-    const COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?per_page=1"
-    const RAW_URL = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
-
-    async function checkForUpdate() {
-        setUpdateStatus("checking")
-        setUpdateMsg("")
-        try {
-            // If update was downloaded but Discord not restarted, show restart
-            if (settings.store.updatePendingRestart) {
-                setUpdateStatus("restart")
-                setUpdateMsg("restart discord to apply")
-                return
-            }
-
-            const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
-            if (!res.ok) throw new Error(`GitHub API ${res.status}`)
-            const data = await res.json()
-            if (!Array.isArray(data) || !data[0]) { setUpdateStatus("uptodate"); return }
-
-            const remoteSha = (data[0].sha as string).slice(0, 7)
-            const storedSha = settings.store.lastKnownRemoteSha || ""
-
-            if (storedSha && storedSha === remoteSha) {
-                setUpdateStatus("uptodate")
-                setUpdateMsg(`checked ${new Date().toLocaleTimeString()}`)
-            } else {
-                setUpdateStatus("available")
-                setUpdateMsg(`new: ${remoteSha}`)
-            }
-        } catch (err: any) {
-            setUpdateStatus("error")
-            setUpdateMsg("check failed")
-            console.error("[UserRadar] Update check failed:", err?.message || err)
-        }
-    }
-
-    async function doUpdate() {
-        setUpdateStatus("updating")
-        setUpdateMsg("")
-        try {
-            // Try native.ts first
-            const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
-
-            if (native?.updatePluginFile) {
-                const result = await native.updatePluginFile()
-                if (result.success) {
-                    // Save the remote SHA after successful update
-                    try {
-                        const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
-                        if (res.ok) {
-                            const data = await res.json()
-                            if (data[0]?.sha) {
-                                settings.store.lastKnownRemoteSha = (data[0].sha as string).slice(0, 7)
-                            }
-                        }
-                    } catch {}
-
-                    settings.store.updatePendingRestart = true
-                    setUpdateStatus("restart")
-                    setUpdateMsg("restart discord to apply")
-                    Toasts.show({
-                        type: Toasts.Type.SUCCESS,
-                        message: result.message,
-                        id: Toasts.genId()
-                    })
-                    if (result.details) {
-                        console.log("[UserRadar] Update details:\n" + result.details)
-                    }
-                    return
-                } else {
-                    throw new Error(result.message)
-                }
-            }
-
-            // Fallback: open raw file for manual update
-            window.open(RAW_URL, "_blank")
-            setUpdateStatus("error")
-            setUpdateMsg("auto-update unavailable — open raw file for manual update")
-            Toasts.show({
-                type: Toasts.Type.FAILURE,
-                message: "Auto-update unavailable — open raw file for manual update",
-                id: Toasts.genId()
-            })
-        } catch (err: any) {
-            setUpdateStatus("error")
-            setUpdateMsg("update failed")
-            console.error("[UserRadar] Update failed:", err?.message || err)
-        }
-    }
-
-    function doRestart() {
-        settings.store.updatePendingRestart = false
-        try { (window as any).DiscordNative?.app?.relaunch?.() } catch { }
-        try { (window as any).VencordNative?.native?.relaunch?.() } catch { }
-        modalProps.onClose()
-        Toasts.show({
-            type: Toasts.Type.SUCCESS,
-            message: "Updated! Please reload Discord (Ctrl+R) to apply changes.",
-            id: Toasts.genId()
-        })
-    }
 
     const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) } }
 
@@ -1761,48 +1653,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             </ModalContent>
 
             <ModalFooter>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <button
-                            onClick={() => {
-                                if (updateStatus === "available") doUpdate()
-                                else if (updateStatus === "restart") doRestart()
-                                else checkForUpdate()
-                            }}
-                            disabled={updateStatus === "checking" || updateStatus === "updating"}
-                            style={{
-                                borderRadius: 20, height: 32, padding: "0 14px", boxSizing: "border-box",
-                                background: updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent",
-                                color: updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted,
-                                border: `1px solid ${updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border}`,
-                                fontSize: 12, fontWeight: 600, cursor: (updateStatus === "checking" || updateStatus === "updating") ? "wait" : "pointer",
-                                fontFamily: "inherit", transition: "all 150ms ease", display: "flex", alignItems: "center", gap: 5,
-                            }}
-                            onMouseEnter={e => {
-                                if (updateStatus !== "checking" && updateStatus !== "updating") {
-                                    e.currentTarget.style.background = C.brand
-                                    e.currentTarget.style.borderColor = C.brand
-                                    e.currentTarget.style.color = "#ffffff"
-                                }
-                            }}
-                            onMouseLeave={e => {
-                                e.currentTarget.style.background = updateStatus === "available" ? "rgba(36,128,70,0.15)" : updateStatus === "restart" ? "rgba(88,101,242,0.15)" : "transparent"
-                                e.currentTarget.style.borderColor = updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.border
-                                e.currentTarget.style.color = updateStatus === "available" ? C.green : updateStatus === "restart" ? C.brand : updateStatus === "error" ? C.red : C.muted
-                            }}
-                        >
-                            {(updateStatus === "checking" || updateStatus === "updating") && <span className="ur-spin" />}
-                            {updateStatus === "idle" && "check for updates"}
-                            {updateStatus === "checking" && "checking…"}
-                            {updateStatus === "available" && <><ico.download /> update</>}
-                            {updateStatus === "updating" && "updating…"}
-                            {updateStatus === "uptodate" && "✓ up to date"}
-                            {updateStatus === "error" && "⚠ retry"}
-                            {updateStatus === "restart" && <><ico.refresh /> restart discord</>}
-                        </button>
-                        {updateMsg && <span style={{ fontSize: 11, color: C.muted }}>{updateMsg}</span>}
-                    </div>
-
+                <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", width: "100%" }}>
                     <button
                         onClick={modalProps.onClose}
                         style={{
@@ -1895,7 +1746,6 @@ export default definePlugin({
     settings,
 
     start() {
-        settings.store.updatePendingRestart = false
         addContextMenuPatch("user-context", userCtxPatch)
         addContextMenuPatch("message", msgCtxPatch)
         if (settings.store.showToolbarIcon) startToolbarObserver()
