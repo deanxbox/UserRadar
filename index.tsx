@@ -1,7 +1,9 @@
-// index.tsx
-// k1ng_op — userradar
-// basically a stalker plugin lol, tracks people and notifies you when they do stuff
-// messages, edits, deletes, typing, profile/avatar, voice, status, activity, boosts, server joins
+// index.tsx — UserRadar
+// k1ng_op
+//
+// stalker plugin, basically
+// watch specific discord users and get pinged whenever they do anything
+// msgs, edits, deletes, typing, profile/pfp changes, voice, status, activity, boosts, joins
 
 import { addContextMenuPatch, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu"
 import { Notifications } from "@api/index"
@@ -25,44 +27,42 @@ import {
     TypingEvent, VoiceStateEvent, WatchedUser
 } from "./types"
 
-// runtime caches — wiped when plugin stops
-const profileCache:  Record<string, any>           = {}
-const vcCache:       Record<string, string | null>  = {}
-const statusCache:   Record<string, string>          = {}
-const activityCache: Record<string, string | null | undefined> = {}
-const guildCache: Record<string, Set<string>> = {}
+// these all reset when plugin stops, pre-populated in start() to avoid false positives
+const profileCache:  Record<string, any>                          = {}
+const vcCache:       Record<string, string | null>                = {}  // last known vc per user
+const statusCache:   Record<string, string>                       = {}  // last known status
+const activityCache: Record<string, string | null | undefined>    = {}  // undefined = never seen
+const guildCache:    Record<string, Set<string>>                  = {}  // guilds each user is in
 
 let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
 
+// grab the logged messages store from message logger enhanced
+// dynamic import doesn't work in vencord's plugin system so we check a few places
 function tryLoadLoggedMsgs() {
     if (loggedMsgs) return loggedMsgs
+
+    // try the plugin registry first — works regardless of folder name
     try {
         const plugin = (Vencord as any)?.Plugins?.plugins?.["vc-message-logger-enhanced"]
             ?? (Vencord as any)?.Plugins?.plugins?.["MessageLoggerEnhanced"]
             ?? (Vencord as any)?.Plugins?.plugins?.["messageLoggerEnhanced"]
-        if (plugin?.loggedMessages) {
-            loggedMsgs = plugin.loggedMessages
-            return loggedMsgs
-        }
-        if (plugin?.store?.loggedMessages) {
-            loggedMsgs = plugin.store.loggedMessages
-            return loggedMsgs
-        }
+        if (plugin?.loggedMessages)       { loggedMsgs = plugin.loggedMessages;       return loggedMsgs }
+        if (plugin?.store?.loggedMessages) { loggedMsgs = plugin.store.loggedMessages; return loggedMsgs }
     } catch { }
+
+    // fallback: scan webpack chunks
     try {
         const { wreq } = (window as any).webpackChunkdiscord_app?.find?.(
             (x: any) => x?.[1]?.["loggedMessages"]
         )?.[1] ?? {}
-        if (wreq?.["loggedMessages"]) {
-            loggedMsgs = wreq["loggedMessages"]
-            return loggedMsgs
-        }
+        if (wreq?.["loggedMessages"]) { loggedMsgs = wreq["loggedMessages"]; return loggedMsgs }
     } catch { }
+
     return null
 }
 
-// -- settings --
+// settings
 
 const settings = definePluginSettings({
     watchlist:          { type: OptionType.STRING,  hidden: true,  default: "[]",    description: "watchlist json — managed by the ui, don't touch" },
@@ -88,7 +88,7 @@ const settings = definePluginSettings({
     showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "show watchlist icon in toolbar" },
 })
 
-// -- notif helpers --
+// notification helpers
 
 function trunc(s: string, max: number) {
     return max > 0 && s.length > max ? s.slice(0, max) + "…" : s
@@ -104,6 +104,7 @@ function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
     if (channelId) findByProps("selectChannel")?.selectChannel({ guildId: guildId ?? "@me", channelId, messageId: msgId })
 }
 
+// checks if a feature is on for a specific user, respects preset mode and per-user overrides
 function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globalKey: string): boolean {
     if (!isWatched(settings, uid)) return false
     const mode = settings.store.globalPresetMode
@@ -124,7 +125,8 @@ function notify(opts: { title: string; body: string; icon?: string; onClick?: ()
     Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
 }
 
-// -- avatar helpers --
+// cdn url helpers
+// building these manually bc getAvatarURL() changes signature every few discord updates
 
 function avatarUrl(id: string, hash?: string | null, size = 80): string {
     try {
@@ -149,7 +151,9 @@ function hexColor(n?: number | null): string | null {
 
 const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
 
-// -- profile diffing --
+// profile change detection
+// only track text fields — color fields (accentColor, bannerColor) removed bc they
+// cause constant false positives from null/0/undefined endpoint inconsistencies
 
 const PROFILE_TEXT = ["username", "globalName", "bio", "banner"] as const
 const FIELD_NAME: Record<string, string> = {
@@ -157,6 +161,7 @@ const FIELD_NAME: Record<string, string> = {
     bio: "bio", banner: "banner",
 }
 
+// diff a fresh profile against what we have cached and notify on any real changes
 function checkProfileChanged(uid: string, fresh: any) {
     if (!isWatched(settings, uid)) return
     const old = profileCache[uid]
@@ -199,6 +204,7 @@ function checkProfileChanged(uid: string, fresh: any) {
     profileCache[uid] = fresh
 }
 
+// poll profiles every 5 mins — discord doesn't push bio/banner changes over websocket
 async function pollProfiles() {
     const list = getWatchlist(settings)
     if (!list.length) return
@@ -214,7 +220,7 @@ async function pollProfiles() {
     }
 }
 
-// -- modal --
+// modal ui
 
 const STYLE_ID = "ur-s9"
 function injectStyles() {
@@ -1740,7 +1746,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     )
 }
 
-// -- context menu patches --
+// context menu patches
 
 const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
     if (!user) return
@@ -1786,7 +1792,7 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
     )
 }
 
-// -- main plugin --
+// the plugin itself
 
 export default definePlugin({
     name: "UserRadar",
@@ -1801,8 +1807,8 @@ export default definePlugin({
         addContextMenuPatch("message", msgCtxPatch)
         if (settings.store.showToolbarIcon) startToolbarObserver()
 
-        // snapshot current vc/status/activity/guild state BEFORE flux handlers start receiving events
-        // this prevents false "joined vc", "now online", "joined server" notifs on plugin load
+        // pre-populate all caches BEFORE flux events start arriving
+        // if we don't do this, the first VOICE_STATE_UPDATES looks like a join even if they were already in vc
         try {
             const vsMod    = findByProps("getVoiceStateForUser")
             const presMod  = findByProps("getStatus", "getActivities")
@@ -1837,7 +1843,8 @@ export default definePlugin({
             }
         } catch (e) { log.warn("snapshot failed", e) }
 
-        // fetch profiles in background — don't block start(), flux handlers need to be active asap
+        // fetch baseline profiles in background — staggered so we don't get ratelimited
+        // using setTimeout(fetchNext) instead of await-in-loop so start() returns fast
         const list = getWatchlist(settings)
         let i = 0
         const fetchNext = () => {
@@ -1900,34 +1907,46 @@ export default definePlugin({
         MESSAGE_UPDATE({ message }: MsgUpdateEvent) {
             const uid = message?.author?.id
             if (!uid || !isWatched(settings, uid)) return
-            const old = MessageStore.getMessage(message.channel_id, message.id)
-            if (!old || old.content === message.content) return
-            if (isFeatureOn(uid, "edits", "globalEdits")) {
-                const label = getWatchedUser(settings, uid)?.nick
-                const name  = displayName(message.author)
-                const dn    = label ? `${label} (${name})` : name
-                const ch    = ChannelStore.getChannel(message.channel_id)
-                const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
-                const chName = ch?.name || "dm"
-                const gName = g?.name || ""
-                const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
-                if (settings.store.skipCurrentChannel) {
-                    const cur = getCurrentChannel()
-                    if (cur?.id === message.channel_id) return
-                }
-                notify({
-                    title: `${dn} edited a message`,
-                    body: `"${trunc(old.content, 60)}" → "${trunc(message.content, 60)}"`,
-                    icon: avatarUrl(uid, message.author?.avatar, 80),
-                    onClick: () => jumpTo(ch?.guild_id, message.channel_id, message.id),
-                })
-                logActivity(uid, "edit", "✏️", `edited a message in ${location}`, ch?.guild_id, message.channel_id, message.id)
-            }
+
+            // edited_timestamp only exists on real user edits
+            // embed resolution / pin events / reaction updates also fire MESSAGE_UPDATE but don't have this
+            if (!message.edited_timestamp) return
+
+            if (!isFeatureOn(uid, "edits", "globalEdits")) return
+
+            const label = getWatchedUser(settings, uid)?.nick
+            const name  = displayName(message.author)
+            const dn    = label ? `${label} (${name})` : name
+            const ch    = ChannelStore.getChannel(message.channel_id)
+            const g     = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id) : null
+            const chName = ch?.name || "dm"
+            const gName  = g?.name || ""
+            const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
+
+            if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === message.channel_id) return
+
+            // try to get old content from cache for before → after preview
+            // MessageStore still has the old version at the time MESSAGE_UPDATE fires
+            const cached = MessageStore.getMessage(message.channel_id, message.id)
+            const before = cached?.content && cached.content !== message.content
+                ? `"${trunc(cached.content, 60)}" → `
+                : ""
+            const after = message.content
+                ? `"${trunc(message.content, 60)}"`
+                : "click to view"
+
+            notify({
+                title: `${dn} edited a message`,
+                body: `${before}${after}`,
+                icon: avatarUrl(uid, message.author?.avatar, 80),
+                onClick: () => jumpTo(ch?.guild_id, message.channel_id, message.id),
+            })
+            logActivity(uid, "edit", "✏️", `edited a message in ${location}`, ch?.guild_id, message.channel_id, message.id)
         },
 
         MESSAGE_DELETE({ id, channelId }: MsgDeleteEvent) {
             const store = tryLoadLoggedMsgs()
-            // try discord's cache first, then message logger (keyed by msgId, or nested channelId->msgId)
+            // discord cache first, then try message logger in both key formats it uses
             const msg = MessageStore.getMessage(channelId, id)
                 ?? store?.[id]
                 ?? (store as any)?.[channelId]?.[id]
@@ -2030,7 +2049,8 @@ export default definePlugin({
                     logActivity(uid, "status", STATUS_EMOJI[newStatus] || "🔵", `status changed to ${newStatus} (was ${oldStatus})`)
                 }
                 statusCache[uid] = newStatus
-                // skip type 4 = custom status, only track real activities
+                // type 4 = custom status (just emoji + text), skip it
+                // only care about real activities: playing (0), listening (2), watching (3), competing (5)
                 const realAct = (u.activities || []).find((a: any) => a.type !== 4) ?? null
                 const newActKey = realAct ? `${realAct.type}:${realAct.name}` : null
                 const oldAct = activityCache[uid]
@@ -2067,7 +2087,7 @@ export default definePlugin({
             }
         },
 
-        // websocket fires this instantly when username/avatar changes
+        // discord pushes username/avatar changes instantly over ws — fastest path for those fields
         USER_UPDATE({ user }: { user: any }) {
             if (!user?.id || !isWatched(settings, user.id)) return
             const old = profileCache[user.id]
@@ -2075,12 +2095,14 @@ export default definePlugin({
             checkProfileChanged(user.id, { ...old, user: { ...old.user, ...camelize(user) } })
         },
 
-        // fires when discord fetches a full profile (opening popout, profile page etc)
+        // fires when discord fetches a full profile (opening someone's card, profile page etc)
         USER_PROFILE_FETCH_SUCCESS(rawEvt: any) {
             if (!rawEvt?.user?.id) return
             checkProfileChanged(rawEvt.user.id, camelize(rawEvt))
         },
 
+        // only fires for servers you're in — that's fine, if you're not in the server you won't see it
+        // wasIn check prevents false positives on discord reconnect re-sync
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
             if (!guildCache[user.id]) guildCache[user.id] = new Set()
