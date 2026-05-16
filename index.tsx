@@ -1603,49 +1603,38 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
         try {
             const native = (window as any).VencordNative?.pluginHelpers?.UserRadar
 
-            // Diagnostic: log what's available
-            console.log("[UserRadar] VencordNative.pluginHelpers:", Object.keys((window as any).VencordNative?.pluginHelpers || {}))
-            console.log("[UserRadar] UserRadar native:", native)
-            console.log("[UserRadar] ping:", native?.ping?.())
-
             if (!native) {
-                // Fallback: can't compare local vs remote, just fetch remote and show info
+                // No native.ts at all — fetch remote for manual comparison
                 const res = await fetch(RAW_URL + "?t=" + Date.now())
                 if (!res.ok) throw new Error(`GitHub raw ${res.status}`)
                 const remote = await res.text()
                 if (!remote || remote.length < 500) throw new Error("Remote file empty")
-
-                // Show modal with remote info — user must manually check
                 setUpdateStatus("available")
-                Toasts.show({
-                    type: Toasts.Type.DEFAULT,
-                    message: "native.ts not loaded — manual update required",
-                    id: Toasts.genId()
-                })
                 return
             }
 
-            if (!native.getLocalFileContent) {
-                throw new Error("native.ts loaded but getLocalFileContent missing. Rebuild.")
+            // If getLocalFileContent exists, do content comparison
+            if (native.getLocalFileContent) {
+                const local = native.getLocalFileContent("index.tsx")
+                if (local.content) {
+                    const res = await fetch(RAW_URL + "?t=" + Date.now())
+                    if (!res.ok) throw new Error(`GitHub raw ${res.status}`)
+                    const remote = await res.text()
+                    if (!remote || remote.length < 500) throw new Error("Remote file empty")
+                    const isSame = local.content.trim() === remote.trim()
+                    setUpdateStatus(isSame ? "uptodate" : "available")
+                    return
+                }
             }
 
-            const local = native.getLocalFileContent("index.tsx")
-            if (local.error) {
-                throw new Error(`Failed to read local file: ${local.error}`)
-            }
-            if (!local.content) {
-                throw new Error("Local index.tsx not found")
-            }
-
-            const res = await fetch(RAW_URL + "?t=" + Date.now())
-            if (!res.ok) throw new Error(`GitHub raw ${res.status}`)
-            const remote = await res.text()
-            if (!remote || remote.length < 500) {
-                throw new Error("Remote file empty or invalid")
-            }
-
-            const isSame = local.content.trim() === remote.trim()
-            setUpdateStatus(isSame ? "uptodate" : "available")
+            // native.ts loaded but getLocalFileContent missing — stale build
+            // Just show available to be safe, user can click update
+            setUpdateStatus("available")
+            Toasts.show({
+                type: Toasts.Type.DEFAULT,
+                message: "Rebuild Vencord to enable update check: pnpm build && pnpm inject",
+                id: Toasts.genId()
+            })
         } catch (err: any) {
             setUpdateStatus("error")
             console.error("[UserRadar] Update check failed:", err?.message || err)
