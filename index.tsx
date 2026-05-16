@@ -1632,30 +1632,36 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     async function doUpdate() {
         setUpdateStatus("updating")
         try {
-            // Call native.ts function via Vencord's IPC bridge
-            // Vencord automatically handles the IpcMainInvokeEvent parameter
+            // Access native.ts exports via Vencord's plugin system
+            // native.ts functions are exposed on plugin.native after build
             const plugin = (window as any).VencordNative?.pluginManager?.getPlugin?.("UserRadar")
-            const native = plugin?.native
 
-            if (native?.updatePluginFile) {
-                const result = await native.updatePluginFile()
-                if (result.success) {
-                    setUpdateStatus("restart")
-                    Toasts.show({
-                        type: Toasts.Type.SUCCESS,
-                        message: result.message,
-                        id: Toasts.genId()
-                    })
-                    if (result.details) {
-                        console.log("[UserRadar] Update details:\n" + result.details)
-                    }
-                } else {
-                    throw new Error(result.message)
-                }
-                return
+            if (!plugin) {
+                throw new Error("Plugin not found in Vencord registry")
             }
 
-            throw new Error("native.ts not loaded. Make sure native.ts exists and rebuild with: pnpm build && pnpm inject")
+            if (!plugin.native) {
+                throw new Error("native.ts not loaded. Check: (1) native.ts exists in plugin folder, (2) no syntax errors in native.ts, (3) rebuilt with 'pnpm build && pnpm inject'")
+            }
+
+            if (!plugin.native.updatePluginFile) {
+                throw new Error("updatePluginFile not found in native.ts. Check native.ts exports.")
+            }
+
+            const result = await plugin.native.updatePluginFile()
+            if (result.success) {
+                setUpdateStatus("restart")
+                Toasts.show({
+                    type: Toasts.Type.SUCCESS,
+                    message: result.message,
+                    id: Toasts.genId()
+                })
+                if (result.details) {
+                    console.log("[UserRadar] Update details:\n" + result.details)
+                }
+            } else {
+                throw new Error(result.message)
+            }
         } catch (err: any) {
             setUpdateStatus("error")
             console.error("[UserRadar] Update failed:", err?.message || err)
