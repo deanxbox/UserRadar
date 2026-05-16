@@ -1616,13 +1616,12 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                 }
             }
 
-            // Fallback: open raw file for manual update
-            window.open(RAW_URL, "_blank")
+            // Auto-update not available — native.ts not compiled
             setUpdateStatus("error")
-            setUpdateMsg("auto-update unavailable — open raw file for manual update")
+            setUpdateMsg("rebuild required: rm -rf dist && pnpm build")
             Toasts.show({
                 type: Toasts.Type.FAILURE,
-                message: "Auto-update unavailable — open raw file for manual update",
+                message: "Auto-update unavailable. Rebuild Vencord: rm -rf dist && pnpm build && pnpm inject",
                 id: Toasts.genId()
             })
         } catch (err: any) {
