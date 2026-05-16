@@ -87,6 +87,7 @@ const settings = definePluginSettings({
     globalPresetMode:   { type: OptionType.STRING,  default: "custom",               description: "global preset mode — custom, stalker, lite, silent" },
     showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "show watchlist icon in toolbar" },
     lastKnownRemoteSha: { type: OptionType.STRING,  hidden: true,  default: "",        description: "last known remote sha" },
+    updatePendingRestart: { type: OptionType.BOOLEAN, hidden: true, default: false,    description: "update downloaded, restart required" },
 })
 
 // -- notif helpers --
@@ -1557,6 +1558,13 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
         setUpdateStatus("checking")
         setUpdateMsg("")
         try {
+            // If update was downloaded but Discord not restarted, show restart
+            if (settings.store.updatePendingRestart) {
+                setUpdateStatus("restart")
+                setUpdateMsg("restart discord to apply")
+                return
+            }
+
             const res = await fetch(COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" } })
             if (!res.ok) throw new Error(`GitHub API ${res.status}`)
             const data = await res.json()
@@ -1600,6 +1608,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                         }
                     } catch {}
 
+                    settings.store.updatePendingRestart = true
                     setUpdateStatus("restart")
                     setUpdateMsg("restart discord to apply")
                     Toasts.show({
@@ -1616,12 +1625,13 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                 }
             }
 
-            // Auto-update not available — native.ts not compiled
+            // Fallback: open raw file for manual update
+            window.open(RAW_URL, "_blank")
             setUpdateStatus("error")
-            setUpdateMsg("rebuild required: rm -rf dist && pnpm build")
+            setUpdateMsg("auto-update unavailable — open raw file for manual update")
             Toasts.show({
                 type: Toasts.Type.FAILURE,
-                message: "Auto-update unavailable. Rebuild Vencord: rm -rf dist && pnpm build && pnpm inject",
+                message: "Auto-update unavailable — open raw file for manual update",
                 id: Toasts.genId()
             })
         } catch (err: any) {
@@ -1632,6 +1642,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     }
 
     function doRestart() {
+        settings.store.updatePendingRestart = false
         try { (window as any).DiscordNative?.app?.relaunch?.() } catch { }
         try { (window as any).VencordNative?.native?.relaunch?.() } catch { }
         modalProps.onClose()
@@ -1884,6 +1895,7 @@ export default definePlugin({
     settings,
 
     start() {
+        settings.store.updatePendingRestart = false
         addContextMenuPatch("user-context", userCtxPatch)
         addContextMenuPatch("message", msgCtxPatch)
         if (settings.store.showToolbarIcon) startToolbarObserver()
