@@ -1599,7 +1599,7 @@ const PLUGIN_RAW_URL     = "https://raw.githubusercontent.com/k1ng0p/UserRadar/m
 const PLUGIN_COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
 
 // bump this on every push — YYYY-MM-DD lexicographic compare works fine
-const PLUGIN_VERSION = "5.0"
+const PLUGIN_VERSION = "5.1"
 
 type UpdateState = "idle" | "checking" | "uptodate" | "available" | "downloading" | "done" | "error"
 
@@ -1953,7 +1953,7 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
 export default definePlugin({
     name: "UserRadar",
     description: "track watched users and get notified on messages, edits, deletes, typing, profile/avatar changes, voice, status, activity, boosts, and server joins",
-    authors: [{ name: "k1ng_op", id: 1337n }],
+    authors: [{ name: "k1ng_op", id: 641266820187160576 }],
     dependencies: ["MessageLoggerEnhanced"],
 
     settings,
