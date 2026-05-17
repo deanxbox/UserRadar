@@ -1550,43 +1550,119 @@ function stopToolbarObserver() {
 function GlobalPresetControl({ refresh }: { refresh: () => void }) {
     const mode = settings.store.globalPresetMode || "custom"
     const presets = [
-        { key: "custom", label: "Custom", desc: "Per-user control", color: C.brand },
-        { key: "stalker", label: "Stalker", desc: "Everything tracked", color: C.danger },
-        { key: "lite", label: "Lite", desc: "Essential tracking only", color: C.brandLight },
-        { key: "silent", label: "Silent", desc: "All notifications off", color: C.muted },
+        { key: "custom",  label: "Custom",  desc: "Per-user control",         color: C.brand },
+        { key: "stalker", label: "Stalker", desc: "Everything tracked",       color: C.danger },
+        { key: "lite",    label: "Lite",    desc: "Essential tracking only",  color: C.brandLight },
+        { key: "silent",  label: "Silent",  desc: "All notifications off",    color: "#b5bac1" }, // lighter gray for better active contrast
     ]
     const activeIndex = presets.findIndex(p => p.key === mode)
 
     return (
-        <div style={{ marginBottom: 18 }}>
+        <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 10 }}>
                 Global Preset Mode
             </div>
-            <div style={{ position: "relative", display: "flex", background: C.bg1, borderRadius: 20, border: `1px solid ${C.border}`, padding: 4 }}>
+
+            <div style={{
+                display: "grid",
+                gridTemplateColumns: `repeat(${presets.length}, 1fr)`,
+                background: C.bg1,
+                borderRadius: 20,
+                border: `1px solid ${C.border}`,
+                padding: 4,
+                position: "relative",
+            }}>
+                {/* Sliding active pill */}
                 <div style={{
-                    position: "absolute", top: 4, bottom: 4, left: 4,
+                    position: "absolute",
+                    top: 4,
+                    bottom: 4,
+                    left: 4,
                     width: `calc((100% - 8px) / ${presets.length})`,
                     transform: `translateX(${activeIndex * 100}%)`,
                     background: presets[activeIndex].color + "20",
-                    border: `1px solid ${presets[activeIndex].color}50`,
+                    border: `1.5px solid ${presets[activeIndex].color}60`,
                     borderRadius: 16,
                     transition: "transform 300ms cubic-bezier(0.4, 0, 0.2, 1), background 200ms ease, border-color 200ms ease",
                     pointerEvents: "none",
+                    boxSizing: "border-box",
+                    zIndex: 1,
                 }} />
-                {presets.map(p => (
-                    <div
-                        key={p.key}
-                        onClick={() => { settings.store.globalPresetMode = p.key; refresh() }}
-                        style={{ flex: 1, padding: "10px 6px", borderRadius: 16, cursor: "pointer", textAlign: "center", position: "relative", zIndex: 2, transition: "color 200ms ease" }}
-                    >
-                        <div style={{ fontSize: 13, fontWeight: 700, color: mode === p.key ? p.color : C.muted, marginBottom: 3 }}>{p.label}</div>
-                        <div style={{ fontSize: 10, color: mode === p.key ? C.text : C.muted, opacity: mode === p.key ? 1 : 0.7, lineHeight: 1.2 }}>{p.desc}</div>
-                    </div>
-                ))}
+
+                {presets.map(p => {
+                    const isActive = mode === p.key
+                    return (
+                        <div
+                            key={p.key}
+                            onClick={() => { settings.store.globalPresetMode = p.key; refresh() }}
+                            style={{
+                                padding: "12px 6px",
+                                borderRadius: 16,
+                                cursor: "pointer",
+                                textAlign: "center",
+                                position: "relative",
+                                zIndex: 2,
+                                transition: "background 150ms ease",
+                                userSelect: "none",
+                            }}
+                            onMouseEnter={e => {
+                                if (!isActive) e.currentTarget.style.background = "rgba(255,255,255,0.04)"
+                            }}
+                            onMouseLeave={e => {
+                                e.currentTarget.style.background = "transparent"
+                            }}
+                        >
+                            <div style={{
+                                fontSize: 13,
+                                fontWeight: 700,
+                                color: isActive ? p.color : C.muted,
+                                marginBottom: 4,
+                                transition: "color 200ms ease",
+                                whiteSpace: "nowrap",
+                            }}>
+                                {p.label}
+                            </div>
+                            <div style={{
+                                fontSize: 10,
+                                color: isActive ? C.text : C.muted,
+                                opacity: isActive ? 1 : 0.6,
+                                lineHeight: 1.3,
+                                transition: "color 200ms ease, opacity 200ms ease",
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                padding: "0 2px",
+                            }}>
+                                {p.desc}
+                            </div>
+                        </div>
+                    )
+                })}
             </div>
+
             {mode !== "custom" && (
-                <div style={{ marginTop: 8, padding: "8px 12px", background: C.bg1, borderRadius: 12, border: `1px solid ${C.border}`, fontSize: 12, color: C.muted }}>
-                    All users follow the <b style={{ color: presets[activeIndex].color }}>{presets[activeIndex].label}</b> preset. Individual overrides are disabled. Switch to <b>Custom</b> to configure per-user.
+                <div style={{
+                    marginTop: 10,
+                    padding: "10px 14px",
+                    background: C.bg1,
+                    borderRadius: 14,
+                    border: `1px solid ${C.border}`,
+                    fontSize: 12,
+                    color: C.muted,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                }}>
+                    <span style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        background: presets[activeIndex].color,
+                        flexShrink: 0,
+                    }} />
+                    <span>
+                        All users follow the <b style={{ color: presets[activeIndex].color }}>{presets[activeIndex].label}</b> preset. Individual overrides are disabled. Switch to <b style={{ color: C.brand, cursor: "pointer" }} onClick={() => { settings.store.globalPresetMode = "custom"; refresh() }}>Custom</b> to configure per-user.
+                    </span>
                 </div>
             )}
         </div>
@@ -1599,7 +1675,7 @@ const PLUGIN_RAW_URL     = "https://raw.githubusercontent.com/k1ng0p/UserRadar/m
 const PLUGIN_COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
 
 // bump this on every push — YYYY-MM-DD lexicographic compare works fine
-const PLUGIN_VERSION = "6.1"
+const PLUGIN_VERSION = "7.0"
 
 type UpdateState = "idle" | "checking" | "uptodate" | "available" | "downloading" | "done" | "error"
 
