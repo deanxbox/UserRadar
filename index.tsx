@@ -1593,14 +1593,115 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
     )
 }
 
+// updater — check github for new commits, download and write to disk, prompt restart
+// using VencordNative.ipc which is the same channel Vencord's own updater uses
+const PLUGIN_RAW_URL     = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
+const PLUGIN_COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
+
+// bump this on every push — YYYY-MM-DD lexicographic compare works fine
+const PLUGIN_VERSION = "5.1"
+
+type UpdateState = "idle" | "checking" | "uptodate" | "available" | "downloading" | "done" | "error"
+
+async function checkUpdate(): Promise<{ hasUpdate: boolean; sha: string; date: string }> {
+    const res = await fetch(PLUGIN_COMMITS_URL, {
+        headers: { Accept: "application/vnd.github.v3+json" },
+        cache: "no-store",
+    })
+    if (!res.ok) throw new Error(`github ${res.status}`)
+    const data = await res.json()
+    if (!Array.isArray(data) || !data[0]) throw new Error("empty response")
+    const date = (data[0].commit?.committer?.date ?? "").slice(0, 10)
+    const sha  = (data[0].sha ?? "").slice(0, 7)
+    return { hasUpdate: date > PLUGIN_VERSION, sha, date }
+}
+
+async function downloadAndInstall(): Promise<void> {
+    const res = await fetch(PLUGIN_RAW_URL + "?t=" + Date.now(), { cache: "no-store" })
+    if (!res.ok) throw new Error(`fetch ${res.status}`)
+    const code = await res.text()
+    if (!code || code.length < 500) throw new Error("bad response")
+
+    // Vencord's native IPC — same thing the built-in updater uses internally
+    // path is relative to the settings dir / userplugins folder
+    const native = (window as any).VencordNative
+
+    // try the ipc invoke approach first (most reliable)
+    if (native?.ipc?.invoke) {
+        try {
+            const dir = await native.settings.getSettingsDir()
+            const path = `${dir}/userplugins/UserRadar/index.tsx`
+            await native.ipc.invoke("VencordWriteFile", path, code)
+            return
+        } catch { }
+        try {
+            // some builds expose it differently
+            await native.ipc.invoke("writeFile", "userplugins/UserRadar/index.tsx", code)
+            return
+        } catch { }
+    }
+
+    // fallback: node fs via discord's preload (works on older vencord builds)
+    const req = (window as any).require
+    if (req) {
+        try {
+            const fs   = req("fs")
+            const path = req("path")
+            // find the plugin file — __filename isn't available but we can get it from the stack
+            const native2 = (window as any).VencordNative
+            const dir = await native2?.settings?.getSettingsDir?.()
+            if (dir) {
+                fs.writeFileSync(path.join(dir, "userplugins", "UserRadar", "index.tsx"), code, "utf8")
+                return
+            }
+        } catch { }
+    }
+
+    throw new Error("can't write file — no native access")
+}
+
+function relaunchDiscord() {
+    try { (window as any).DiscordNative?.app?.relaunch?.() } catch { }
+    try { (window as any).VencordNative?.native?.relaunch?.() } catch { }
+}
+
 function WatchlistModal({ modalProps }: { modalProps: any }) {
     React.useEffect(() => { injectStyles() }, [])
 
-    const [users, setUsers] = React.useState<WatchedUser[]>(() => { try { return getWatchlist(settings) } catch { return [] } })
-    const [query, setQuery] = React.useState("")
-    const [sort,  setSort]  = React.useState<SortMode>("date")
+    const [users, setUsers]       = React.useState<WatchedUser[]>(() => { try { return getWatchlist(settings) } catch { return [] } })
+    const [query, setQuery]       = React.useState("")
+    const [sort,  setSort]        = React.useState<SortMode>("date")
     const [expandedId, setExpandedId] = React.useState<string | null>(null)
 
+    const [updateState, setUpdateState] = React.useState<UpdateState>("idle")
+    const [updateInfo,  setUpdateInfo]  = React.useState<{ sha: string; date: string } | null>(null)
+    const [updateErr,   setUpdateErr]   = React.useState("")
+
+    const handleCheckUpdate = () => {
+        setUpdateState("checking")
+        setUpdateErr("")
+        checkUpdate().then(info => {
+            if (info.hasUpdate) {
+                setUpdateInfo({ sha: info.sha, date: info.date })
+                setUpdateState("available")
+            } else {
+                setUpdateState("uptodate")
+            }
+        }).catch(e => {
+            setUpdateErr(e?.message ?? "unknown error")
+            setUpdateState("error")
+        })
+    }
+
+    const handleInstall = () => {
+        setUpdateState("downloading")
+        downloadAndInstall().then(() => {
+            setUpdateState("done")
+        }).catch(e => {
+            setUpdateErr(e?.message ?? "install failed")
+            setUpdateState("error")
+        })
+    }
 
     const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) } }
 
@@ -1710,33 +1811,88 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             </ModalContent>
 
             <ModalFooter>
-                <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", width: "100%" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 10 }}>
+
+                    {/* left side — updater */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+
+                        {/* check / install / restart button */}
+                        <button
+                            disabled={updateState === "checking" || updateState === "downloading"}
+                            onClick={() => {
+                                if (updateState === "idle" || updateState === "uptodate" || updateState === "error") handleCheckUpdate()
+                                else if (updateState === "available") handleInstall()
+                                else if (updateState === "done") relaunchDiscord()
+                            }}
+                            style={{
+                                display: "flex", alignItems: "center", gap: 6,
+                                borderRadius: 20, height: 32, padding: "0 14px",
+                                boxSizing: "border-box", fontFamily: "inherit",
+                                fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                border: `1px solid ${
+                                    updateState === "available"                     ? C.brand :
+                                    updateState === "done"                          ? C.green :
+                                    updateState === "error"                         ? C.red   :
+                                    C.border
+                                }`,
+                                background:
+                                    updateState === "available"                     ? "rgba(88,101,242,0.15)" :
+                                    updateState === "done"                          ? "rgba(36,128,70,0.15)"  :
+                                    updateState === "error"                         ? "rgba(218,55,60,0.1)"   :
+                                    "transparent",
+                                color:
+                                    updateState === "available"                     ? C.brand      :
+                                    updateState === "done"                          ? C.green      :
+                                    updateState === "error"                         ? C.red        :
+                                    updateState === "uptodate"                      ? C.green      :
+                                    C.muted,
+                                opacity: (updateState === "checking" || updateState === "downloading") ? 0.6 : 1,
+                                transition: "all 150ms ease",
+                            }}
+                        >
+                            {(updateState === "checking" || updateState === "downloading") && (
+                                <span className="ur-spin" style={{ width: 10, height: 10 }} />
+                            )}
+                            {updateState === "idle"        && "check for updates"}
+                            {updateState === "checking"    && "checking…"}
+                            {updateState === "uptodate"    && "✓ up to date"}
+                            {updateState === "available"   && `↓ install update  (${updateInfo?.sha})`}
+                            {updateState === "downloading" && "installing…"}
+                            {updateState === "done"        && "↺ restart discord"}
+                            {updateState === "error"       && "⚠ retry"}
+                        </button>
+
+                        {/* contextual hint text */}
+                        {updateState === "available" && updateInfo && (
+                            <span style={{ fontSize: 11, color: C.muted }}>
+                                {updateInfo.date}
+                            </span>
+                        )}
+                        {updateState === "done" && (
+                            <span style={{ fontSize: 11, color: C.muted }}>
+                                saved — restart to apply
+                            </span>
+                        )}
+                        {updateState === "error" && updateErr && (
+                            <span style={{ fontSize: 11, color: C.red }} title={updateErr}>
+                                {updateErr.length > 40 ? updateErr.slice(0, 40) + "…" : updateErr}
+                            </span>
+                        )}
+                    </div>
+
+                    {/* right side — close button */}
                     <button
                         onClick={modalProps.onClose}
                         style={{
-                            borderRadius: 20,
-                            height: 36,
-                            boxSizing: "border-box",
-                            padding: "0 18px",
-                            background: "transparent",
-                            color: C.text,
-                            border: `1px solid ${C.border}`,
-                            fontSize: 14,
-                            fontWeight: 500,
-                            cursor: "pointer",
-                            fontFamily: "inherit",
-                            transition: "background 150ms ease, border-color 150ms ease",
+                            borderRadius: 20, height: 32, boxSizing: "border-box",
+                            padding: "0 16px", background: "transparent", color: C.text,
+                            border: `1px solid ${C.border}`, fontSize: 13, fontWeight: 500,
+                            cursor: "pointer", fontFamily: "inherit",
+                            transition: "background 150ms, border-color 150ms, color 150ms",
+                            flexShrink: 0,
                         }}
-                        onMouseEnter={e => {
-                            e.currentTarget.style.background = C.brand
-                            e.currentTarget.style.borderColor = C.brand
-                            e.currentTarget.style.color = "#ffffff"
-                        }}
-                        onMouseLeave={e => {
-                            e.currentTarget.style.background = "transparent"
-                            e.currentTarget.style.borderColor = C.border
-                            e.currentTarget.style.color = C.text
-                        }}
+                        onMouseEnter={e => { e.currentTarget.style.background = C.brand; e.currentTarget.style.borderColor = C.brand; e.currentTarget.style.color = "#fff" }}
+                        onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.text }}
                     >
                         close
                     </button>
@@ -1797,7 +1953,7 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
 export default definePlugin({
     name: "UserRadar",
     description: "track watched users and get notified on messages, edits, deletes, typing, profile/avatar changes, voice, status, activity, boosts, and server joins",
-    authors: [{ name: "k1ng_op", id: 1337n }],
+    authors: [{ name: "k1ng_op", id: 641266820187160576 }],
     dependencies: ["MessageLoggerEnhanced"],
 
     settings,
