@@ -1674,13 +1674,16 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
 const PLUGIN_RAW_URL     = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
 const PLUGIN_COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
 
-// this is the full sha of the commit this file was built from
-// the updater fetches the latest commit sha from github and compares against this
-// if they differ = update available, no date math, no version strings to forget to bump
-// UPDATE THIS after every install — copy the sha from github after pushing
-const INSTALLED_SHA = "none"
-
 type UpdateState = "idle" | "checking" | "uptodate" | "available" | "downloading" | "done" | "error"
+
+// installed sha is stored in vencord settings so it persists across restarts
+// avoids the file-stamping approach which required the github file to also have the right sha
+function getInstalledSha(): string {
+    try { return (settings.store as any).installedSha ?? "none" } catch { return "none" }
+}
+function setInstalledSha(sha: string) {
+    try { (settings.store as any).installedSha = sha } catch { }
+}
 
 async function checkUpdate(): Promise<{ hasUpdate: boolean; sha: string; shortSha: string; date: string }> {
     const res = await fetch(PLUGIN_COMMITS_URL, {
@@ -1690,12 +1693,11 @@ async function checkUpdate(): Promise<{ hasUpdate: boolean; sha: string; shortSh
     if (!res.ok) throw new Error(`github api error ${res.status}`)
     const data = await res.json()
     if (!Array.isArray(data) || !data[0]) throw new Error("no commits found")
-    const latestSha  = data[0].sha as string
-    const shortSha   = latestSha.slice(0, 7)
-    const date       = (data[0].commit?.committer?.date ?? "").slice(0, 10)
-    // any sha mismatch = update available
-    // "none" always triggers so first-run users always see the update prompt
-    const hasUpdate  = latestSha !== INSTALLED_SHA && INSTALLED_SHA !== latestSha
+    const latestSha = data[0].sha as string
+    const shortSha  = latestSha.slice(0, 7)
+    const date      = (data[0].commit?.committer?.date ?? "").slice(0, 10)
+    const installed = getInstalledSha()
+    const hasUpdate = latestSha !== installed
     return { hasUpdate, sha: latestSha, shortSha, date }
 }
 
@@ -1709,18 +1711,19 @@ async function downloadAndInstall(): Promise<void> {
     if (!fileRes.ok)   throw new Error(`download ${fileRes.status}`)
     const commitData = await commitRes.json()
     const latestSha  = commitData[0]?.sha ?? "none"
-    let code = await fileRes.text()
+    const code = await fileRes.text()
     if (!code || code.length < 500) throw new Error("bad response")
-    // stamp the sha so next update check is accurate
-    code = code.replace(/const INSTALLED_SHA = ".*?"/, `const INSTALLED_SHA = "${latestSha}"`)
 
     // native.ts runs in the main electron process and has full fs access
-    // vencord exposes it at VencordNative.pluginHelpers.UserRadar
     const helper = (window as any).VencordNative?.pluginHelpers?.UserRadar
     if (helper?.writePlugin) {
         const result = await helper.writePlugin(code)
-        if (result?.ok) return
-        throw new Error(result?.error ?? "write failed")
+        if (!result?.ok) throw new Error(result?.error ?? "write failed")
+        // save the installed sha to settings — this is what checkUpdate() compares against
+        // storing in settings instead of stamping the file so it works regardless of
+        // what INSTALLED_SHA says in the github source
+        setInstalledSha(latestSha)
+        return
     }
 
     throw new Error("native helper missing — make sure native.ts is in userplugins/UserRadar/ and you ran pnpm build")
