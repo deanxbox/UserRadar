@@ -1,36 +1,39 @@
 // native.ts — k1ng_op
-// runs in the main electron process, not the renderer
-// this is how vencord userplugins get native file access
-// vencord automatically picks this up and exposes it via VencordNative.pluginHelpers.UserRadar
+// vencord automatically compiles this into the main process
+// and exposes exports via VencordNative.pluginHelpers.UserRadar
+// DO NOT add IpcMainInvokeEvent as first param — vencord injects that itself
 
-import { IpcMainInvokeEvent } from "electron"
 import { join } from "path"
-import { writeFile } from "fs/promises"
-import { existsSync, mkdirSync } from "fs"
+import { writeFile, mkdir } from "fs/promises"
+import { existsSync } from "fs"
 
-// writes updated plugin code to disk
-// called from the renderer via VencordNative.pluginHelpers.UserRadar.writePlugin(code)
-export async function writePlugin(_: IpcMainInvokeEvent, code: string): Promise<{ ok: boolean; error?: string }> {
+export async function writePlugin(code: string): Promise<{ ok: boolean; error?: string }> {
     try {
         if (!code || code.length < 500) {
-            return { ok: false, error: "code looks empty, not writing" }
+            return { ok: false, error: "code too short, refusing to write" }
         }
 
-        // __dirname here is the vencord dist folder
-        // userplugins live at <settingsDir>/userplugins/
-        // vencord exposes DATA_DIR via process env
-        const dataDir = process.env.VENCORD_USER_DATA_DIR
-            ?? join(process.env.APPDATA ?? process.env.HOME ?? "~", ".vencord")
+        // vencord sets this in the main process
+        // falls back to standard locations per platform
+        let dataDir: string
+
+        if (process.env.VENCORD_USER_DATA_DIR) {
+            dataDir = process.env.VENCORD_USER_DATA_DIR
+        } else if (process.platform === "win32") {
+            dataDir = join(process.env.APPDATA!, "Vencord")
+        } else if (process.platform === "darwin") {
+            dataDir = join(process.env.HOME!, "Library", "Application Support", "Vencord")
+        } else {
+            dataDir = join(process.env.XDG_CONFIG_HOME ?? join(process.env.HOME!, ".config"), "Vencord")
+        }
 
         const pluginDir = join(dataDir, "userplugins", "UserRadar")
 
-        // make sure the dir exists
         if (!existsSync(pluginDir)) {
-            mkdirSync(pluginDir, { recursive: true })
+            await mkdir(pluginDir, { recursive: true })
         }
 
-        const filePath = join(pluginDir, "index.tsx")
-        await writeFile(filePath, code, "utf8")
+        await writeFile(join(pluginDir, "index.tsx"), code, "utf8")
 
         return { ok: true }
     } catch (e: any) {
