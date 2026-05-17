@@ -385,12 +385,12 @@ function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
     doLookup: () => void
 }) {
     const [focused, setFocused] = React.useState(false)
-    const [btnState, setBtnState] = React.useState<<"idle" | "valid" | "searching" | "found" | "notfound">("idle")
-
-    const clean = rawId.trim().replace(/\D/g, "")
+    const [btnState, setBtnState] = React.useState<"idle" | "valid" | "searching" | "found" | "notfound">("idle")
+    const btnRef = React.useRef<HTMLButtonElement>(null)
     const borderColor = hasErr ? C.red : focused ? C.brand : C.border
 
     React.useEffect(() => {
+        const clean = rawId.trim().replace(/\D/g, "")
         if (lk.s === "loading") setBtnState("searching")
         else if (lk.s === "done") {
             setBtnState("found")
@@ -404,17 +404,35 @@ function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
         }
         else if (clean.length >= 17 && clean.length <= 20) setBtnState("valid")
         else setBtnState("idle")
-    }, [rawId, lk.s, clean.length])
+    }, [rawId, lk.s])
 
-    const btnBg = () => {
+    const btnStyle: React.CSSProperties = {
+        borderRadius: 20,
+        height: 40,
+        boxSizing: "border-box",
+        padding: "0 20px",
+        color: "#ffffff",
+        border: "none",
+        fontSize: 14,
+        fontWeight: 600,
+        cursor: btnState === "idle" ? "not-allowed" : "pointer",
+        flexShrink: 0,
+        fontFamily: "inherit",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        transition: "background 200ms ease, opacity 200ms ease",
+    }
+
+    const getBtnBg = () => {
         if (btnState === "found") return "#248046"
         if (btnState === "notfound") return "#da373c"
         if (btnState === "searching") return "#4752c4"
-        if (btnState === "valid") return C.brand
+        if (btnState === "valid") return "#5865f2"
         return "rgba(255,255,255,0.06)"
     }
 
-    const btnText = () => {
+    const getBtnText = () => {
         if (btnState === "found") return "Added ✓"
         if (btnState === "notfound") return "Not found"
         if (btnState === "searching") return <><span className="ur-spin" style={{ marginRight: 6 }} />Searching...</>
@@ -422,112 +440,45 @@ function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
     }
 
     return (
-        <div style={{
-            background: C.bg1,
-            borderRadius: 20,
-            border: `1px solid ${C.border}`,
-            padding: "14px 16px 16px",
-            transition: "border-color 200ms ease",
-        }}>
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <div style={{
-                    flex: 1,
-                    display: "flex",
-                    alignItems: "center",
-                    background: C.bg2,
-                    borderRadius: 20,
-                    border: `1px solid ${borderColor}`,
-                    height: 42,
-                    boxSizing: "border-box",
-                    padding: "0 4px 0 16px",
-                    transition: "border-color 150ms ease, box-shadow 150ms ease",
-                    boxShadow: focused ? "0 0 0 1px #5865f240" : "none",
-                }}>
-                    <input
-                        placeholder="paste a discord user id"
-                        value={rawId}
-                        onChange={(e) => { setRawId(e.target.value); if (hasErr) setLk({ s: "idle" }) }}
-                        onKeyDown={(e) => { if (e.key === "Enter" && btnState !== "idle") doLookup() }}
-                        onFocus={() => setFocused(true)}
-                        onBlur={() => setFocused(false)}
-                        autoFocus
-                        style={{
-                            background: "transparent",
-                            border: "none",
-                            outline: "none",
-                            flex: 1,
-                            fontSize: 14,
-                            color: C.text,
-                            fontFamily: "inherit",
-                            height: "100%",
-                            padding: 0,
-                        }}
-                    />
-                    {rawId && (
-                        <div
-                            role="button"
-                            onClick={() => setRawId("")}
-                            style={{
-                                width: 26,
-                                height: 26,
-                                borderRadius: "50%",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                cursor: "pointer",
-                                color: C.muted,
-                                transition: "background 100ms, color 100ms",
-                                flexShrink: 0,
-                                marginRight: 4,
-                            }}
-                            onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.1)"; e.currentTarget.style.color = C.text }}
-                            onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = C.muted }}
-                        >
-                            <ico.x />
-                        </div>
-                    )}
-                </div>
-
-                <button
-                    onClick={() => { if (btnState !== "idle") doLookup() }}
-                    className={btnState === "notfound" ? "ur-shake" : btnState === "valid" ? "ur-pulse" : ""}
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+                <input
+                    placeholder="paste a discord user id"
+                    value={rawId}
+                    onChange={(e) => { setRawId(e.target.value); if (hasErr) setLk({ s: "idle" }) }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && btnState !== "idle") doLookup() }}
+                    onFocus={() => setFocused(true)}
+                    onBlur={() => setFocused(false)}
+                    autoFocus
                     style={{
+                        background: "#1e1f22",
                         borderRadius: 20,
-                        height: 42,
+                        border: `1px solid ${borderColor}`,
+                        height: 40,
                         boxSizing: "border-box",
-                        padding: "0 22px",
-                        color: "#ffffff",
-                        border: "none",
-                        fontSize: 13,
-                        fontWeight: 700,
-                        cursor: btnState === "idle" ? "not-allowed" : "pointer",
-                        flexShrink: 0,
+                        padding: "0 14px",
+                        transition: "border-color 150ms ease, box-shadow 150ms ease",
+                        width: "100%",
+                        fontSize: 14,
+                        color: "#dbdee1",
+                        outline: "none",
                         fontFamily: "inherit",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        transition: "background 200ms ease, opacity 200ms ease, transform 150ms ease",
-                        background: btnBg(),
-                        opacity: btnState === "idle" ? 0.45 : 1,
-                        letterSpacing: 0.2,
+                        boxShadow: focused ? "inset 0 0 0 1px #5865f2" : "none",
                     }}
-                >
-                    {btnText()}
-                </button>
+                />
+                <div style={{ fontSize: 11, color: hasErr ? C.danger : C.muted, marginTop: 5, display: "flex", alignItems: "center", gap: 4 }}>
+                    {hasErr ? <ico.x /> : null}
+                    {hasErr ? (lk as any).msg : "developer mode → right-click user → copy user id"}
+                </div>
             </div>
-
-            <div style={{
-                fontSize: 11,
-                color: hasErr ? C.danger : C.muted,
-                marginTop: 10,
-                display: "flex",
-                alignItems: "center",
-                gap: 5,
-                paddingLeft: 4,
-            }}>
-                {hasErr ? <ico.x /> : <ico.copy />}
-                {hasErr ? (lk as any).msg : "developer mode → right-click user → copy user id"}
-            </div>
+            <button
+                ref={btnRef}
+                onClick={() => { if (btnState !== "idle") doLookup() }}
+                className={btnState === "notfound" ? "ur-shake" : btnState === "valid" ? "ur-pulse" : ""}
+                style={{ ...btnStyle, background: getBtnBg(), opacity: btnState === "idle" ? 0.5 : 1 }}
+            >
+                {getBtnText()}
+            </button>
         </div>
     )
 }
@@ -539,46 +490,37 @@ function AddLabelInput({ label, setLabel, doAdd }: {
 }) {
     const [focused, setFocused] = React.useState(false)
     return (
-        <div style={{
-            background: C.bg1,
-            borderRadius: 20,
-            border: `1px solid ${focused ? C.brand : C.border}`,
-            height: 42,
-            boxSizing: "border-box",
-            padding: "0 16px",
-            transition: "border-color 150ms ease, box-shadow 150ms ease",
-            display: "flex",
-            alignItems: "center",
-            boxShadow: focused ? "0 0 0 1px #5865f240" : "none",
-        }}>
-            <input
-                placeholder='e.g. "bestie", "the rat", "ex"'
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") doAdd() }}
-                onFocus={() => setFocused(true)}
-                onBlur={() => setFocused(false)}
-                autoFocus
-                style={{
-                    background: "transparent",
-                    border: "none",
-                    outline: "none",
-                    width: "100%",
-                    fontSize: 14,
-                    color: C.text,
-                    fontFamily: "inherit",
-                    height: "100%",
-                    padding: 0,
-                }}
-            />
-        </div>
+        <input
+            placeholder='e.g. "bestie", "the rat", "ex"'
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") doAdd() }}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            autoFocus
+            style={{
+                background: "#1e1f22",
+                borderRadius: 20,
+                border: `1px solid ${focused ? C.brand : "#3f4147"}`,
+                height: 40,
+                boxSizing: "border-box",
+                padding: "0 14px",
+                transition: "border-color 150ms ease",
+                width: "100%",
+                fontSize: 14,
+                color: "#dbdee1",
+                outline: "none",
+                fontFamily: "inherit",
+                marginBottom: 14,
+            }}
+        />
     )
 }
 
 function AddUserSection({ onAdded }: { onAdded: () => void }) {
     const [rawId, setRawId] = React.useState("")
     const [label, setLabel] = React.useState("")
-    const [lk, setLk]       = React.useState<<LookupStage>({ s: "idle" })
+    const [lk, setLk]       = React.useState<LookupStage>({ s: "idle" })
 
     const cleanId = rawId.trim().replace(/\D/g, "")
     const hasErr  = lk.s === "err"
@@ -605,150 +547,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
             })
         })
     }
-
-    const doAdd = () => {
-        if (lk.s !== "done") return
-        addUser(settings, cleanId, label.trim())
-        setRawId(""); setLabel(""); setLk({ s: "idle" })
-        onAdded()
-    }
-
-    return (
-        <div className="ur-fade-in">
-            <div style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 12 }}>
-                add user
-            </div>
-
-            {lk.s !== "done" && (
-                <AddUserInput
-                    rawId={rawId}
-                    setRawId={setRawId}
-                    hasErr={hasErr}
-                    lk={lk}
-                    setLk={setLk}
-                    doLookup={doLookup}
-                />
-            )}
-
-            {lk.s === "done" && (
-                <div className="ur-fade-in">
-                    {/* Found user card */}
-                    <div style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 14,
-                        padding: "14px 18px",
-                        background: C.bg1,
-                        borderRadius: 20,
-                        border: `1px solid ${C.border}`,
-                        marginBottom: 14,
-                        transition: "border-color 200ms ease",
-                    }}>
-                        <img
-                            src={lk.av}
-                            style={{ width: 52, height: 52, borderRadius: "50%", flexShrink: 0, border: `2px solid ${C.border}` }}
-                            onError={(e: any) => { e.target.src = FALLBACK_AV }}
-                        />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 16, fontWeight: 700, color: C.header, lineHeight: 1.3 }}>
-                                {lk.user.globalName || lk.user.username}
-                            </div>
-                            {lk.user.globalName && (
-                                <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>
-                                    @{lk.user.username}
-                                </div>
-                            )}
-                            <div style={{ fontSize: 11, color: C.muted, marginTop: 4, fontFamily: "monospace", opacity: .6, letterSpacing: 0.3 }}>
-                                {lk.user.id}
-                            </div>
-                        </div>
-                        <div style={{
-                            width: 32,
-                            height: 32,
-                            borderRadius: "50%",
-                            background: "rgba(36,128,70,0.15)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                            border: "1px solid rgba(36,128,70,0.3)",
-                        }}>
-                            <div style={{ color: C.green }}><ico.check /></div>
-                        </div>
-                    </div>
-
-                    {/* Label input card */}
-                    <div style={{
-                        background: C.bg1,
-                        borderRadius: 20,
-                        border: `1px solid ${C.border}`,
-                        padding: "14px 18px 18px",
-                        marginBottom: 14,
-                    }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 10 }}>
-                            label <span style={{ fontWeight: 500, color: C.muted, textTransform: "none" }}>(optional, only you see this)</span>
-                        </div>
-                        <AddLabelInput label={label} setLabel={setLabel} doAdd={doAdd} />
-                    </div>
-
-                    {/* Action buttons */}
-                    <div style={{ display: "flex", gap: 10 }}>
-                        <button
-                            onClick={doAdd}
-                            style={{
-                                flex: 1,
-                                borderRadius: 20,
-                                height: 44,
-                                boxSizing: "border-box",
-                                padding: "0 20px",
-                                background: C.green,
-                                color: "#ffffff",
-                                border: "none",
-                                fontSize: 14,
-                                fontWeight: 700,
-                                cursor: "pointer",
-                                fontFamily: "inherit",
-                                transition: "background 150ms ease, transform 100ms ease",
-                                letterSpacing: 0.2,
-                            }}
-                            onMouseEnter={e => { e.currentTarget.style.background = "#2d9c5a" }}
-                            onMouseLeave={e => { e.currentTarget.style.background = C.green }}
-                        >
-                            add to watchlist
-                        </button>
-                        <button
-                            onClick={() => { setLk({ s: "idle" }); setLabel("") }}
-                            style={{
-                                borderRadius: 20,
-                                height: 44,
-                                boxSizing: "border-box",
-                                padding: "0 20px",
-                                background: "transparent",
-                                color: C.text,
-                                border: `1px solid ${C.border}`,
-                                fontSize: 14,
-                                fontWeight: 600,
-                                cursor: "pointer",
-                                fontFamily: "inherit",
-                                transition: "background 150ms ease, border-color 150ms ease",
-                            }}
-                            onMouseEnter={e => {
-                                e.currentTarget.style.background = "rgba(255,255,255,0.05)"
-                                e.currentTarget.style.borderColor = C.bgEl
-                            }}
-                            onMouseLeave={e => {
-                                e.currentTarget.style.background = "transparent"
-                                e.currentTarget.style.borderColor = C.border
-                            }}
-                        >
-                            cancel
-                        </button>
-                    </div>
-                </div>
-            )}
-        </div>
-    )
-}
 
     const doAdd = () => {
         if (lk.s !== "done") return
@@ -1877,7 +1675,7 @@ const PLUGIN_RAW_URL     = "https://raw.githubusercontent.com/k1ng0p/UserRadar/m
 const PLUGIN_COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
 
 // bump this on every push — YYYY-MM-DD lexicographic compare works fine
-const PLUGIN_VERSION = "2026-05-18"
+const PLUGIN_VERSION = "2026-05-17"
 
 type UpdateState = "idle" | "checking" | "uptodate" | "available" | "downloading" | "done" | "error"
 
