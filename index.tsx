@@ -1711,45 +1711,19 @@ async function downloadAndInstall(): Promise<void> {
     const latestSha  = commitData[0]?.sha ?? "none"
     let code = await fileRes.text()
     if (!code || code.length < 500) throw new Error("bad response")
-    // stamp the sha into the installed file so next check is accurate
+    // stamp the sha so next update check is accurate
     code = code.replace(/const INSTALLED_SHA = ".*?"/, `const INSTALLED_SHA = "${latestSha}"`)
 
-    // Vencord's native IPC — same thing the built-in updater uses internally
-    // path is relative to the settings dir / userplugins folder
-    const native = (window as any).VencordNative
-
-    // try the ipc invoke approach first (most reliable)
-    if (native?.ipc?.invoke) {
-        try {
-            const dir = await native.settings.getSettingsDir()
-            const path = `${dir}/userplugins/UserRadar/index.tsx`
-            await native.ipc.invoke("VencordWriteFile", path, code)
-            return
-        } catch { }
-        try {
-            // some builds expose it differently
-            await native.ipc.invoke("writeFile", "userplugins/UserRadar/index.tsx", code)
-            return
-        } catch { }
+    // native.ts runs in the main electron process and has full fs access
+    // vencord exposes it at VencordNative.pluginHelpers.UserRadar
+    const helper = (window as any).VencordNative?.pluginHelpers?.UserRadar
+    if (helper?.writePlugin) {
+        const result = await helper.writePlugin(code)
+        if (result?.ok) return
+        throw new Error(result?.error ?? "write failed")
     }
 
-    // fallback: node fs via discord's preload (works on older vencord builds)
-    const req = (window as any).require
-    if (req) {
-        try {
-            const fs   = req("fs")
-            const path = req("path")
-            // find the plugin file — __filename isn't available but we can get it from the stack
-            const native2 = (window as any).VencordNative
-            const dir = await native2?.settings?.getSettingsDir?.()
-            if (dir) {
-                fs.writeFileSync(path.join(dir, "userplugins", "UserRadar", "index.tsx"), code, "utf8")
-                return
-            }
-        } catch { }
-    }
-
-    throw new Error("can't write file — no native access")
+    throw new Error("native helper missing — make sure native.ts is in userplugins/UserRadar/ and you ran pnpm build")
 }
 
 function relaunchDiscord() {
