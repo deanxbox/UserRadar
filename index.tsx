@@ -1674,29 +1674,45 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
 const PLUGIN_RAW_URL     = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
 const PLUGIN_COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
 
-// bump this on every push — YYYY-MM-DD lexicographic compare works fine
-const PLUGIN_VERSION = "2026-05-17"
+// this is the full sha of the commit this file was built from
+// the updater fetches the latest commit sha from github and compares against this
+// if they differ = update available, no date math, no version strings to forget to bump
+// UPDATE THIS after every install — copy the sha from github after pushing
+const INSTALLED_SHA = "none"
 
 type UpdateState = "idle" | "checking" | "uptodate" | "available" | "downloading" | "done" | "error"
 
-async function checkUpdate(): Promise<{ hasUpdate: boolean; sha: string; date: string }> {
+async function checkUpdate(): Promise<{ hasUpdate: boolean; sha: string; shortSha: string; date: string }> {
     const res = await fetch(PLUGIN_COMMITS_URL, {
         headers: { Accept: "application/vnd.github.v3+json" },
         cache: "no-store",
     })
-    if (!res.ok) throw new Error(`github ${res.status}`)
+    if (!res.ok) throw new Error(`github api error ${res.status}`)
     const data = await res.json()
-    if (!Array.isArray(data) || !data[0]) throw new Error("empty response")
-    const date = (data[0].commit?.committer?.date ?? "").slice(0, 10)
-    const sha  = (data[0].sha ?? "").slice(0, 7)
-    return { hasUpdate: date > PLUGIN_VERSION, sha, date }
+    if (!Array.isArray(data) || !data[0]) throw new Error("no commits found")
+    const latestSha  = data[0].sha as string
+    const shortSha   = latestSha.slice(0, 7)
+    const date       = (data[0].commit?.committer?.date ?? "").slice(0, 10)
+    // any sha mismatch = update available
+    // "none" always triggers so first-run users always see the update prompt
+    const hasUpdate  = latestSha !== INSTALLED_SHA && INSTALLED_SHA !== latestSha
+    return { hasUpdate, sha: latestSha, shortSha, date }
 }
 
 async function downloadAndInstall(): Promise<void> {
-    const res = await fetch(PLUGIN_RAW_URL + "?t=" + Date.now(), { cache: "no-store" })
-    if (!res.ok) throw new Error(`fetch ${res.status}`)
-    const code = await res.text()
+    // fetch latest sha + raw file in parallel
+    const [commitRes, fileRes] = await Promise.all([
+        fetch(PLUGIN_COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" }, cache: "no-store" }),
+        fetch(PLUGIN_RAW_URL + "?t=" + Date.now(), { cache: "no-store" }),
+    ])
+    if (!commitRes.ok) throw new Error(`github ${commitRes.status}`)
+    if (!fileRes.ok)   throw new Error(`download ${fileRes.status}`)
+    const commitData = await commitRes.json()
+    const latestSha  = commitData[0]?.sha ?? "none"
+    let code = await fileRes.text()
     if (!code || code.length < 500) throw new Error("bad response")
+    // stamp the sha into the installed file so next check is accurate
+    code = code.replace(/const INSTALLED_SHA = ".*?"/, `const INSTALLED_SHA = "${latestSha}"`)
 
     // Vencord's native IPC — same thing the built-in updater uses internally
     // path is relative to the settings dir / userplugins folder
@@ -1758,7 +1774,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
         setUpdateErr("")
         checkUpdate().then(info => {
             if (info.hasUpdate) {
-                setUpdateInfo({ sha: info.sha, date: info.date })
+                setUpdateInfo({ sha: info.shortSha, date: info.date })
                 setUpdateState("available")
             } else {
                 setUpdateState("uptodate")
@@ -2029,7 +2045,7 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
 export default definePlugin({
     name: "UserRadar",
     description: "track watched users and get notified on messages, edits, deletes, typing, profile/avatar changes, voice, status, activity, boosts, and server joins",
-    authors: [{ name: "k1ng_op", id: 641266820187160576 }],
+    authors: [{ name: "k1ng_op", id: 1337n }],
     dependencies: ["MessageLoggerEnhanced"],
 
     settings,
