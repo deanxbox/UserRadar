@@ -2045,7 +2045,7 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
 export default definePlugin({
     name: "UserRadar",
     description: "track watched users and get notified on messages, edits, deletes, typing, profile/avatar changes, voice, status, activity, boosts, and server joins",
-    authors: [{ name: "k1ng_op", id: 1337n }],
+    authors: [{ name: "k1ng_op", id: 641266820187160576 }],
     dependencies: ["MessageLoggerEnhanced"],
 
     settings,
