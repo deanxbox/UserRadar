@@ -1714,19 +1714,18 @@ async function downloadAndInstall(): Promise<void> {
     const code = await fileRes.text()
     if (!code || code.length < 500) throw new Error("bad response")
 
-    // native.ts runs in the main electron process and has full fs access
+    // native.ts runs in the main process and is exposed via VencordNative.pluginHelpers.UserRadar
+    // requires native.ts to be in the same folder and pnpm build to have been run
     const helper = (window as any).VencordNative?.pluginHelpers?.UserRadar
-    if (helper?.writePlugin) {
-        const result = await helper.writePlugin(code)
-        if (!result?.ok) throw new Error(result?.error ?? "write failed")
-        // save the installed sha to settings — this is what checkUpdate() compares against
-        // storing in settings instead of stamping the file so it works regardless of
-        // what INSTALLED_SHA says in the github source
-        setInstalledSha(latestSha)
-        return
+    if (!helper?.writePlugin) {
+        throw new Error("native.ts not loaded — copy native.ts to userplugins/UserRadar/ and run pnpm build")
     }
 
-    throw new Error("native helper missing — make sure native.ts is in userplugins/UserRadar/ and you ran pnpm build")
+    const result = await helper.writePlugin(code)
+    if (!result?.ok) throw new Error(result?.error ?? "write failed")
+
+    // save sha so next check knows what version is installed
+    setInstalledSha(latestSha)
 }
 
 function relaunchDiscord() {
