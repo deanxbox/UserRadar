@@ -1729,34 +1729,28 @@ async function downloadAndInstall(): Promise<void> {
         log.info("[updater] native helper not found, trying require(fs)")
     }
 
-    // fallback: node fs via discord's preload
+    // fallback: node fs via discord's preload (require is available in discord desktop renderer)
     const req = (window as any).require
-    if (!req) throw new Error("no write method — native.ts not loaded and require is unavailable")
+    if (!req) throw new Error("no write method available — native.ts not loaded and require unavailable")
 
     try {
         const fs   = req("fs")
         const path = req("path")
-        const os   = req("os")
-        const home = os.homedir()
 
-        // get vencord data dir
-        let dir: string
-        const vn = (window as any).VencordNative
-        if (vn?.settings?.getSettingsDir) {
-            dir = await vn.settings.getSettingsDir()
-        } else if (process.platform === "win32") {
-            dir = path.join(process.env.APPDATA ?? path.join(home, "AppData", "Roaming"), "Vencord")
-        } else if (process.platform === "darwin") {
-            dir = path.join(home, "Library", "Application Support", "Vencord")
-        } else {
-            dir = path.join(process.env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "Vencord")
-        }
+        // VencordNative.settings.getSettingsDir() returns the vencord data directory
+        // this is the most reliable way to find it
+        const vn  = (window as any).VencordNative
+        const dir = await vn.settings.getSettingsDir()
 
-        log.info("[updater] writing to:", path.join(dir, "userplugins", "UserRadar", "index.tsx"))
-        const pluginDir = path.join(dir, "userplugins", "UserRadar")
+        log.info("[updater] data dir:", dir)
+
+        const pluginDir  = path.join(dir, "userplugins", "UserRadar")
+        const pluginFile = path.join(pluginDir, "index.tsx")
+
         if (!fs.existsSync(pluginDir)) fs.mkdirSync(pluginDir, { recursive: true })
-        fs.writeFileSync(path.join(pluginDir, "index.tsx"), code, "utf8")
-        log.info("[updater] write successful")
+        fs.writeFileSync(pluginFile, code, "utf8")
+
+        log.info("[updater] wrote", code.length, "chars to", pluginFile)
         setInstalledSha(latestSha)
     } catch (e: any) {
         log.error("[updater] require(fs) failed:", e?.message)
