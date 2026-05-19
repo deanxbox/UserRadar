@@ -1980,7 +1980,7 @@ const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
         <Menu.MenuGroup>
             <Menu.MenuItem
                 id="ur-watch"
-                label={isW ? "👁 Unwatch User" : "👁 Watch User"}
+                label={isW ? "Unwatch User" : "Watch User"}
                 action={() => {
                     if (isW) { removeUser(settings, user.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(user)} from watchlist`, id: Toasts.genId() }) }
                     else { addUser(settings, user.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(user)} to watchlist`, id: Toasts.genId() }) }
@@ -1989,7 +1989,7 @@ const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
             />
             <Menu.MenuItem
                 id="ur-config"
-                label="⚙️ Manage Watchlist"
+                label="Manage Watchlist"
                 action={() => openModal(p => <WatchlistModal modalProps={p} />)}
                 icon={CtxGearIcon}
             />
