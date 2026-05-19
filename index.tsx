@@ -1702,7 +1702,6 @@ async function checkUpdate(): Promise<{ hasUpdate: boolean; sha: string; shortSh
 }
 
 async function downloadAndInstall(): Promise<void> {
-    // fetch latest sha + raw file in parallel
     const [commitRes, fileRes] = await Promise.all([
         fetch(PLUGIN_COMMITS_URL, { headers: { Accept: "application/vnd.github.v3+json" }, cache: "no-store" }),
         fetch(PLUGIN_RAW_URL + "?t=" + Date.now(), { cache: "no-store" }),
@@ -1714,18 +1713,55 @@ async function downloadAndInstall(): Promise<void> {
     const code = await fileRes.text()
     if (!code || code.length < 500) throw new Error("bad response")
 
-    // native.ts runs in the main process and is exposed via VencordNative.pluginHelpers.UserRadar
-    // requires native.ts to be in the same folder and pnpm build to have been run
+    log.info("[updater] downloaded", code.length, "chars, sha:", latestSha.slice(0, 7))
+    log.info("[updater] available pluginHelpers:", Object.keys((window as any).VencordNative?.pluginHelpers ?? {}).join(", ") || "none")
+
+    // try native.ts helper first
     const helper = (window as any).VencordNative?.pluginHelpers?.UserRadar
-    if (!helper?.writePlugin) {
-        throw new Error("native.ts not loaded — copy native.ts to userplugins/UserRadar/ and run pnpm build")
+    if (helper?.writePlugin) {
+        log.info("[updater] using native helper")
+        const result = await helper.writePlugin(code)
+        log.info("[updater] result:", JSON.stringify(result))
+        if (result?.ok) { setInstalledSha(latestSha); return }
+        // if it errored, fall through to require(fs)
+        log.warn("[updater] native helper failed:", result?.error, "— trying require(fs)")
+    } else {
+        log.info("[updater] native helper not found, trying require(fs)")
     }
 
-    const result = await helper.writePlugin(code)
-    if (!result?.ok) throw new Error(result?.error ?? "write failed")
+    // fallback: node fs via discord's preload
+    const req = (window as any).require
+    if (!req) throw new Error("no write method — native.ts not loaded and require is unavailable")
 
-    // save sha so next check knows what version is installed
-    setInstalledSha(latestSha)
+    try {
+        const fs   = req("fs")
+        const path = req("path")
+        const os   = req("os")
+        const home = os.homedir()
+
+        // get vencord data dir
+        let dir: string
+        const vn = (window as any).VencordNative
+        if (vn?.settings?.getSettingsDir) {
+            dir = await vn.settings.getSettingsDir()
+        } else if (process.platform === "win32") {
+            dir = path.join(process.env.APPDATA ?? path.join(home, "AppData", "Roaming"), "Vencord")
+        } else if (process.platform === "darwin") {
+            dir = path.join(home, "Library", "Application Support", "Vencord")
+        } else {
+            dir = path.join(process.env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "Vencord")
+        }
+
+        log.info("[updater] writing to:", path.join(dir, "userplugins", "UserRadar", "index.tsx"))
+        const pluginDir = path.join(dir, "userplugins", "UserRadar")
+        if (!fs.existsSync(pluginDir)) fs.mkdirSync(pluginDir, { recursive: true })
+        fs.writeFileSync(path.join(pluginDir, "index.tsx"), code, "utf8")
+        log.info("[updater] write successful")
+        setInstalledSha(latestSha)
+    } catch (e: any) {
+        log.error("[updater] require(fs) failed:", e?.message)
+        throw new Error("write failed: " + (e?.message ?? String(e)))
+    }
 }
 
 function relaunchDiscord() {
