@@ -1728,32 +1728,34 @@ async function downloadAndInstall(): Promise<void> {
         log.info("[updater] native helper not found, trying require(fs)")
     }
 
-    // fallback: node fs via discord's preload (require is available in discord desktop renderer)
-    const req = (window as any).require
-    if (!req) throw new Error("no write method available — native.ts not loaded and require unavailable")
-
+    // require() isn't available in this context
+    // use Vencord's own writeFile IPC which IS available
     try {
-        const fs   = req("fs")
-        const path = req("path")
-
-        // VencordNative.settings.getSettingsDir() returns the vencord data directory
-        // this is the most reliable way to find it
         const vn  = (window as any).VencordNative
         const dir = await vn.settings.getSettingsDir()
+        log.info("[updater] trying VencordNative writeFile, dir:", dir)
 
-        log.info("[updater] data dir:", dir)
+        // Vencord exposes a writeFile method on its native settings module
+        // this is used internally by Vencord's own settings system
+        if (vn.settings?.writeFile) {
+            await vn.settings.writeFile(`userplugins/UserRadar/index.tsx`, code)
+            log.info("[updater] writeFile succeeded")
+            setInstalledSha(latestSha)
+            return
+        }
 
-        const pluginDir  = path.join(dir, "userplugins", "UserRadar")
-        const pluginFile = path.join(pluginDir, "index.tsx")
+        // try the ipc channel directly
+        if (vn.ipc?.invoke) {
+            await vn.ipc.invoke("VencordWriteFile", `${dir}/userplugins/UserRadar/index.tsx`, code)
+            log.info("[updater] ipc writeFile succeeded")
+            setInstalledSha(latestSha)
+            return
+        }
 
-        if (!fs.existsSync(pluginDir)) fs.mkdirSync(pluginDir, { recursive: true })
-        fs.writeFileSync(pluginFile, code, "utf8")
-
-        log.info("[updater] wrote", code.length, "chars to", pluginFile)
-        setInstalledSha(latestSha)
+        throw new Error("no fallback write method found on VencordNative")
     } catch (e: any) {
-        log.error("[updater] require(fs) failed:", e?.message)
-        throw new Error("write failed: " + (e?.message ?? String(e)))
+        log.error("[updater] fallback failed:", e?.message)
+        throw new Error(e?.message ?? String(e))
     }
 }
 
