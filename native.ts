@@ -1,21 +1,14 @@
 // native.ts — k1ng_op
 
+import { IpcMainInvokeEvent } from "electron"
 import { join } from "path"
 import { writeFile, mkdir } from "fs/promises"
 import { existsSync } from "fs"
 
-export async function writePlugin(code: string): Promise<{ ok: boolean; error?: string }> {
+export async function writePlugin(_evt: IpcMainInvokeEvent, code: string): Promise<{ ok: boolean; error?: string }> {
     try {
-        // log what we actually received so we can debug
-        const type = typeof code
-        const len  = type === "string" ? (code as string).length : 0
-        
-        if (type !== "string") {
-            return { ok: false, error: `expected string, got ${type} (len=${len})` }
-        }
-        if (len < 100) {
-            return { ok: false, error: `code too short: ${len} chars` }
-        }
+        if (typeof code !== "string" || code.length < 100)
+            return { ok: false, error: `bad code: type=${typeof code} len=${typeof code === "string" ? code.length : 0}` }
 
         let dataDir: string
         if (process.env.VENCORD_USER_DATA_DIR) {
