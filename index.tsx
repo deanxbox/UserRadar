@@ -34,6 +34,10 @@ const statusCache:   Record<string, string>                       = {}  // last 
 const activityCache: Record<string, string | null | undefined>    = {}  // undefined = never seen
 const guildCache:    Record<string, Set<string>>                  = {}  // guilds each user is in
 
+// timestamp set when plugin starts — join/leave events in first 15s are ignored
+// discord fires GUILD_MEMBER_ADD for everyone on reconnect which causes false notifs
+let pluginStartedAt = 0
+
 let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
 
@@ -2122,6 +2126,7 @@ export default definePlugin({
         setTimeout(fetchNext, 500)  // small delay so discord finishes its own startup first
 
         pollTimer = setInterval(pollProfiles, 5 * 60 * 1000)
+        pluginStartedAt = Date.now()
     },
 
     stop() {
@@ -2134,6 +2139,7 @@ export default definePlugin({
         Object.keys(statusCache).forEach(k => delete statusCache[k])
         Object.keys(activityCache).forEach(k => delete activityCache[k])
         Object.keys(guildCache).forEach(k => delete guildCache[k])
+        pluginStartedAt = 0
         loggedMsgs = null
     },
 
@@ -2364,6 +2370,8 @@ export default definePlugin({
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
+            // block events in first 15s — discord syncs guild members on reconnect
+            if (Date.now() - pluginStartedAt < 15000) return
 
             // if guildCache is empty for this user, snapshot failed on start
             // do a live check now so we don't fire false positives
@@ -2407,6 +2415,7 @@ export default definePlugin({
 
         GUILD_MEMBER_REMOVE({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
+            if (Date.now() - pluginStartedAt < 15000) return
             if (!guildCache[user.id]) guildCache[user.id] = new Set()
             const wasIn = guildCache[user.id].has(guildId)
             guildCache[user.id].delete(guildId)
