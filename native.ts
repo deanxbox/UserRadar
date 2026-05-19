@@ -1,15 +1,21 @@
 // native.ts — k1ng_op
-// Vencord passes IpcMainInvokeEvent as first arg, our code is second
 
-import { IpcMainInvokeEvent } from "electron"
 import { join } from "path"
 import { writeFile, mkdir } from "fs/promises"
 import { existsSync } from "fs"
 
-export async function writePlugin(_evt: IpcMainInvokeEvent, code: string): Promise<{ ok: boolean; error?: string }> {
+export async function writePlugin(code: string): Promise<{ ok: boolean; error?: string }> {
     try {
-        if (!code || typeof code !== "string" || code.length < 500)
-            return { ok: false, error: "invalid code" }
+        // log what we actually received so we can debug
+        const type = typeof code
+        const len  = type === "string" ? (code as string).length : 0
+        
+        if (type !== "string") {
+            return { ok: false, error: `expected string, got ${type} (len=${len})` }
+        }
+        if (len < 100) {
+            return { ok: false, error: `code too short: ${len} chars` }
+        }
 
         let dataDir: string
         if (process.env.VENCORD_USER_DATA_DIR) {
