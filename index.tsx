@@ -1719,11 +1719,10 @@ async function downloadAndInstall(): Promise<void> {
     // try native.ts helper first
     const helper = (window as any).VencordNative?.pluginHelpers?.UserRadar
     if (helper?.writePlugin) {
-        log.info("[updater] using native helper")
+        log.info("[updater] using native helper, code type:", typeof code, "len:", code.length)
         const result = await helper.writePlugin(code)
         log.info("[updater] result:", JSON.stringify(result))
         if (result?.ok) { setInstalledSha(latestSha); return }
-        // if it errored, fall through to require(fs)
         log.warn("[updater] native helper failed:", result?.error, "— trying require(fs)")
     } else {
         log.info("[updater] native helper not found, trying require(fs)")
