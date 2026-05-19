@@ -1981,7 +1981,7 @@ const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
         <Menu.MenuGroup>
             <Menu.MenuItem
                 id="ur-watch"
-                label={isW ? "remove from watchlist" : "add to watchlist"}
+                label={isW ? "👁 Unwatch User" : "👁 Watch User"}
                 action={() => {
                     if (isW) { removeUser(settings, user.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(user)} from watchlist`, id: Toasts.genId() }) }
                     else { addUser(settings, user.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(user)} to watchlist`, id: Toasts.genId() }) }
@@ -1990,7 +1990,7 @@ const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
             />
             <Menu.MenuItem
                 id="ur-config"
-                label="configure watchlist"
+                label="⚙️ Manage Watchlist"
                 action={() => openModal(p => <WatchlistModal modalProps={p} />)}
                 icon={CtxGearIcon}
             />
@@ -2057,12 +2057,18 @@ export default definePlugin({
                     activityCache[wu.id] = realAct ? `${realAct.type}:${realAct.name}` : null
                 } catch { }
 
-                // guild membership
+                // guild membership snapshot — try multiple store apis bc discord reorganizes these
                 try {
-                    if (memMod && allGuilds.length) {
-                        guildCache[wu.id] = new Set(
-                            allGuilds.filter(gid => { try { return memMod.isMember(gid, wu.id) } catch { return false } })
-                        )
+                    // try GuildMemberStore first (most reliable in recent discord)
+                    let isMember: (gid: string, uid: string) => boolean = () => false
+                    const gms = findByProps("getMember", "getMemberIds")
+                        ?? findByProps("isMember", "getMember")
+                        ?? memMod
+                    if (gms?.isMember)   isMember = (gid, uid) => { try { return gms.isMember(gid, uid) } catch { return false } }
+                    else if (gms?.getMember) isMember = (gid, uid) => { try { return !!gms.getMember(gid, uid) } catch { return false } }
+
+                    if (allGuilds.length) {
+                        guildCache[wu.id] = new Set(allGuilds.filter(gid => isMember(gid, wu.id)))
                     }
                 } catch { }
             }
@@ -2326,11 +2332,32 @@ export default definePlugin({
             checkProfileChanged(rawEvt.user.id, camelize(rawEvt))
         },
 
-        // only fires for servers you're in — that's fine, if you're not in the server you won't see it
-        // wasIn check prevents false positives on discord reconnect re-sync
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            if (!guildCache[user.id]) guildCache[user.id] = new Set()
+
+            // if guildCache is empty for this user, snapshot failed on start
+            // do a live check now so we don't fire false positives
+            if (!guildCache[user.id]) {
+                guildCache[user.id] = new Set()
+                try {
+                    const guildMod = findByProps("getGuildIds", "getGuild")
+                    const memMod   = findByProps("getMember", "getMemberIds") ?? findByProps("isMember", "getMember")
+                    const allGuilds: string[] = guildMod?.getGuildIds?.() ?? []
+                    const isMem = (gid: string) => {
+                        try {
+                            if (memMod?.isMember) return memMod.isMember(gid, user.id)
+                            if (memMod?.getMember) return !!memMod.getMember(gid, user.id)
+                        } catch { }
+                        return false
+                    }
+                    // add all guilds they're already in EXCEPT the one we're about to process
+                    // so wasIn is correct for this specific event
+                    for (const gid of allGuilds) {
+                        if (gid !== guildId && isMem(gid)) guildCache[user.id].add(gid)
+                    }
+                } catch { }
+            }
+
             const wasIn = guildCache[user.id].has(guildId)
             guildCache[user.id].add(guildId)
             if (!wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
