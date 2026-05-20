@@ -2308,13 +2308,7 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
     )
 }
 
-// updater — check github for new commits, download and write to disk, prompt restart
-// using VencordNative.ipc which is the same channel Vencord's own updater uses
-const PLUGIN_RAW_URL     = "https://raw.githubusercontent.com/k1ng0p/UserRadar/main/index.tsx"
-const PLUGIN_COMMITS_URL = "https://api.github.com/repos/k1ng0p/UserRadar/commits?path=index.tsx&per_page=1"
 
-
-}
 
 
 
