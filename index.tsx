@@ -1180,35 +1180,19 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                     <div style={{ fontSize: 11, color: C.muted, marginTop: 1, lineHeight: 1.4 }}>
                                         {log.body}
                                     </div>
-                                    {/* Content preview for messages/edits/deletes */}
-                                    {log.metadata?.content && (
+                                    {/* for edits only — show before content with strikethrough */}
+                                    {log.type === "edit" && log.metadata?.before && (
                                         <div style={{
                                             marginTop: 4,
-                                            padding: "6px 10px",
+                                            padding: "5px 9px",
                                             background: C.bg1,
-                                            borderRadius: 8,
+                                            borderRadius: 6,
                                             fontSize: 11,
-                                            color: C.text,
+                                            color: C.muted,
                                             border: `1px solid ${C.border}`,
-                                            lineHeight: 1.5,
-                                            maxHeight: 80,
-                                            overflow: "hidden",
-                                            textOverflow: "ellipsis",
-                                            display: "-webkit-box",
-                                            WebkitLineClamp: 3,
-                                            WebkitBoxOrient: "vertical",
+                                            lineHeight: 1.4,
                                         }}>
-                                            {log.type === "edit" && log.metadata?.before && (
-                                                <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
-                                                    <span style={{ textDecoration: "line-through", opacity: 0.6 }}>{trunc(log.metadata.before, 100)}</span>
-                                                </div>
-                                            )}
-                                            <div>{trunc(log.metadata.content, 200)}</div>
-                                            {log.metadata?.attachments?.length > 0 && (
-                                                <div style={{ fontSize: 10, color: C.brand, marginTop: 3 }}>
-                                                    📎 {log.metadata.attachments.join(", ")}
-                                                </div>
-                                            )}
+                                            <span style={{ textDecoration: "line-through", opacity: 0.6 }}>{trunc(log.metadata.before, 120)}</span>
                                         </div>
                                     )}
                                     {expandedId === log.id && log.metadata && (
