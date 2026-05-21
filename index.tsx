@@ -2733,7 +2733,6 @@ export default definePlugin({
                     icon: avatarUrl(uid, message.author?.avatar, 80),
                     onClick: () => jumpTo(ch?.guild_id, channelId, message.id),
                 })
-                logActivity(uid, "msg", "💬", `sent a message in ${location}`, ch?.guild_id, channelId, message.id)
                 logUserActivity(uid, "msg", "💬", `sent a message in ${location}`, msgPreview(message.content, message.attachments?.[0]?.filename), {
                     guildId: ch?.guild_id,
                     channelId,
@@ -2744,16 +2743,7 @@ export default definePlugin({
                         embeds: message.embeds?.length || 0,
                     }
                 }).catch(() => {})
-                logUserActivity(uid, "msg", "💬", `sent a message in ${location}`, msgPreview(message.content, message.attachments?.[0]?.filename), {
-                    guildId: ch?.guild_id,
-                    channelId,
-                    msgId: message.id,
-                    metadata: {
-                        content: message.content,
-                        attachments: message.attachments?.map((a: any) => a.filename) || [],
-                        embeds: message.embeds?.length || 0,
-                    }
-                }).catch(() => {})
+                
             }
         },
 
@@ -2794,7 +2784,6 @@ export default definePlugin({
                 icon: avatarUrl(uid, message.author?.avatar, 80),
                 onClick: () => jumpTo(ch?.guild_id, message.channel_id, message.id),
             })
-            logActivity(uid, "edit", "✏️", `edited a message in ${location}`, ch?.guild_id, message.channel_id, message.id)
             logUserActivity(uid, "edit", "✏️", `edited a message in ${location}`, `${before}${after}`, {
                 guildId: ch?.guild_id,
                 channelId: message.channel_id,
@@ -2805,16 +2794,7 @@ export default definePlugin({
                     location,
                 }
             }).catch(() => {})
-            logUserActivity(uid, "edit", "✏️", `edited a message in ${location}`, `${before}${after}`, {
-                guildId: ch?.guild_id,
-                channelId: message.channel_id,
-                msgId: message.id,
-                metadata: {
-                    before: cached?.content || "unknown",
-                    after: message.content || "",
-                    location,
-                }
-            }).catch(() => {})
+            
         },
 
         MESSAGE_DELETE({ id, channelId }: MsgDeleteEvent) {
@@ -2845,18 +2825,6 @@ export default definePlugin({
                     icon: avatarUrl(uid, msg.author?.avatar, 80),
                     onClick: () => jumpTo(ch?.guild_id, channelId, msg.id),
                 })
-                logActivity(uid, "delete", "🗑️", `deleted a message in ${location}`, ch?.guild_id, channelId, msg.id)
-                logUserActivity(uid, "delete", "🗑️", `deleted a message in ${location}`, msgPreview(msg.content, msg.attachments?.[0]?.filename), {
-                    guildId: ch?.guild_id,
-                    channelId,
-                    msgId: msg.id,
-                    metadata: {
-                        content: msg.content || "",
-                        attachments: msg.attachments?.map((a: any) => a.filename) || [],
-                        author: displayName(msg.author),
-                        location,
-                    }
-                }).catch(() => {})
                 logUserActivity(uid, "delete", "🗑️", `deleted a message in ${location}`, msgPreview(msg.content, msg.attachments?.[0]?.filename), {
                     guildId: ch?.guild_id,
                     channelId,
