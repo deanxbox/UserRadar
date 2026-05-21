@@ -209,26 +209,27 @@ function tryLoadLoggedMsgs() {
 
 const settings = definePluginSettings({
     watchlist:          { type: OptionType.STRING,  hidden: true,  default: "[]",    description: "watchlist json — managed by the ui, don't touch" },
-    globalMsgs:         { type: OptionType.BOOLEAN, default: true,                   description: "messages" },
-    globalEdits:        { type: OptionType.BOOLEAN, default: true,                   description: "message edits" },
-    globalDeletes:      { type: OptionType.BOOLEAN, default: true,                   description: "message deletes (content needs vc-message-logger-enhanced)" },
-    globalTyping:       { type: OptionType.BOOLEAN, default: true,                   description: "typing (works in servers and dms)" },
-    globalProfile:      { type: OptionType.BOOLEAN, default: true,                   description: "profile changes (bio, banner, username, colors)" },
-    globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "avatar changes" },
-    globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "voice joins / leaves / moves" },
-    globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "status changes — spammy, off by default" },
-    globalBoosts:       { type: OptionType.BOOLEAN, default: true,                   description: "server boosts" },
-    globalActivity:     { type: OptionType.BOOLEAN, default: false,                  description: "activity changes (playing, listening, watching) — very spammy, off by default" },
-    globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "server joins / leaves (only servers you're in)" },
+    globalPresetMode:   { type: OptionType.STRING,  hidden: true,  default: "custom",               description: "global preset mode" },
+    installedSha:       { type: OptionType.STRING,  hidden: true,  default: "none",  description: "installed commit sha" },
+    globalMsgs:         { type: OptionType.BOOLEAN, default: true,                   description: "notify: messages" },
+    globalEdits:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: edits" },
+    globalDeletes:      { type: OptionType.BOOLEAN, default: true,                   description: "notify: deletes (needs vc-message-logger-enhanced for content)" },
+    globalTyping:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: typing" },
+    globalProfile:      { type: OptionType.BOOLEAN, default: true,                   description: "notify: profile changes (bio, banner, username)" },
+    globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: avatar changes" },
+    globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: voice joins / leaves / moves" },
+    globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "notify: status changes (spammy, off by default)" },
+    globalBoosts:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: server boosts" },
+    globalActivity:     { type: OptionType.BOOLEAN, default: false,                  description: "notify: activity changes (very spammy, off by default)" },
+    globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: server joins / leaves" },
     showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message content in notifications" },
     previewLen:         { type: OptionType.NUMBER,  default: 120,                    description: "max chars in preview (0 = no limit)" },
-    quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "silence all notifications during certain hours" },
+    quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "mute notifications during certain hours" },
     quietStart:         { type: OptionType.STRING,  default: "23:00",                description: "quiet hours start (24h, e.g. 23:00)" },
     quietEnd:           { type: OptionType.STRING,  default: "07:00",                description: "quiet hours end (24h, e.g. 07:00)" },
-    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,                   description: "skip notification if you're already in that channel" },
+    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,                   description: "skip notification if already in that channel" },
     debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "log all events to console" },
-    globalPresetMode:   { type: OptionType.STRING,  default: "custom",               description: "global preset mode — custom, stalker, lite, silent" },
-    showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "show watchlist icon in toolbar" },
+    showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "show watchlist icon in discord toolbar" },
 })
 
 // notification helpers
@@ -250,8 +251,8 @@ function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
 // checks if a feature is on for a specific user, respects preset mode and per-user overrides
 function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globalKey: string): boolean {
     if (!isWatched(settings, uid)) return false
-    const mode = settings.store.globalPresetMode
-    if (mode && mode !== "custom") {
+    const mode = settings.store.globalPresetMode ?? "custom"
+    if (mode !== "custom") {
         if (mode === "silent") return false
         if (mode === "stalker") return true
         if (mode === "lite") {
