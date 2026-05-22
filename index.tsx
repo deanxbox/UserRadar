@@ -263,8 +263,19 @@ function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globa
     return featureOn(settings, uid, userKey, globalKey)
 }
 
+// debounce map — prevents exact same notification firing twice within 1.5s
+// this catches cases where two flux events fire for the same action (e.g. MESSAGE_CREATE + USER_UPDATE)
+const _notifDebounce: Record<string, number> = {}
+
 function notify(opts: { title: string; body: string; icon?: string; onClick?: () => void }) {
     if (inQuietHours(settings)) return
+
+    // dedupe: skip if exact same title+body was shown in last 1.5s
+    const key = `${opts.title}|${opts.body}`
+    const now = Date.now()
+    if (_notifDebounce[key] && now - _notifDebounce[key] < 1500) return
+    _notifDebounce[key] = now
+
     if (settings.store.debugLog) log.info(`[notif] ${opts.title} — ${opts.body}`)
     Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
 }
@@ -2914,12 +2925,19 @@ export default definePlugin({
         },
 
         PRESENCE_UPDATES({ updates }: PresenceEvent) {
+            // ignore presence events in first 15s — discord fires these on startup
+            // for everyone you share a server with, causing false online/offline spam
+            const isStartup = Date.now() - pluginStartedAt < 15000
             for (const u of updates || []) {
                 const uid = u.user?.id
                 if (!uid || !isWatched(settings, uid)) continue
+
                 const oldStatus = statusCache[uid]
                 const newStatus = u.status
-                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus")) {
+
+                // always update cache regardless of startup — so baseline is correct
+                // but don't notify during startup
+                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup) {
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
                     const name  = displayName(user) || uid
@@ -2939,7 +2957,7 @@ export default definePlugin({
                 const newActKey = realAct ? `${realAct.type}:${realAct.name}` : null
                 const oldAct = activityCache[uid]
 
-                if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity")) {
+                if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
                     const ACT_VERB: Record<number, string> = { 0: "playing", 2: "listening to", 3: "watching", 5: "competing in" }
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
