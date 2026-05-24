@@ -2927,7 +2927,8 @@ export default definePlugin({
         PRESENCE_UPDATES({ updates }: PresenceEvent) {
             // ignore presence events in first 15s — discord fires these on startup
             // for everyone you share a server with, causing false online/offline spam
-            const isStartup = Date.now() - pluginStartedAt < 15000
+            const now = Date.now()
+            const isStartup = now - pluginStartedAt < 20000
             for (const u of updates || []) {
                 const uid = u.user?.id
                 if (!uid || !isWatched(settings, uid)) continue
@@ -2935,9 +2936,17 @@ export default definePlugin({
                 const oldStatus = statusCache[uid]
                 const newStatus = u.status
 
-                // always update cache regardless of startup — so baseline is correct
-                // but don't notify during startup
-                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup) {
+                // always update cache regardless — baseline must be accurate
+                // but suppress notifications during startup AND suppress
+                // transitions TO "offline" within 60s (discord sends offline during sync)
+                const suppressOffline = newStatus === "offline" && now - pluginStartedAt < 60000
+                const shouldNotify = oldStatus !== undefined
+                    && oldStatus !== newStatus
+                    && isFeatureOn(uid, "status", "globalStatus")
+                    && !isStartup
+                    && !suppressOffline
+
+                if (shouldNotify) {
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
                     const name  = displayName(user) || uid
@@ -2957,7 +2966,7 @@ export default definePlugin({
                 const newActKey = realAct ? `${realAct.type}:${realAct.name}` : null
                 const oldAct = activityCache[uid]
 
-                if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
+                if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup && !suppressOffline) {
                     const ACT_VERB: Record<number, string> = { 0: "playing", 2: "listening to", 3: "watching", 5: "competing in" }
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
@@ -3005,68 +3014,71 @@ export default definePlugin({
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            // block events in first 15s — discord syncs guild members on reconnect
-            if (Date.now() - pluginStartedAt < 15000) return
+            if (!isFeatureOn(user.id, "joins", "globalJoins")) return
 
-            // if guildCache is empty for this user, snapshot failed on start
-            // do a live check now so we don't fire false positives
-            if (!guildCache[user.id]) {
-                guildCache[user.id] = new Set()
-                try {
-                    const guildMod = findByProps("getGuildIds", "getGuild")
-                    const memMod   = findByProps("getMember", "getMemberIds") ?? findByProps("isMember", "getMember")
-                    const allGuilds: string[] = guildMod?.getGuildIds?.() ?? []
-                    const isMem = (gid: string) => {
-                        try {
-                            if (memMod?.isMember) return memMod.isMember(gid, user.id)
-                            if (memMod?.getMember) return !!memMod.getMember(gid, user.id)
-                        } catch { }
-                        return false
-                    }
-                    // add all guilds they're already in EXCEPT the one we're about to process
-                    // so wasIn is correct for this specific event
-                    for (const gid of allGuilds) {
-                        if (gid !== guildId && isMem(gid)) guildCache[user.id].add(gid)
-                    }
-                } catch { }
+            // ignore the first 30s after startup
+            // discord fires GUILD_MEMBER_ADD for ALL members during reconnect/guild sync
+            // 30s is enough to let discord finish its sync without missing real joins
+            if (Date.now() - pluginStartedAt < 30000) {
+                // still populate guildCache during cooldown so we have accurate state after
+                if (!guildCache[user.id]) guildCache[user.id] = new Set()
+                guildCache[user.id].add(guildId)
+                return
             }
 
-            const wasIn = guildCache[user.id].has(guildId)
+            if (!guildCache[user.id]) guildCache[user.id] = new Set()
+            const wasAlreadyIn = guildCache[user.id].has(guildId)
             guildCache[user.id].add(guildId)
-            if (!wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
-                const g = findByProps("getGuild").getGuild(guildId)
-                const label = getWatchedUser(settings, user.id)?.nick
-                const name  = displayName(user)
-                const dn    = label ? `${label} (${name})` : name
-                notify({
-                    title: `${dn} Joined a Server`,
-                    body: g?.name || guildId,
-                    icon: avatarUrl(user.id, user.avatar, 80),
-                    onClick: () => jumpTo(guildId),
-                })
-                logActivity(user.id, "join", "📥", `joined ${g?.name || guildId}`, guildId)
-            }
+
+            // skip if they were already in this guild — double-fire protection
+            if (wasAlreadyIn) return
+
+            const g     = findByProps("getGuild")?.getGuild(guildId)
+            const label = getWatchedUser(settings, user.id)?.nick
+            const name  = displayName(user)
+            const dn    = label ? `${label} (${name})` : name
+
+            notify({
+                title: `${dn} Joined a Server`,
+                body: g?.name || guildId,
+                icon: avatarUrl(user.id, user.avatar, 80),
+                onClick: () => jumpTo(guildId),
+            })
+            logActivity(user.id, "join", "📥", `joined ${g?.name || guildId}`, guildId)
         },
 
         GUILD_MEMBER_REMOVE({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            if (Date.now() - pluginStartedAt < 15000) return
+            if (!isFeatureOn(user.id, "joins", "globalJoins")) return
+
+            // ignore during startup
+            if (Date.now() - pluginStartedAt < 30000) {
+                // still update cache
+                if (!guildCache[user.id]) guildCache[user.id] = new Set()
+                guildCache[user.id].delete(guildId)
+                return
+            }
+
             if (!guildCache[user.id]) guildCache[user.id] = new Set()
             const wasIn = guildCache[user.id].has(guildId)
             guildCache[user.id].delete(guildId)
-            if (wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
-                const g = findByProps("getGuild").getGuild(guildId)
-                const label = getWatchedUser(settings, user.id)?.nick
-                const name  = displayName(user)
-                const dn    = label ? `${label} (${name})` : name
-                notify({
-                    title: `${dn} Left a Server`,
-                    body: g?.name || guildId,
-                    icon: avatarUrl(user.id, user.avatar, 80),
-                    onClick: () => jumpTo(guildId),
-                })
-                logActivity(user.id, "leave", "📤", `left ${g?.name || guildId}`, guildId)
-            }
+
+            // only notify if we knew they were in this guild
+            // if wasIn is false, this is likely a reconnect sync event, skip it
+            if (!wasIn) return
+
+            const g     = findByProps("getGuild")?.getGuild(guildId)
+            const label = getWatchedUser(settings, user.id)?.nick
+            const name  = displayName(user)
+            const dn    = label ? `${label} (${name})` : name
+
+            notify({
+                title: `${dn} Left a Server`,
+                body: g?.name || guildId,
+                icon: avatarUrl(user.id, user.avatar, 80),
+                onClick: () => jumpTo(guildId),
+            })
+            logActivity(user.id, "leave", "📤", `left ${g?.name || guildId}`, guildId)
         },
 
         GUILD_BOOST_CREATE({ guildId, userId }: any) {
