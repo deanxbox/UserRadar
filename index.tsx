@@ -442,7 +442,7 @@ const ico = {
     external: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>,
     sortAz:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M3 6h12M3 12h8M3 18h4M16 8l4-4 4 4M20 4v16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
     sortDate: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/><path d="M12 6v6l4 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>,
-    eye:      () => <svg width="20" height="20" viewBox="0 0 24 24" fill={C.white}><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>,
+    eye:      () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={C.white} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill={C.white} stroke="none"/><path d="M12 2v2M12 20v2" strokeWidth="1.5" opacity="0.5"/></svg>,
     ghost:    () => <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" opacity=".25"><path d="M12 2a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-4h6v4h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9zm-3 8a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm6 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>,
     msg:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M2 22V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6l-4 4z"/></svg>,
     edit:     () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 20h9" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
@@ -526,6 +526,18 @@ function exactTime(ts: number): string {
 // full timestamp for hovering on log entries
 function logTime(ts: number): string {
     return new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" })
+}
+function decodeSnowflake(id: string) {
+    try {
+        const snowflake = BigInt(id)
+        const timestamp = Number(snowflake >> 22n) + 1420070400000
+        const workerId = Number((snowflake >> 17n) & 0x1Fn)
+        const processId = Number((snowflake >> 12n) & 0x1Fn)
+        const increment = Number(snowflake & 0xFFFn)
+        return { timestamp, workerId, processId, increment, date: new Date(timestamp) }
+    } catch {
+        return null
+    }
 }
 
 function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
@@ -673,9 +685,16 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
     const [rawId, setRawId] = React.useState("")
     const [label, setLabel] = React.useState("")
     const [lk, setLk]       = React.useState<LookupStage>({ s: "idle" })
+    const [copiedId, setCopiedId] = React.useState(false)
 
     const cleanId = rawId.trim().replace(/\D/g, "")
     const hasErr  = lk.s === "err"
+
+    const copyId = (id: string) => {
+        navigator.clipboard.writeText(id)
+        setCopiedId(true)
+        setTimeout(() => setCopiedId(false), 1200)
+    }
 
     const doLookup = () => {
         if (!cleanId)                                    return setLk({ s: "err", msg: "enter a user id first" })
@@ -726,45 +745,162 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
 
             {lk.s === "done" && (
                 <div className="ur-fade-in">
+                    {/* Profile Card */}
                     <div style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 14,
-                        padding: "12px 16px",
                         background: C.bg1,
-                        borderRadius: 20,
+                        borderRadius: 16,
                         border: `1px solid ${C.border}`,
                         marginBottom: 14,
+                        overflow: "hidden",
                     }}>
-                        <img
-                            src={lk.av}
-                            style={{ width: 48, height: 48, borderRadius: "50%", flexShrink: 0 }}
-                            onError={(e: any) => { e.target.src = FALLBACK_AV }}
-                        />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 15, fontWeight: 700, color: C.header }}>
-                                {lk.user.globalName || lk.user.username}
+                        <div style={{ padding: "12px 16px" }}>
+                            {/* Avatar + Name inline */}
+                            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+                                <img
+                                    src={lk.av}
+                                    style={{
+                                        width: 52, height: 52,
+                                        borderRadius: "50%",
+                                        border: `2px solid ${C.border}`,
+                                        flexShrink: 0,
+                                        background: C.bg1,
+                                    }}
+                                    onError={(e: any) => { e.target.src = FALLBACK_AV }}
+                                />
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                        <span style={{ fontSize: 17, fontWeight: 800, color: C.header, lineHeight: 1.2 }}>
+                                            {lk.user.globalName || lk.user.username}
+                                        </span>
+                                        {lk.user.globalName && (
+                                            <span style={{ fontSize: 12, color: C.muted, fontWeight: 500 }}>@{lk.user.username}</span>
+                                        )}
+                                    </div>
+                                    {lk.user.pronouns && (
+                                        <div style={{ fontSize: 11, color: C.brandLight, marginTop: 2, fontWeight: 500 }}>
+                                            {lk.user.pronouns}
+                                        </div>
+                                    )}
+                                </div>
+                                <div style={{
+                                    width: 20, height: 20,
+                                    borderRadius: "50%",
+                                    background: "rgba(36,128,70,0.15)",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    flexShrink: 0,
+                                }}>
+                                    <span style={{ color: C.green, display: "flex", transform: "scale(0.8)" }}><ico.check /></span>
+                                </div>
                             </div>
-                            {lk.user.globalName && (
-                                <div style={{ fontSize: 13, color: C.muted, marginTop: 1 }}>
-                                    @{lk.user.username}
+
+                            {/* About Me */}
+                            {lk.user.bio && (
+                                <div style={{ marginBottom: 10 }}>
+                                    <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 4 }}>
+                                        About Me
+                                    </div>
+                                    <div style={{
+                                        fontSize: 12,
+                                        color: C.text,
+                                        lineHeight: 1.5,
+                                        padding: "8px 10px",
+                                        background: C.bg2,
+                                        borderRadius: 8,
+                                        border: `1px solid ${C.border}`,
+                                        whiteSpace: "pre-wrap",
+                                        wordBreak: "break-word",
+                                    }}>
+                                        {lk.user.bio}
+                                    </div>
                                 </div>
                             )}
-                            <div style={{ fontSize: 11, color: C.muted, marginTop: 3, fontFamily: "monospace", opacity: .6 }}>
-                                {lk.user.id}
-                            </div>
-                        </div>
-                        <div style={{
-                            width: 28,
-                            height: 28,
-                            borderRadius: "50%",
-                            background: "rgba(36,128,70,0.15)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                        }}>
-                            <div style={{ color: C.green }}><ico.check /></div>
+
+                            {/* Divider */}
+                            <div style={{ height: 1, background: C.border, margin: "8px 0" }} />
+
+                            {/* Account Info Grid */}
+                            {(() => {
+                                const sf = decodeSnowflake(lk.user.id)
+                                return sf && (
+                                <div>
+                                    <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 5 }}>
+                                        Account Info
+                                    </div>
+                                    <div style={{
+                                        display: "grid",
+                                        gridTemplateColumns: "repeat(2, 1fr)",
+                                        gap: 6,
+                                    }}>
+                                        {/* User ID */}
+                                        <div
+                                            onClick={() => copyId(lk.user.id)}
+                                            style={{
+                                                padding: "8px 10px",
+                                                background: C.bg2,
+                                                borderRadius: 8,
+                                                border: `1px solid ${C.border}`,
+                                                cursor: "pointer",
+                                                transition: "border-color 150ms ease, background 150ms ease",
+                                            }}
+                                            onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = "#232428" }}
+                                            onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg2 }}
+                                            title="Click to copy ID"
+                                        >
+                                            <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>User ID</div>
+                                            <div style={{ fontSize: 11, fontFamily: "monospace", color: C.text, display: "flex", alignItems: "center", gap: 4 }}>
+                                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{lk.user.id}</span>
+                                                <span style={{ color: copiedId ? C.green : C.muted, flexShrink: 0, transition: "color 150ms ease", display: "flex" }}>
+                                                    {copiedId ? <ico.check /> : <ico.copy />}
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        {/* Created */}
+                                        <div style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                                            <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Created</div>
+                                            <div style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>
+                                                {sf.date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                                            </div>
+                                            <div style={{ fontSize: 10, color: C.muted, marginTop: 1 }}>
+                                                {sf.date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+                                            </div>
+                                        </div>
+
+                                        {/* Account Age */}
+                                        <div style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                                            <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Account Age</div>
+                                            <div style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>
+                                                {(() => {
+                                                    const diff = Date.now() - sf.timestamp
+                                                    const years = Math.floor(diff / 31536000000)
+                                                    const months = Math.floor((diff % 31536000000) / 2592000000)
+                                                    const days = Math.floor((diff % 2592000000) / 86400000)
+                                                    if (years > 0) return `${years}y ${months}mo`
+                                                    if (months > 0) return `${months}mo ${days}d`
+                                                    return `${days}d`
+                                                })()}
+                                            </div>
+                                        </div>
+
+                                        {/* Snowflake */}
+                                        <div
+                                            title={`Worker ${sf.workerId} · Process ${sf.processId} · Increment ${sf.increment}`}
+                                            style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}
+                                        >
+                                            <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Snowflake</div>
+                                            <div style={{ fontSize: 11, fontFamily: "monospace", color: C.brandLight, fontWeight: 600 }}>
+                                                w{sf.workerId} · p{sf.processId}
+                                            </div>
+                                            <div style={{ fontSize: 10, color: C.muted, marginTop: 1, fontFamily: "monospace" }}>
+                                                inc {sf.increment}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                )
+                            })()}
                         </div>
                     </div>
 
@@ -1579,6 +1715,21 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                                 {user.nick}
                             </span>
                         )}
+                        {settings.store.globalPresetMode === "custom" && activePreset !== "custom" && (
+                            <span style={{
+                                background: activePreset === "stalker" ? `${C.danger}25` : activePreset === "lite" ? `${C.brandLight}25` : `${C.muted}25`,
+                                color: activePreset === "stalker" ? C.danger : activePreset === "lite" ? C.brandLight : C.muted,
+                                fontSize: 9,
+                                fontWeight: 800,
+                                padding: "2px 7px",
+                                borderRadius: 6,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.5,
+                                border: `1px solid ${activePreset === "stalker" ? `${C.danger}60` : activePreset === "lite" ? `${C.brandLight}60` : `${C.muted}60`}`,
+                            }}>
+                                {activePreset}
+                            </span>
+                        )}
                     </div>
                     <div style={{ fontSize: 11, color: C.muted, marginTop: 3, display: "flex", alignItems: "center", gap: 5 }}>
                         <span style={{ fontFamily: "monospace", opacity: .7 }}>{user.id}</span>
@@ -2339,12 +2490,12 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                         width: 36,
                         height: 36,
                         borderRadius: 12,
-                        background: C.brandGrad,
+                        background: C.bg2,
+                        border: `1px solid ${C.border}`,
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "center",
                         flexShrink: 0,
-                        boxShadow: "0 2px 8px rgba(88,101,242,0.3)",
                     }}>
                         <ico.eye />
                     </div>
@@ -2927,8 +3078,7 @@ export default definePlugin({
         PRESENCE_UPDATES({ updates }: PresenceEvent) {
             // ignore presence events in first 15s — discord fires these on startup
             // for everyone you share a server with, causing false online/offline spam
-            const now = Date.now()
-            const isStartup = now - pluginStartedAt < 20000
+            const isStartup = Date.now() - pluginStartedAt < 15000
             for (const u of updates || []) {
                 const uid = u.user?.id
                 if (!uid || !isWatched(settings, uid)) continue
@@ -2936,17 +3086,9 @@ export default definePlugin({
                 const oldStatus = statusCache[uid]
                 const newStatus = u.status
 
-                // always update cache regardless — baseline must be accurate
-                // but suppress notifications during startup AND suppress
-                // transitions TO "offline" within 60s (discord sends offline during sync)
-                const suppressOffline = newStatus === "offline" && now - pluginStartedAt < 60000
-                const shouldNotify = oldStatus !== undefined
-                    && oldStatus !== newStatus
-                    && isFeatureOn(uid, "status", "globalStatus")
-                    && !isStartup
-                    && !suppressOffline
-
-                if (shouldNotify) {
+                // always update cache regardless of startup — so baseline is correct
+                // but don't notify during startup
+                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup) {
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
                     const name  = displayName(user) || uid
@@ -2966,7 +3108,7 @@ export default definePlugin({
                 const newActKey = realAct ? `${realAct.type}:${realAct.name}` : null
                 const oldAct = activityCache[uid]
 
-                if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup && !suppressOffline) {
+                if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
                     const ACT_VERB: Record<number, string> = { 0: "playing", 2: "listening to", 3: "watching", 5: "competing in" }
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
@@ -3014,71 +3156,68 @@ export default definePlugin({
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            if (!isFeatureOn(user.id, "joins", "globalJoins")) return
+            // block events in first 15s — discord syncs guild members on reconnect
+            if (Date.now() - pluginStartedAt < 15000) return
 
-            // ignore the first 30s after startup
-            // discord fires GUILD_MEMBER_ADD for ALL members during reconnect/guild sync
-            // 30s is enough to let discord finish its sync without missing real joins
-            if (Date.now() - pluginStartedAt < 30000) {
-                // still populate guildCache during cooldown so we have accurate state after
-                if (!guildCache[user.id]) guildCache[user.id] = new Set()
-                guildCache[user.id].add(guildId)
-                return
+            // if guildCache is empty for this user, snapshot failed on start
+            // do a live check now so we don't fire false positives
+            if (!guildCache[user.id]) {
+                guildCache[user.id] = new Set()
+                try {
+                    const guildMod = findByProps("getGuildIds", "getGuild")
+                    const memMod   = findByProps("getMember", "getMemberIds") ?? findByProps("isMember", "getMember")
+                    const allGuilds: string[] = guildMod?.getGuildIds?.() ?? []
+                    const isMem = (gid: string) => {
+                        try {
+                            if (memMod?.isMember) return memMod.isMember(gid, user.id)
+                            if (memMod?.getMember) return !!memMod.getMember(gid, user.id)
+                        } catch { }
+                        return false
+                    }
+                    // add all guilds they're already in EXCEPT the one we're about to process
+                    // so wasIn is correct for this specific event
+                    for (const gid of allGuilds) {
+                        if (gid !== guildId && isMem(gid)) guildCache[user.id].add(gid)
+                    }
+                } catch { }
             }
 
-            if (!guildCache[user.id]) guildCache[user.id] = new Set()
-            const wasAlreadyIn = guildCache[user.id].has(guildId)
+            const wasIn = guildCache[user.id].has(guildId)
             guildCache[user.id].add(guildId)
-
-            // skip if they were already in this guild — double-fire protection
-            if (wasAlreadyIn) return
-
-            const g     = findByProps("getGuild")?.getGuild(guildId)
-            const label = getWatchedUser(settings, user.id)?.nick
-            const name  = displayName(user)
-            const dn    = label ? `${label} (${name})` : name
-
-            notify({
-                title: `${dn} Joined a Server`,
-                body: g?.name || guildId,
-                icon: avatarUrl(user.id, user.avatar, 80),
-                onClick: () => jumpTo(guildId),
-            })
-            logActivity(user.id, "join", "📥", `joined ${g?.name || guildId}`, guildId)
+            if (!wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
+                const g = findByProps("getGuild").getGuild(guildId)
+                const label = getWatchedUser(settings, user.id)?.nick
+                const name  = displayName(user)
+                const dn    = label ? `${label} (${name})` : name
+                notify({
+                    title: `${dn} Joined a Server`,
+                    body: g?.name || guildId,
+                    icon: avatarUrl(user.id, user.avatar, 80),
+                    onClick: () => jumpTo(guildId),
+                })
+                logActivity(user.id, "join", "📥", `joined ${g?.name || guildId}`, guildId)
+            }
         },
 
         GUILD_MEMBER_REMOVE({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            if (!isFeatureOn(user.id, "joins", "globalJoins")) return
-
-            // ignore during startup
-            if (Date.now() - pluginStartedAt < 30000) {
-                // still update cache
-                if (!guildCache[user.id]) guildCache[user.id] = new Set()
-                guildCache[user.id].delete(guildId)
-                return
-            }
-
+            if (Date.now() - pluginStartedAt < 15000) return
             if (!guildCache[user.id]) guildCache[user.id] = new Set()
             const wasIn = guildCache[user.id].has(guildId)
             guildCache[user.id].delete(guildId)
-
-            // only notify if we knew they were in this guild
-            // if wasIn is false, this is likely a reconnect sync event, skip it
-            if (!wasIn) return
-
-            const g     = findByProps("getGuild")?.getGuild(guildId)
-            const label = getWatchedUser(settings, user.id)?.nick
-            const name  = displayName(user)
-            const dn    = label ? `${label} (${name})` : name
-
-            notify({
-                title: `${dn} Left a Server`,
-                body: g?.name || guildId,
-                icon: avatarUrl(user.id, user.avatar, 80),
-                onClick: () => jumpTo(guildId),
-            })
-            logActivity(user.id, "leave", "📤", `left ${g?.name || guildId}`, guildId)
+            if (wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
+                const g = findByProps("getGuild").getGuild(guildId)
+                const label = getWatchedUser(settings, user.id)?.nick
+                const name  = displayName(user)
+                const dn    = label ? `${label} (${name})` : name
+                notify({
+                    title: `${dn} Left a Server`,
+                    body: g?.name || guildId,
+                    icon: avatarUrl(user.id, user.avatar, 80),
+                    onClick: () => jumpTo(guildId),
+                })
+                logActivity(user.id, "leave", "📤", `left ${g?.name || guildId}`, guildId)
+            }
         },
 
         GUILD_BOOST_CREATE({ guildId, userId }: any) {
