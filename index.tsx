@@ -219,6 +219,8 @@ const settings = definePluginSettings({
     globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: avatar changes" },
     globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: voice joins / leaves / moves" },
     globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "notify: status changes (spammy, off by default)" },
+    globalBoosts:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: server boosts" },
+    globalActivity:     { type: OptionType.BOOLEAN, default: false,                  description: "notify: activity changes (very spammy, off by default)" },
     globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: server joins / leaves" },
     showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message content in notifications" },
     previewLen:         { type: OptionType.NUMBER,  default: 120,                    description: "max chars in preview (0 = no limit)" },
@@ -973,12 +975,14 @@ const OV_GROUPS = {
     ],
     presence: [
         { label: "status",    key: "status",   gk: "globalStatus",   Icon: ico.status,   desc: "Notify on status changes" },
+        { label: "activity",  key: "activity", gk: "globalActivity", Icon: ico.activity, desc: "Notify on activity changes" },
         { label: "voice",     key: "voice",    gk: "globalVoice",    Icon: ico.voice,    desc: "Notify on voice channel activity" },
         { label: "joins",     key: "joins",    gk: "globalJoins",    Icon: ico.joins,    desc: "Notify on server joins / leaves" },
     ],
     profile: [
         { label: "profile",   key: "profile",  gk: "globalProfile",  Icon: ico.profile,  desc: "Notify on profile changes" },
         { label: "avatar",    key: "avatar",   gk: "globalAvatar",   Icon: ico.avatar,   desc: "Notify on avatar updates" },
+        { label: "boosts",    key: "boosts",   gk: "globalBoosts",   Icon: ico.boosts,   desc: "Notify on server boosts" },
     ],
 } as const
 
@@ -2877,14 +2881,9 @@ export default definePlugin({
                 const dn    = label ? `${label} (${name})` : name
                 const ch    = ChannelStore.getChannel(channelId)
                 const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
-                const chName  = ch?.name || "dm"
-                const gName   = g?.name || ""
-                // for DMs, ch.name is null — show recipient context instead
-                const location = gName
-                    ? `${gName} · #${chName}`
-                    : ch?.recipients?.length
-                        ? "Direct Message"
-                        : `#${chName}`
+                const chName = ch?.name || "dm"
+                const gName = g?.name || ""
+                const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
                 if (settings.store.skipCurrentChannel) {
                     const cur = getCurrentChannel()
                     if (cur?.id === channelId) return
@@ -2974,14 +2973,9 @@ export default definePlugin({
                 const dn    = label ? `${label} (${name})` : name
                 const ch    = ChannelStore.getChannel(channelId)
                 const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
-                const chName  = ch?.name || "dm"
-                const gName   = g?.name || ""
-                // for DMs, ch.name is null — show recipient context instead
-                const location = gName
-                    ? `${gName} · #${chName}`
-                    : ch?.recipients?.length
-                        ? "Direct Message"
-                        : `#${chName}`
+                const chName = ch?.name || "dm"
+                const gName = g?.name || ""
+                const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
                 if (settings.store.skipCurrentChannel) {
                     const cur = getCurrentChannel()
                     if (cur?.id === channelId) return
@@ -3015,22 +3009,16 @@ export default definePlugin({
                 const dn    = label ? `${label} (${name})` : name
                 const ch    = ChannelStore.getChannel(channelId)
                 const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
-                const chName  = ch?.name || "dm"
-                const gName   = g?.name || ""
-                // for DMs, ch.name is null — show recipient context instead
-                const location = gName
-                    ? `${gName} · #${chName}`
-                    : ch?.recipients?.length
-                        ? "Direct Message"
-                        : `#${chName}`
+                const chName = ch?.name || "dm"
+                const gName = g?.name || ""
+                const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
                 if (settings.store.skipCurrentChannel) {
                     const cur = getCurrentChannel()
                     if (cur?.id === channelId) return
                 }
-                // body format: "Server Name · #channel" or "Direct Message" for DMs
                 notify({
                     title: `${dn} is typing…`,
-                    body: location,
+                    body: `in ${location}`,
                     icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                     onClick: () => jumpTo(ch?.guild_id, channelId),
                 })
@@ -3056,10 +3044,9 @@ export default definePlugin({
                 const chName = ch?.name || "unknown"
                 if (!old && now) {
                     vcJoinTime[uid] = Date.now()
-                    const guildNameVc = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id)?.name : null
                     notify({
                         title: `${dn} Joined Voice`,
-                        body: guildNameVc ? `${guildNameVc} · #${chName}` : `#${chName}`,
+                        body: `#${chName}`,
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                         onClick: () => jumpTo(ch?.guild_id, now!),
                     })
@@ -3068,23 +3055,18 @@ export default definePlugin({
                     const spent = vcJoinTime[uid] ? Date.now() - vcJoinTime[uid] : 0
                     delete vcJoinTime[uid]
                     const dur = spent > 60000 ? ` (${formatDuration(spent)})` : ""
-                    const guildNameVcLeft = (ch ?? (old ? ChannelStore.getChannel(old) : null))
-                    const guildNameVcLeftStr = guildNameVcLeft?.guild_id ? findByProps("getGuild")?.getGuild(guildNameVcLeft.guild_id)?.name : null
                     notify({
                         title: `${dn} Left Voice`,
-                        body: guildNameVcLeftStr ? `${guildNameVcLeftStr} · #${chName}${dur}` : `#${chName}${dur}`,
+                        body: `#${chName}${dur}`,
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                         onClick: () => openUserProfile(uid),
                     })
                     logActivity(uid, "voice", "🎙️", `left #${chName}${dur}`, ch?.guild_id, old!)
                 } else if (old && now && old !== now) {
                     const oldCh = ChannelStore.getChannel(old)
-                    const guildNameVcMove = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id)?.name : null
                     notify({
                         title: `${dn} Moved Voice Channels`,
-                        body: guildNameVcMove
-                            ? `${guildNameVcMove}: #${oldCh?.name || "?"} → #${chName}`
-                            : `#${oldCh?.name || "?"} → #${chName}`,
+                        body: `#${oldCh?.name || "?"} → #${chName}`,
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                         onClick: () => jumpTo(ch?.guild_id, now!),
                     })
@@ -3106,8 +3088,7 @@ export default definePlugin({
 
                 // always update cache regardless of startup — so baseline is correct
                 // but don't notify during startup
-                const goingOffline = newStatus === "offline" && Date.now() - pluginStartedAt < 90000
-                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup && !goingOffline) {
+                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup) {
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
                     const name  = displayName(user) || uid
@@ -3175,53 +3156,86 @@ export default definePlugin({
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            if (!isFeatureOn(user.id, "joins", "globalJoins")) return
-            if (!guildCache[user.id]) guildCache[user.id] = new Set()
-            // discord fires this for all existing members during reconnect sync
-            // 45s cooldown — just populate cache, never notify during this window
-            if (Date.now() - pluginStartedAt < 45000) {
-                guildCache[user.id].add(guildId)
-                return
+            // block events in first 15s — discord syncs guild members on reconnect
+            if (Date.now() - pluginStartedAt < 15000) return
+
+            // if guildCache is empty for this user, snapshot failed on start
+            // do a live check now so we don't fire false positives
+            if (!guildCache[user.id]) {
+                guildCache[user.id] = new Set()
+                try {
+                    const guildMod = findByProps("getGuildIds", "getGuild")
+                    const memMod   = findByProps("getMember", "getMemberIds") ?? findByProps("isMember", "getMember")
+                    const allGuilds: string[] = guildMod?.getGuildIds?.() ?? []
+                    const isMem = (gid: string) => {
+                        try {
+                            if (memMod?.isMember) return memMod.isMember(gid, user.id)
+                            if (memMod?.getMember) return !!memMod.getMember(gid, user.id)
+                        } catch { }
+                        return false
+                    }
+                    // add all guilds they're already in EXCEPT the one we're about to process
+                    // so wasIn is correct for this specific event
+                    for (const gid of allGuilds) {
+                        if (gid !== guildId && isMem(gid)) guildCache[user.id].add(gid)
+                    }
+                } catch { }
             }
-            // already in cache = not a new join, skip
-            if (guildCache[user.id].has(guildId)) return
+
+            const wasIn = guildCache[user.id].has(guildId)
             guildCache[user.id].add(guildId)
-            const g     = findByProps("getGuild")?.getGuild(guildId)
-            const label = getWatchedUser(settings, user.id)?.nick
-            const name  = displayName(user)
-            const dn    = label ? `${label} (${name})` : name
-            notify({
-                title: `${dn} Joined a Server`,
-                body: g?.name || guildId,
-                icon: avatarUrl(user.id, user.avatar, 80),
-                onClick: () => jumpTo(guildId),
-            })
-            logActivity(user.id, "join", "📥", `joined ${g?.name || guildId}`, guildId)
+            if (!wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
+                const g = findByProps("getGuild").getGuild(guildId)
+                const label = getWatchedUser(settings, user.id)?.nick
+                const name  = displayName(user)
+                const dn    = label ? `${label} (${name})` : name
+                notify({
+                    title: `${dn} Joined a Server`,
+                    body: g?.name || guildId,
+                    icon: avatarUrl(user.id, user.avatar, 80),
+                    onClick: () => jumpTo(guildId),
+                })
+                logActivity(user.id, "join", "📥", `joined ${g?.name || guildId}`, guildId)
+            }
         },
 
         GUILD_MEMBER_REMOVE({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            if (!isFeatureOn(user.id, "joins", "globalJoins")) return
+            if (Date.now() - pluginStartedAt < 15000) return
             if (!guildCache[user.id]) guildCache[user.id] = new Set()
-            // silent during startup
-            if (Date.now() - pluginStartedAt < 45000) {
-                guildCache[user.id].delete(guildId)
-                return
-            }
-            // only notify if we knew they were in this guild
-            if (!guildCache[user.id].has(guildId)) return
+            const wasIn = guildCache[user.id].has(guildId)
             guildCache[user.id].delete(guildId)
-            const g     = findByProps("getGuild")?.getGuild(guildId)
-            const label = getWatchedUser(settings, user.id)?.nick
-            const name  = displayName(user)
-            const dn    = label ? `${label} (${name})` : name
-            notify({
-                title: `${dn} Left a Server`,
-                body: g?.name || guildId,
-                icon: avatarUrl(user.id, user.avatar, 80),
-                onClick: () => jumpTo(guildId),
-            })
-            logActivity(user.id, "leave", "📤", `left ${g?.name || guildId}`, guildId)
+            if (wasIn && isFeatureOn(user.id, "joins", "globalJoins")) {
+                const g = findByProps("getGuild").getGuild(guildId)
+                const label = getWatchedUser(settings, user.id)?.nick
+                const name  = displayName(user)
+                const dn    = label ? `${label} (${name})` : name
+                notify({
+                    title: `${dn} Left a Server`,
+                    body: g?.name || guildId,
+                    icon: avatarUrl(user.id, user.avatar, 80),
+                    onClick: () => jumpTo(guildId),
+                })
+                logActivity(user.id, "leave", "📤", `left ${g?.name || guildId}`, guildId)
+            }
+        },
+
+        GUILD_BOOST_CREATE({ guildId, userId }: any) {
+            if (!userId || !isWatched(settings, userId)) return
+            if (isFeatureOn(userId, "boosts", "globalBoosts")) {
+                const g = findByProps("getGuild").getGuild(guildId)
+                const u = UserStore.getUser(userId)
+                const label = getWatchedUser(settings, userId)?.nick
+                const name  = displayName(u) || userId
+                const dn    = label ? `${label} (${name})` : name
+                notify({
+                    title: `${dn} boosted a server`,
+                    body: g?.name || guildId,
+                    icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                    onClick: () => jumpTo(guildId),
+                })
+                logActivity(userId, "boost", "🚀", `boosted ${g?.name || guildId}`, guildId)
+            }
         },
     },
 })
