@@ -319,6 +319,15 @@ function checkProfileChanged(uid: string, fresh: any) {
     if (!isWatched(settings, uid)) return
     const old = profileCache[uid]
     if (!old) {
+        // no baseline yet — just store it, never notify on first fetch
+        profileCache[uid] = fresh
+        return
+    }
+    // suppress all profile notifications for 30s after startup
+    // profile API gets called during startup and may return slightly different data
+    // than what's cached (null vs undefined, missing fields etc)
+    if (Date.now() - pluginStartedAt < 30000) {
+        // still update cache so baseline is accurate
         profileCache[uid] = fresh
         return
     }
@@ -2813,20 +2822,10 @@ export default definePlugin({
                     activityCache[wu.id] = realAct ? `${realAct.type}:${realAct.name}` : null
                 } catch { }
 
-                // guild membership snapshot — try multiple store apis bc discord reorganizes these
-                try {
-                    // try GuildMemberStore first (most reliable in recent discord)
-                    let isMember: (gid: string, uid: string) => boolean = () => false
-                    const gms = findByProps("getMember", "getMemberIds")
-                        ?? findByProps("isMember", "getMember")
-                        ?? memMod
-                    if (gms?.isMember)   isMember = (gid, uid) => { try { return gms.isMember(gid, uid) } catch { return false } }
-                    else if (gms?.getMember) isMember = (gid, uid) => { try { return !!gms.getMember(gid, uid) } catch { return false } }
-
-                    if (allGuilds.length) {
-                        guildCache[wu.id] = new Set(allGuilds.filter(gid => isMember(gid, wu.id)))
-                    }
-                } catch { }
+                // don't try to snapshot guild membership — isMember() returns wrong results
+                // during discord's startup sequence while the member store is still loading
+                // the 45s cooldown in GUILD_MEMBER_ADD handles this correctly instead
+                guildCache[wu.id] = new Set()
             }
         } catch (e) { log.warn("snapshot failed", e) }
 
@@ -3163,6 +3162,11 @@ export default definePlugin({
         // discord pushes username/avatar changes instantly over ws — fastest path for those fields
         USER_UPDATE({ user }: { user: any }) {
             if (!user?.id || !isWatched(settings, user.id)) return
+            // USER_UPDATE fires for lots of things including presence changes
+            // only process if it actually contains profile fields we care about
+            const relevant = ["username", "global_name", "globalName", "avatar", "discriminator"]
+            const hasProfileChange = relevant.some(f => user[f] !== undefined)
+            if (!hasProfileChange) return
             const old = profileCache[user.id]
             if (!old) return
             checkProfileChanged(user.id, { ...old, user: { ...old.user, ...camelize(user) } })
@@ -3171,7 +3175,14 @@ export default definePlugin({
         // fires when discord fetches a full profile (opening someone's card, profile page etc)
         USER_PROFILE_FETCH_SUCCESS(rawEvt: any) {
             if (!rawEvt?.user?.id) return
-            checkProfileChanged(rawEvt.user.id, camelize(rawEvt))
+            // only process if we already have a baseline — avoids false positives
+            // when discord fetches a profile for the first time (e.g. opening someone's card)
+            if (profileCache[rawEvt.user.id]) {
+                checkProfileChanged(rawEvt.user.id, camelize(rawEvt))
+            } else {
+                // set baseline silently
+                profileCache[rawEvt.user.id] = camelize(rawEvt)
+            }
         },
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
