@@ -323,14 +323,9 @@ function checkProfileChanged(uid: string, fresh: any) {
         profileCache[uid] = fresh
         return
     }
-    // suppress all profile notifications for 30s after startup
-    // profile API gets called during startup and may return slightly different data
-    // than what's cached (null vs undefined, missing fields etc)
-    if (Date.now() - pluginStartedAt < 30000) {
-        // still update cache so baseline is accurate
-        profileCache[uid] = fresh
-        return
-    }
+    // only poll (pollProfiles) can trigger this now
+    // USER_PROFILE_FETCH_SUCCESS just sets baseline, USER_UPDATE is ws-only
+    // so no startup false positives are possible here
     if (fresh.user?.avatar !== old.user?.avatar) {
         if (isFeatureOn( uid, "avatar", "globalAvatar")) {
             const name  = displayName(fresh.user)
@@ -2838,10 +2833,16 @@ export default definePlugin({
             const wu = list[i++]
             RestAPI.get({
                 url: `/users/${wu.id}/profile`,
-                query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+                query: { with_mutual_guilds: true, with_mutual_friends_count: false },
             }).then((res: any) => {
-                profileCache[wu.id] = camelize(res.body)
-                setTimeout(fetchNext, 800)  // stagger requests
+                const data = camelize(res.body)
+                profileCache[wu.id] = data
+                // populate guild cache from mutual_guilds — this is accurate data
+                // no isMember() guesswork, straight from discord's api
+                if (Array.isArray(data.mutualGuilds)) {
+                    guildCache[wu.id] = new Set(data.mutualGuilds.map((g: any) => g.id))
+                }
+                setTimeout(fetchNext, 800)
             }).catch(() => setTimeout(fetchNext, 800))
         }
         setTimeout(fetchNext, 500)  // small delay so discord finishes its own startup first
@@ -3175,29 +3176,28 @@ export default definePlugin({
         // fires when discord fetches a full profile (opening someone's card, profile page etc)
         USER_PROFILE_FETCH_SUCCESS(rawEvt: any) {
             if (!rawEvt?.user?.id) return
-            // only process if we already have a baseline — avoids false positives
-            // when discord fetches a profile for the first time (e.g. opening someone's card)
-            if (profileCache[rawEvt.user.id]) {
-                checkProfileChanged(rawEvt.user.id, camelize(rawEvt))
-            } else {
-                // set baseline silently
+            // this fires when YOU open/hover someone's profile card — NOT a change event
+            // only update cache silently, never trigger a diff from this
+            // profile change detection only comes from pollProfiles() which runs every 5min
+            if (!profileCache[rawEvt.user.id]) {
                 profileCache[rawEvt.user.id] = camelize(rawEvt)
             }
+            // if we already have a cache, don't overwrite it with potentially
+            // inconsistent data from a card hover — poll will handle it
         },
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
             if (!isFeatureOn(user.id, "joins", "globalJoins")) return
-            if (!guildCache[user.id]) guildCache[user.id] = new Set()
-            // discord fires this for all existing members during reconnect sync
-            // 45s cooldown — just populate cache, never notify during this window
-            if (Date.now() - pluginStartedAt < 45000) {
-                guildCache[user.id].add(guildId)
-                return
-            }
-            // already in cache = not a new join, skip
+
+            // if we have no cache yet, baseline fetch hasn't finished — skip silently
+            // once baseline is done, cache will be populated and future events work correctly
+            if (!guildCache[user.id]) return
+
+            // cache says they're already in this guild = reconnect sync event, not a real join
             if (guildCache[user.id].has(guildId)) return
             guildCache[user.id].add(guildId)
+
             const g     = findByProps("getGuild")?.getGuild(guildId)
             const label = getWatchedUser(settings, user.id)?.nick
             const name  = displayName(user)
@@ -3214,15 +3214,14 @@ export default definePlugin({
         GUILD_MEMBER_REMOVE({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
             if (!isFeatureOn(user.id, "joins", "globalJoins")) return
-            if (!guildCache[user.id]) guildCache[user.id] = new Set()
-            // silent during startup
-            if (Date.now() - pluginStartedAt < 45000) {
-                guildCache[user.id].delete(guildId)
-                return
-            }
-            // only notify if we knew they were in this guild
+
+            // no cache = baseline not ready, skip
+            if (!guildCache[user.id]) return
+
+            // wasn't in cache = we never knew them to be in this guild, skip
             if (!guildCache[user.id].has(guildId)) return
             guildCache[user.id].delete(guildId)
+
             const g     = findByProps("getGuild")?.getGuild(guildId)
             const label = getWatchedUser(settings, user.id)?.nick
             const name  = displayName(user)
