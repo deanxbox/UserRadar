@@ -56,6 +56,10 @@ export interface VoiceStateEvent {
         userId: string
         channelId: string | null
         guildId: string
+        selfVideo?: boolean    // camera on
+        selfStream?: boolean   // screen share (Go Live)
+        selfDeaf?: boolean
+        selfMute?: boolean
     }[]
 }
 
@@ -63,6 +67,11 @@ export interface PresenceEvent {
     updates: {
         user: { id: string }
         status: Status
+        client_status?: {
+            desktop?: string
+            mobile?: string
+            web?: string
+        }
         activities: {
             type: number   // 0=playing 2=listening 3=watching 4=custom 5=competing
             name: string
