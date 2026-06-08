@@ -31,7 +31,7 @@ import {
 // Uses DataStore API — survives Discord restarts
 
 const ACTIVITY_LOG_KEY = "UserRadar_ActivityLog_v2"
-const MAX_LOG_ENTRIES = 500 // per user
+const MAX_LOG_ENTRIES = Infinity // unlimited — no cap on history
 
 export type ActivityType =
     | "msg" | "edit" | "delete" | "typing"
@@ -87,9 +87,7 @@ class ActivityStore {
             id: `${entry.uid}_${entry.ts}_${Math.random().toString(36).slice(2, 8)}`,
         }
         this.cache[entry.uid].unshift(fullEntry)
-        if (this.cache[entry.uid].length > MAX_LOG_ENTRIES) {
-            this.cache[entry.uid] = this.cache[entry.uid].slice(0, MAX_LOG_ENTRIES)
-        }
+        // no cap — unlimited history
         await this.save()
         return fullEntry
     }
@@ -153,14 +151,7 @@ export async function logUserActivity(
     return entry
 }
 
-// Legacy in-memory log for backward compat (used by WatchedRow "Recent" tab)
-const activityLog: Record<string, { ts: number; type: string; icon: string; body: string; guildId?: string; channelId?: string; msgId?: string }[]> = {}
-
 function logActivity(uid: string, type: string, icon: string, body: string, guildId?: string, channelId?: string, msgId?: string) {
-    if (!activityLog[uid]) activityLog[uid] = []
-    activityLog[uid].unshift({ ts: Date.now(), type, icon, body, guildId, channelId, msgId })
-    if (activityLog[uid].length > 50) activityLog[uid].pop()
-    // Also persist to DataStore
     logUserActivity(uid, type as ActivityType, icon, body, body, { guildId, channelId, msgId }).catch(() => {})
 }
 
@@ -172,6 +163,9 @@ const statusCache:   Record<string, string>                       = {}  // last 
 const activityCache: Record<string, string | null | undefined>    = {}  // undefined = never seen
 const guildCache:    Record<string, Set<string>>                  = {}  // guilds each user is in
 const vcJoinTime:    Record<string, number>                         = {}  // when each user joined vc
+const clientCache:   Record<string, string | null>                  = {}  // last known client type (desktop/mobile/web)
+const cameraCache:   Record<string, boolean>                        = {}  // last known camera state
+const streamCache:   Record<string, boolean>                        = {}  // last known screen share state
 
 // timestamp set when plugin starts — join/leave events in first 15s are ignored
 // discord fires GUILD_MEMBER_ADD for everyone on reconnect which causes false notifs
@@ -411,6 +405,28 @@ function injectStyles() {
         .ur-flash-green { animation: ur-flash-green 0.5s ease; }
     `
     document.head.appendChild(s)
+}
+
+// client type helpers
+const CLIENT_EMOJI: Record<string, string> = {
+    desktop: "🖥️",
+    mobile:  "📱",
+    web:     "🌐",
+}
+
+function resolveClient(cs?: { desktop?: string; mobile?: string; web?: string } | null): string | null {
+    if (!cs) return null
+    if (cs.mobile)  return "mobile"
+    if (cs.desktop) return "desktop"
+    if (cs.web)     return "web"
+    return null
+}
+
+// returns " · 📱 mobile" etc if we know their platform, empty string otherwise
+function platformSuffix(uid: string): string {
+    const c = clientCache[uid]
+    if (!c) return ""
+    return ` · ${CLIENT_EMOJI[c] || "📡"} ${c}`
 }
 
 const C = {
@@ -1181,7 +1197,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
         }
         load()
         const unsub = onActivityUpdate((uid, entry) => {
-            if (uid === userId) setLogs(prev => [entry, ...prev].slice(0, MAX_LOG_ENTRIES))
+            if (uid === userId) setLogs(prev => [entry, ...prev])
         })
         return unsub
     }, [userId])
@@ -1538,7 +1554,6 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
     const setExp = (v: boolean) => setExpandedId(v ? user.id : null)
     const [copied,   setCopy] = React.useState(false)
     const [ovTab,    setOvTab] = React.useState<OvTab>("messages")
-    const [showLog,  setShowLog] = React.useState(false)
 
     const du   = UserStore.getUser(user.id)
     const name = displayName(du) || user.id
@@ -1697,7 +1712,6 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
     }
 
     const activePreset = detectPreset()
-    const logs = activityLog[user.id] || []
 
     return (
         <div style={{ background: C.bg2, borderRadius: 20, marginBottom: 8, border: `1px solid ${C.border}`, overflow: "hidden" }}>
@@ -1743,49 +1757,6 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                     <LabelInput nick={nick} setNick={setNick} saveNick={saveNick} />
                 </div>
 
-                <div
-                    onClick={(e: any) => { e.stopPropagation(); setShowLog(v => !v); if (!expanded) setExp(true) }}
-                    title="Recent user Activity"
-                    style={{
-                        padding: "5px 12px",
-                        borderRadius: 12,
-                        fontSize: 12,
-                        fontWeight: 700,
-                        cursor: "pointer",
-                        background: showLog ? C.brand : C.bg1,
-                        color: showLog ? C.white : (logs.length > 0 ? C.text : C.muted),
-                        border: `1px solid ${showLog ? C.brand : C.border}`,
-                        transition: "all 150ms cubic-bezier(0.4,0,0.2,1)",
-                        userSelect: "none",
-                        letterSpacing: 0.3,
-                        flexShrink: 0,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                        height: 28,
-                        boxSizing: "border-box",
-                    }}
-                >
-                    <span style={{ display: "flex", alignItems: "center", opacity: 0.9 }}>
-                        <ico.history />
-                    </span>
-                    <span>Recent</span>
-                    <span style={{
-                        fontSize: 10,
-                        fontWeight: 800,
-                        background: showLog ? "rgba(255,255,255,0.2)" : (logs.length > 0 ? C.green : C.bg3),
-                        padding: "2px 6px",
-                        borderRadius: 6,
-                        color: showLog ? C.white : (logs.length > 0 ? C.white : C.muted),
-                        minWidth: 18,
-                        textAlign: "center",
-                        lineHeight: 1,
-                    }}>
-                        {logs.length}
-                    </span>
-                </div>
-
-                
                 <div
                     onClick={(e: any) => {
                         e.stopPropagation();
@@ -1879,21 +1850,21 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                                 {(["messages", "presence", "profile"] as OvTab[]).map(tab => (
                                     <div
                                         key={tab}
-                                        onClick={() => { setOvTab(tab); setShowLog(false) }}
+                                        onClick={() => { setOvTab(tab) }}
                                         style={{
                                             padding: "5px 14px",
                                             borderRadius: 16,
                                             fontSize: 12,
                                             fontWeight: 700,
                                             cursor: "pointer",
-                                            background: ovTab === tab && !showLog ? C.brand : "transparent",
-                                            color: ovTab === tab && !showLog ? C.white : C.muted,
+                                            background: ovTab === tab ? C.brand : "transparent",
+                                            color: ovTab === tab ? C.white : C.muted,
                                             transition: "all 200ms cubic-bezier(0.4,0,0.2,1)",
                                             userSelect: "none",
                                             letterSpacing: 0.3,
                                             position: "relative",
                                             zIndex: 2,
-                                            transform: ovTab === tab && !showLog ? "scale(1.02)" : "scale(1)",
+                                            transform: ovTab === tab ? "scale(1.02)" : "scale(1)",
                                         }}
                                         onMouseEnter={e => {
                                             if (ovTab !== tab) {
@@ -1917,102 +1888,7 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                             <div style={{ flex: 1 }} />
                         </div>
 
-                        {showLog ? (
-                            <div style={{ background: C.bg1, borderRadius: 16, border: `1px solid ${C.border}`, padding: "14px 16px" }}>
-                                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.green, boxShadow: `0 0 6px ${C.green}` }} />
-                                    <div style={{ fontSize: 13, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.8, color: C.header }}>
-                                        Recent user Activity
-                                    </div>
-                                    <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-                                        {logs.length > 0 && (
-                                            <div
-                                                role="button"
-                                                tabIndex={0}
-                                                onClick={() => { delete activityLog[user.id]; setShowLog(false); setTimeout(() => setShowLog(true), 10) }}
-                                                onKeyDown={(e: any) => { if (e.key === "Enter") { delete activityLog[user.id]; setShowLog(false); setTimeout(() => setShowLog(true), 10) } }}
-                                                style={{
-                                                    fontSize: 11,
-                                                    fontWeight: 700,
-                                                    color: C.danger,
-                                                    cursor: "pointer",
-                                                    padding: "4px 12px",
-                                                    borderRadius: 20,
-                                                    border: `1px solid ${C.danger}30`,
-                                                    background: `${C.danger}10`,
-                                                    transition: "all 150ms ease",
-                                                    userSelect: "none",
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    gap: 4,
-                                                    height: 24,
-                                                    boxSizing: "border-box",
-                                                }}
-                                                onMouseEnter={e => {
-                                                    e.currentTarget.style.background = `${C.danger}20`
-                                                    e.currentTarget.style.borderColor = `${C.danger}50`
-                                                }}
-                                                onMouseLeave={e => {
-                                                    e.currentTarget.style.background = `${C.danger}10`
-                                                    e.currentTarget.style.borderColor = `${C.danger}30`
-                                                }}
-                                            >
-                                                <ico.x />
-                                                Clear logs
-                                            </div>
-                                        )}
-                                        <div style={{ fontSize: 11, color: C.muted }}>
-                                            {logs.length} event{logs.length !== 1 ? "s" : ""}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {logs.length === 0 ? (
-                                    <div style={{ fontSize: 14, color: C.muted, padding: "20px 0", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-                                        <div style={{ opacity: 0.4 }}><ico.ghost /></div>
-                                        <span>no recent activity tracked</span>
-                                    </div>
-                                ) : (
-                                    <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }} className="ur-scrollbar">
-                                        {logs.slice(0, 20).map((log, i) => (
-                                            <div
-                                                key={i}
-                                                onClick={() => jumpTo(log.guildId, log.channelId, log.msgId)}
-                                                style={{
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    gap: 12,
-                                                    padding: "8px 12px",
-                                                    borderRadius: 12,
-                                                    cursor: log.channelId ? "pointer" : "default",
-                                                    transition: "background 150ms ease",
-                                                    background: "transparent",
-                                                }}
-                                                onMouseEnter={e => { if (log.channelId) e.currentTarget.style.background = C.hov }}
-                                                onMouseLeave={e => { e.currentTarget.style.background = "transparent" }}
-                                            >
-                                                <span style={{ fontSize: 18, lineHeight: 1, flexShrink: 0 }}>{log.icon}</span>
-                                                <div style={{ flex: 1, minWidth: 0 }}>
-                                                    <div style={{ fontSize: 13, color: C.text, fontWeight: 500, lineHeight: 1.4 }}>
-                                                        {log.body}
-                                                    </div>
-                                                    <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
-                                                        {log.channelId ? `#${ChannelStore.getChannel(log.channelId)?.name || "unknown"} · ` : ""}
-                                                        <span title={exactTime(log.ts)}>{timeAgo(log.ts)}</span>
-                                                    </div>
-                                                </div>
-                                                {log.channelId && (
-                                                    <div style={{ color: C.muted, flexShrink: 0, opacity: 0.5 }}>
-                                                        <ico.external />
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        ) : (
-                            <div>
+                        <div style={{ marginTop: 0 }}>
                                 <div style={{ background: "#313338", borderRadius: 12, border: `1px solid #3f4147`, padding: "16px", marginBottom: 12 }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                                         <div style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.8, color: "#b5bac1" }}>
@@ -2259,7 +2135,6 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                                     </span>
                                 </div>
                             </div>
-                        )}
                     </div>
                 </div>
             </div>
@@ -2802,11 +2677,20 @@ export default definePlugin({
             const allGuilds: string[] = guildMod?.getGuildIds?.() ?? []
 
             for (const wu of getWatchlist(settings)) {
-                // voice
+                // voice + camera/stream
                 try {
                     const vs = vsMod?.getVoiceStateForUser?.(wu.id)
-                    vcCache[wu.id] = vs?.channelId ?? null
-                } catch { vcCache[wu.id] = null }
+                    vcCache[wu.id]     = vs?.channelId ?? null
+                    cameraCache[wu.id] = vs?.selfVideo ?? false
+                    streamCache[wu.id] = vs?.selfStream ?? false
+                } catch { vcCache[wu.id] = null; cameraCache[wu.id] = false; streamCache[wu.id] = false }
+
+                // client type (desktop/mobile/web)
+                try {
+                    const cs = presMod?.getClientStatus?.(wu.id)
+                    if (cs) clientCache[wu.id] = resolveClient(cs)
+                    else clientCache[wu.id] = null
+                } catch { }
 
                 // status + activity
                 try {
@@ -2863,6 +2747,9 @@ export default definePlugin({
         Object.keys(activityCache).forEach(k => delete activityCache[k])
         Object.keys(guildCache).forEach(k => delete guildCache[k])
         Object.keys(vcJoinTime).forEach(k => delete vcJoinTime[k])
+        Object.keys(clientCache).forEach(k => delete clientCache[k])
+        Object.keys(cameraCache).forEach(k => delete cameraCache[k])
+        Object.keys(streamCache).forEach(k => delete streamCache[k])
         pluginStartedAt = 0
         loggedMsgs = null
     },
@@ -3031,7 +2918,7 @@ export default definePlugin({
                 // body format: "Server Name · #channel" or "Direct Message" for DMs
                 notify({
                     title: `${dn} is typing…`,
-                    body: location,
+                    body: location + platformSuffix(userId),
                     icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                     onClick: () => jumpTo(ch?.guild_id, channelId),
                 })
@@ -3045,26 +2932,47 @@ export default definePlugin({
                 if (!isWatched(settings, uid)) continue
                 const old = vcCache[uid]
                 const now = vs.channelId || null
-                if (old === undefined) { vcCache[uid] = now; continue }
-                if (old === now) continue
-                vcCache[uid] = now
-                if (!isFeatureOn(uid, "voice", "globalVoice")) continue
+                const channelChanged = old !== now
+
+                // first time seeing this user — seed caches and skip
+                if (old === undefined) {
+                    vcCache[uid] = now
+                    cameraCache[uid] = vs.selfVideo ?? false
+                    streamCache[uid] = vs.selfStream ?? false
+                    continue
+                }
+
+                // update channel cache
+                if (channelChanged) vcCache[uid] = now
+
+                if (!isFeatureOn(uid, "voice", "globalVoice")) {
+                    // still update camera/stream cache even if feature is off
+                    cameraCache[uid] = vs.selfVideo ?? false
+                    streamCache[uid] = vs.selfStream ?? false
+                    continue
+                }
+
                 const label = getWatchedUser(settings, uid)?.nick
                 const u     = UserStore.getUser(uid)
                 const name  = displayName(u) || uid
                 const dn    = label ? `${label} (${name})` : name
                 const ch    = now ? ChannelStore.getChannel(now) : (old ? ChannelStore.getChannel(old) : null)
                 const chName = ch?.name || "unknown"
+
+                if (!channelChanged) {
+                    // channel didn't change — only here for camera/stream updates, handled below
+                    // fall through to camera/stream detection at the end
+                } else
                 if (!old && now) {
                     vcJoinTime[uid] = Date.now()
                     const guildNameVc = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id)?.name : null
                     notify({
                         title: `${dn} Joined Voice`,
-                        body: guildNameVc ? `${guildNameVc} · #${chName}` : `#${chName}`,
+                        body: (guildNameVc ? `${guildNameVc} · #${chName}` : `#${chName}`) + platformSuffix(uid),
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                         onClick: () => jumpTo(ch?.guild_id, now!),
                     })
-                    logActivity(uid, "voice", "🎙️", `joined #${chName}`, ch?.guild_id, now!)
+                    logActivity(uid, "voice", "🎙️", `joined #${chName}${platformSuffix(uid)}`, ch?.guild_id, now!)
                 } else if (old && !now) {
                     const spent = vcJoinTime[uid] ? Date.now() - vcJoinTime[uid] : 0
                     delete vcJoinTime[uid]
@@ -3091,6 +2999,48 @@ export default definePlugin({
                     })
                     logActivity(uid, "voice", "🎙️", `moved from #${oldCh?.name || "?"} to #${chName}`, ch?.guild_id, now!)
                 }
+
+                // ── screen share / camera detection ──────────────────
+                // runs on every VOICE_STATE_UPDATES regardless of channel change
+                // discord sends a separate event when selfVideo/selfStream flips
+                const currentCh = now ? ChannelStore.getChannel(now) : ch
+                const currentChName = currentCh?.name || chName || "unknown"
+                const currentChId = now || (old ?? undefined)
+                const currentGuildId = currentCh?.guild_id
+
+                if (now) {
+                    // camera
+                    const newCamera = vs.selfVideo ?? false
+                    const oldCamera = cameraCache[uid] ?? false
+                    if (oldCamera !== newCamera) {
+                        cameraCache[uid] = newCamera
+                        notify({
+                            title: newCamera ? `${dn} turned on camera` : `${dn} turned off camera`,
+                            body: `in #${currentChName}`,
+                            icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                            onClick: () => jumpTo(currentGuildId, currentChId),
+                        })
+                        logActivity(uid, "voice", newCamera ? "📷" : "🚫", `${newCamera ? "turned on" : "turned off"} camera in #${currentChName}`, currentGuildId, currentChId)
+                    }
+
+                    // screen share / go live
+                    const newStream = vs.selfStream ?? false
+                    const oldStream = streamCache[uid] ?? false
+                    if (oldStream !== newStream) {
+                        streamCache[uid] = newStream
+                        notify({
+                            title: newStream ? `${dn} started screen sharing` : `${dn} stopped screen sharing`,
+                            body: `in #${currentChName}`,
+                            icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                            onClick: () => jumpTo(currentGuildId, currentChId),
+                        })
+                        logActivity(uid, "voice", newStream ? "🖥️" : "🛑", `${newStream ? "started" : "stopped"} screen sharing in #${currentChName}`, currentGuildId, currentChId)
+                    }
+                } else {
+                    // left vc — reset camera/stream so next join starts fresh
+                    cameraCache[uid] = false
+                    streamCache[uid] = false
+                }
             }
         },
 
@@ -3115,13 +3065,38 @@ export default definePlugin({
                     const dn    = label ? `${label} (${name})` : name
                     notify({
                         title: `${dn} is now ${newStatus}`,
-                        body: `was: ${oldStatus}`,
+                        body: `was: ${oldStatus}${platformSuffix(uid)}`,
                         icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
                         onClick: () => openUserProfile(uid),
                     })
-                    logActivity(uid, "status", STATUS_EMOJI[newStatus] || "🔵", `status changed to ${newStatus} (was ${oldStatus})`)
+                    logActivity(uid, "status", STATUS_EMOJI[newStatus] || "🔵", `status: ${oldStatus} → ${newStatus}${platformSuffix(uid)}`)
                 }
                 statusCache[uid] = newStatus
+
+                // ── client type tracking (mobile/desktop/web) ──────────
+                const newClient = resolveClient((u as any).client_status)
+                const oldClient = clientCache[uid]
+                if (oldClient !== undefined && newClient !== null && oldClient !== newClient && !isStartup) {
+                    clientCache[uid] = newClient
+                    if (isFeatureOn(uid, "status", "globalStatus")) {
+                        const label = getWatchedUser(settings, uid)?.nick
+                        const user  = UserStore.getUser(uid)
+                        const name  = displayName(user) || uid
+                        const dn    = label ? `${label} (${name})` : name
+                        const emoji = CLIENT_EMOJI[newClient] || "📡"
+                        const oldEmoji = oldClient ? (CLIENT_EMOJI[oldClient] || "📡") : ""
+                        notify({
+                            title: `${dn} is on ${newClient}`,
+                            body: oldClient ? `${oldEmoji} ${oldClient} → ${emoji} ${newClient}` : `first seen on ${newClient}`,
+                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                        logActivity(uid, "status", emoji, `${oldClient ? `${oldEmoji} ${oldClient} → ` : ""}${emoji} ${newClient}`)
+                    }
+                } else if (newClient !== null) {
+                    clientCache[uid] = newClient
+                }
+
                 // type 4 = custom status (just emoji + text), skip it
                 // only care about real activities: playing (0), listening (2), watching (3), competing (5)
                 const realAct = (u.activities || []).find((a: any) => a.type !== 4) ?? null
