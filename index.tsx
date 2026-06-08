@@ -213,9 +213,10 @@ const settings = definePluginSettings({
     globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: avatar changes" },
     globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: voice joins / leaves / moves" },
     globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "notify: status changes (spammy, off by default)" },
+    showPlatform:       { type: OptionType.BOOLEAN, default: false,                  description: "show platform (desktop/mobile/web) in notifications (always shown in logs)" },
     globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: server joins / leaves" },
     showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message content in notifications" },
-    previewLen:         { type: OptionType.NUMBER,  default: 120,                    description: "max chars in preview (0 = no limit)" },
+    previewLen:         { type: OptionType.NUMBER,  default: 0,                    description: "max chars in preview (0 = no limit)" },
     quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "mute notifications during certain hours" },
     quietStart:         { type: OptionType.STRING,  default: "23:00",                description: "quiet hours start (24h, e.g. 23:00)" },
     quietEnd:           { type: OptionType.STRING,  default: "07:00",                description: "quiet hours end (24h, e.g. 07:00)" },
@@ -409,24 +410,34 @@ function injectStyles() {
 
 // client type helpers
 const CLIENT_EMOJI: Record<string, string> = {
-    desktop: "🖥️",
-    mobile:  "📱",
-    web:     "🌐",
+    desktop:  "🖥️",
+    mobile:   "📱",
+    web:      "🌐",
+    embedded: "🎮",
+    vr:       "🥽",
 }
 
-function resolveClient(cs?: { desktop?: string; mobile?: string; web?: string } | null): string | null {
+function resolveClient(cs?: Record<string, string> | null): string | null {
     if (!cs) return null
-    if (cs.mobile)  return "mobile"
-    if (cs.desktop) return "desktop"
-    if (cs.web)     return "web"
-    return null
+    if (cs.mobile)   return "mobile"
+    if (cs.desktop)  return "desktop"
+    if (cs.web)      return "web"
+    if (cs.embedded) return "embedded"
+    if (cs.vr)       return "vr"
+    const first = Object.keys(cs).find(k => cs[k])
+    return first ?? null
 }
 
 // returns " · 📱 mobile" etc if we know their platform, empty string otherwise
-function platformSuffix(uid: string): string {
+const CLIENT_LABEL_MAP: Record<string, string> = { desktop: "Desktop", mobile: "Mobile", web: "Web", embedded: "Console", vr: "VR" }
+function platformSuffixLog(uid: string): string {
     const c = clientCache[uid]
     if (!c) return ""
-    return ` · ${CLIENT_EMOJI[c] || "📡"} ${c}`
+    return ` · on ${CLIENT_EMOJI[c] || "📡"} ${CLIENT_LABEL_MAP[c] || c}`
+}
+function platformSuffix(uid: string): string {
+    if (!settings.store.showPlatform) return ""
+    return platformSuffixLog(uid)
 }
 
 const C = {
@@ -2688,7 +2699,7 @@ export default definePlugin({
                 // client type (desktop/mobile/web)
                 try {
                     const cs = presMod?.getClientStatus?.(wu.id)
-                    if (cs) clientCache[wu.id] = resolveClient(cs)
+                    if (cs) clientCache[wu.id] = resolveClient(cs as any)
                     else clientCache[wu.id] = null
                 } catch { }
 
@@ -2972,7 +2983,7 @@ export default definePlugin({
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                         onClick: () => jumpTo(ch?.guild_id, now!),
                     })
-                    logActivity(uid, "voice", "🎙️", `joined #${chName}${platformSuffix(uid)}`, ch?.guild_id, now!)
+                    logActivity(uid, "voice", "🎙️", `joined #${chName}${platformSuffixLog(uid)}`, ch?.guild_id, now!)
                 } else if (old && !now) {
                     const spent = vcJoinTime[uid] ? Date.now() - vcJoinTime[uid] : 0
                     delete vcJoinTime[uid]
@@ -3057,24 +3068,27 @@ export default definePlugin({
 
                 // always update cache regardless of startup — so baseline is correct
                 // but don't notify during startup
-                const goingOffline = newStatus === "offline" && Date.now() - pluginStartedAt < 90000
-                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup && !goingOffline) {
+                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup) {
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
                     const name  = displayName(user) || uid
                     const dn    = label ? `${label} (${name})` : name
+                    const STATUS_LABEL: Record<string, string> = { online: "Online", idle: "Away", dnd: "Do Not Disturb", offline: "Offline", invisible: "Invisible" }
+                    const c = clientCache[uid]
+                    const platFrom = settings.store.showPlatform && c ? ` from ${CLIENT_LABEL_MAP[c] || c}` : ""
+                    const platLog = platformSuffixLog(uid)
                     notify({
                         title: `${dn} is now ${newStatus}`,
-                        body: `was: ${oldStatus}${platformSuffix(uid)}`,
+                        body: `was: ${STATUS_LABEL[oldStatus] || oldStatus}${platFrom}`,
                         icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
                         onClick: () => openUserProfile(uid),
                     })
-                    logActivity(uid, "status", STATUS_EMOJI[newStatus] || "🔵", `status: ${oldStatus} → ${newStatus}${platformSuffix(uid)}`)
+                    logActivity(uid, "status", STATUS_EMOJI[newStatus] || "🔵", `${STATUS_LABEL[oldStatus] || oldStatus} → ${STATUS_LABEL[newStatus] || newStatus}${platLog}`)
                 }
                 statusCache[uid] = newStatus
 
                 // ── client type tracking (mobile/desktop/web) ──────────
-                const newClient = resolveClient((u as any).client_status)
+                const newClient = resolveClient((u as any).client_status ?? (u as any).clientStatus)
                 const oldClient = clientCache[uid]
                 if (oldClient !== undefined && newClient !== null && oldClient !== newClient && !isStartup) {
                     clientCache[uid] = newClient
@@ -3085,9 +3099,10 @@ export default definePlugin({
                         const dn    = label ? `${label} (${name})` : name
                         const emoji = CLIENT_EMOJI[newClient] || "📡"
                         const oldEmoji = oldClient ? (CLIENT_EMOJI[oldClient] || "📡") : ""
+                        const CLIENT_LABEL: Record<string, string> = { desktop: "Desktop", mobile: "Mobile", web: "Web" }
                         notify({
-                            title: `${dn} is on ${newClient}`,
-                            body: oldClient ? `${oldEmoji} ${oldClient} → ${emoji} ${newClient}` : `first seen on ${newClient}`,
+                            title: `${dn} — ${CLIENT_LABEL[newClient] || newClient}`,
+                            body: oldClient ? `${oldEmoji} ${CLIENT_LABEL[oldClient] || oldClient} → ${emoji} ${CLIENT_LABEL[newClient] || newClient}` : `Now on ${CLIENT_LABEL[newClient] || newClient}`,
                             icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
                             onClick: () => openUserProfile(uid),
                         })
