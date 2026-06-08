@@ -1,6 +1,5 @@
 // store.ts — k1ng_op
 // watchlist crud + misc helpers
-// split out so index.tsx doesn't hit 3000 lines
 
 import { Logger } from "@utils/Logger"
 import { WatchedUser } from "./types"
