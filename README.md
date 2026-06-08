@@ -1,102 +1,133 @@
 # 👁 UserRadar
 
-A Vencord plugin that tracks users across Discord and notifies you when they do stuff.
+A Vencord / Equicord plugin that tracks users across Discord and notifies you when they do stuff.
 
 ---
 
 ## Features
 
-### Message Tracking
-- **Messages** — Get notified when a watched user sends a message
-- **Edits** — Get notified when they edit a message
-- **Deletes** — Get notified when they delete a message (works best with `vc-message-logger-enhanced` for deleted content)
-- **Typing** — Get notified when they start typing in a channel
+### 💬 Messages
+- New messages
+- Edits
+- Deletes *(content requires `vc-message-logger-enhanced`)*
+- Typing indicators
 
-### Profile Tracking
-- **Profile Changes** — Bio, banner, username, display name, accent color, banner color
-- **Avatar Changes** — Separate notification with their new avatar as the icon
+### 👤 Profile
+- Bio, banner, username, display name, accent color changes
+- Avatar changes *(separate notification with new avatar as icon)*
 
-### Voice & Activity
-- **Voice** — Joins, leaves, and channel moves
-- **Status** — Online, idle, dnd, offline changes (off by default, spammy)
-- **Activity** — Games, Spotify, Twitch/YouTube streams, competitions (off by default, spammy)
+### 🎙️ Voice
+- Joins, leaves, channel moves
+- Camera on / off
+- Screen share / Go Live start / stop
 
-### Server Events
-- **Boosts** — When they boost a server
-- **Joins/Leaves** — When they join or leave a server you're in
+### 🟢 Presence
+- Status changes — Online, Away, Do Not Disturb, Offline
+- Platform detection — Desktop 🖥️, Mobile 📱, Web 🌐, Console 🎮, VR 🥽
+- Activity — games, Spotify, Twitch / YouTube streams, competitions
+
+### 🏠 Server Events
+- Server joins and leaves
+
+---
+
+## Notifications
+
+### Status notification format
+```
+k1ng_op is now offline
+was: Do Not Disturb from Desktop
+```
+The `from Desktop` part only shows when **Show Platform** is enabled. Platform is always recorded in the activity log regardless.
+
+### Platform support
+Discord exposes which client a user is on via presence data. UserRadar detects:
+
+| Platform | Emoji | Discord internal name |
+|---|---|---|
+| Desktop | 🖥️ | `desktop` |
+| Mobile | 📱 | `mobile` |
+| Web | 🌐 | `web` |
+| Console | 🎮 | `embedded` |
+| VR | 🥽 | `vr` |
+
+> Platform detection requires **Status** notifications to be enabled (globally or per-user), since platform data comes from presence events.
 
 ---
 
 ## Settings
 
 | Setting | Default | Description |
-|---------|---------|-------------|
+|---|---|---|
 | `globalMsgs` | ✅ | Notify on new messages |
-| `globalEdits` | ✅ | Notify on edits |
-| `globalDeletes` | ✅ | Notify on deletes |
-| `globalTyping` | ✅ | Notify on typing |
+| `globalEdits` | ✅ | Notify on message edits |
+| `globalDeletes` | ✅ | Notify on deleted messages |
+| `globalTyping` | ✅ | Notify when typing starts |
 | `globalProfile` | ✅ | Notify on profile changes |
 | `globalAvatar` | ✅ | Notify on avatar changes |
-| `globalVoice` | ✅ | Notify on voice activity |
-| `globalStatus` | ❌ | Notify on status changes |
-| `globalBoosts` | ✅ | Notify on server boosts |
-| `globalJoins` | ✅ | Notify on server joins/leaves |
-| `globalActivity` | ❌ | Notify on activity changes |
+| `globalVoice` | ✅ | Notify on voice activity (joins, leaves, moves, camera, screen share) |
+| `globalStatus` | ❌ | Notify on status changes *(spammy — off by default)* |
+| `showPlatform` | ❌ | Show platform in notifications *(always shown in activity logs)* |
+| `globalJoins` | ✅ | Notify on server joins / leaves |
 | `showPreview` | ✅ | Show message content in notifications |
-| `previewLen` | 120 | Max characters in message preview |
+| `previewLen` | `0` | Max characters in message preview (`0` = no limit) |
 | `quietHours` | ❌ | Silence notifications during set hours |
-| `quietStart` | 23:00 | Quiet hours start |
-| `quietEnd` | 07:00 | Quiet hours end |
-| `skipCurrentChannel` | ✅ | Skip notification if you're already in that channel |
-| `debugLog` | ❌ | Log all events to console |
+| `quietStart` | `23:00` | Quiet hours start time |
+| `quietEnd` | `07:00` | Quiet hours end time |
+| `skipCurrentChannel` | ✅ | Skip notification if you're already viewing that channel |
+| `showToolbarIcon` | ✅ | Show watchlist button in the Discord toolbar |
+| `debugLog` | ❌ | Log all events to the console |
 
 ---
 
 ## Per-User Overrides
 
-Every tracked user has individual override toggles accessible from the watchlist modal. Click any user row to expand their override panel and toggle specific tracking features per-user.
+Click any user row in the watchlist to expand their override panel. Every tracking feature can be toggled individually per user, independent of global settings.
 
-Overrides available: Messages, Edits, Deletes, Typing, Profile, Avatar, Voice, Status, Boosts, Joins, Activity
+**Quick presets:**
+- **Stalker** — everything on
+- **Lite** — messages, edits, deletes, typing, avatar, voice
+- **Silent** — all notifications off
+
+Overrides: Messages, Edits, Deletes, Typing, Profile, Avatar, Voice, Status, Activity, Joins
+
+---
+
+## Activity Log
+
+Every event is logged and persisted to disk (unlimited history). Click **Activity** on any user row to open their full log.
+
+- Filterable by type: All, Messages, Voice, Status, Profile, Activity
+- Platform always shown in log entries regardless of the `showPlatform` toggle
+- Searchable by keyword
 
 ---
 
 ## How to Use
 
-1. **Right-click any user** → "👁 Watch User" to add them
-2. **Open the watchlist** from plugin settings or right-click menu
-3. **Paste a User ID** in the "Add User" section to track anyone
-4. **Set labels** for users (private, only you see them)
-5. **Toggle per-user overrides** by clicking a user row
-
----
-
-## Requirements
-
-- [Vencord](https://vencord.dev/) installed
-- Optional: `vc-message-logger-enhanced` for deleted message content
+1. **Right-click any user** → *👁 Watch User*
+2. **Open the watchlist** from the toolbar icon or the right-click menu
+3. **Add by ID** — paste any user ID in the Add User field to track someone not in your server
+4. **Set a label** — private nickname only you see (e.g. `ex`, `snitch`, `rat from work`)
+5. **Expand a row** — set per-user overrides and view their activity log
 
 ---
 
 ## Install
 
-This plugin requires **3 files** in your Vencord userplugins folder:
-
-```
-src/userplugins/UserRadar/
-├── index.tsx    # main plugin logic + watchlist modal UI
-├── store.ts     # state management helpers (getWatchlist, addUser, removeUser, etc.)
-└── types.ts     # TypeScript type definitions
-```
-
-1. Create the folder `src/userplugins/UserRadar/`
-2. Drop all 3 files into it
-3. Build:
 ```bash
+# drop files into your userplugins folder then build
 pnpm build
 ```
-4. Reload Discord (Ctrl+R)
 
-> ⚠️ **Note:** The plugin will **not** work with just `index.tsx` alone. `store.ts` and `types.ts` are required dependencies that handle watchlist persistence and type definitions.
+Reload Discord with `Ctrl+R`.
+
+---
+
+## Requirements
+
+- [Vencord](https://vencord.dev/) or [Equicord](https://github.com/Equicord/Equicord)
+- Optional: `vc-message-logger-enhanced` for deleted message content
 
 ---
 
