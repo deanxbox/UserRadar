@@ -1193,16 +1193,6 @@ function getActivityIcon(entry: ActivityEntry): string {
     if (body.includes("youtube music") || title.includes("youtube music")) return "🎶"
     if (body.includes("soundcloud") || title.includes("soundcloud")) return "☁️"
 
-    if (body.includes("valorant")) return "🔫"
-    if (body.includes("roblox")) return "🧱"
-    if (body.includes("minecraft")) return "⛏️"
-    if (body.includes("fortnite")) return "🪂"
-    if (body.includes("league") || body.includes("lol")) return "⚔️"
-    if (body.includes("genshin")) return "🌟"
-    if (body.includes("cs") || body.includes("counter-strike")) return "🔫"
-    if (body.includes("overwatch")) return "🎯"
-    if (body.includes("rocket league")) return "🚗"
-    if (body.includes("apex")) return "🔺"
     if (type === "game_start" || type === "game_stop") return "🎮"
     if (type === "activity" && activityType === 0) return "🎮"
 
