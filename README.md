@@ -2,6 +2,8 @@
 
 A powerful [Vencord](https://vencord.dev/) plugin for tracking specific Discord users and logging their activity — messages, edits, deletes, typing, profile changes, voice channel activity, status changes, game/music activity, and server joins/leaves.
 
+> ⚠️ **Upgrading from a previous version?** If you are updating from an older version of UserRadar, please **clear all activity logs for all users** before using the new session tracking features. Old log entries are not compatible with the new session timeline and metadata format. If this is your first time installing UserRadar, you can ignore this message.
+
 ---
 
 ## Features
@@ -41,7 +43,7 @@ A powerful [Vencord](https://vencord.dev/) plugin for tracking specific Discord 
 2. Navigate to your Vencord userplugins folder:
    - **Vencord Desktop**: `%AppData%\Vencord\src\userplugins\`
 3. Create a folder named `UserRadar`
-4. Copy `index.tsx`, `store.ts`, and `types.ts` into the folder
+4. Copy `index.tsx`, `store.ts`, and `types.ts` into the folder and `build`
 5. Restart Discord — the plugin will appear in your Vencord plugins list
 
 ---
