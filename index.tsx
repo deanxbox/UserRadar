@@ -13,12 +13,13 @@ import { openModal, ModalRoot, ModalHeader, ModalContent, ModalFooter, ModalClos
 import definePlugin, { OptionType } from "@utils/types"
 import { findByProps } from "@webpack"
 import { Button, ChannelStore, Menu, MessageStore, React, RestAPI, Text, TextInput, Toasts, UserStore } from "@webpack/common"
+
 import { Message } from "discord-types/general"
 
 import {
     addUser, camelize, displayName, featureOn,
     getWatchedUser, getWatchlist, inQuietHours,
-    isWatched, log, patchUser, removeUser, STATUS_EMOJI
+    isWatched, log, patchUser, removeUser
 } from "./store"
 
 import {
@@ -27,12 +28,14 @@ import {
     TypingEvent, VoiceStateEvent, WatchedUser
 } from "./types"
 
-// ===== PERSISTENT ACTIVITY LOG SYSTEM =====
-// Uses DataStore API — survives Discord restarts
-
+const STATUS_EMOJI_LOCAL: Record<string, string> = {
+    online: "🟢",
+    idle: "🌙",
+    dnd: "🔴",
+    offline: "⚫",
+    invisible: "⚫",
+}
 const ACTIVITY_LOG_KEY = "UserRadar_ActivityLog_v2"
-const MAX_LOG_ENTRIES = Infinity // unlimited — no cap on history
-
 export type ActivityType =
     | "msg" | "edit" | "delete" | "typing"
     | "status" | "activity" | "voice"
@@ -41,6 +44,7 @@ export type ActivityType =
     | "online" | "offline" | "idle" | "dnd"
     | "game_start" | "game_stop" | "spotify" | "streaming"
     | "vc_join" | "vc_leave" | "vc_move"
+    | "session"
 
 export interface ActivityEntry {
     id: string
@@ -54,6 +58,10 @@ export interface ActivityEntry {
     channelId?: string
     msgId?: string
     metadata?: Record<string, any>
+}
+
+function sessionKey(uid: string, type: string, channelId?: string): string {
+    return channelId ? `${uid}_${type}_${channelId}` : `${uid}_${type}`
 }
 
 class ActivityStore {
@@ -87,7 +95,6 @@ class ActivityStore {
             id: `${entry.uid}_${entry.ts}_${Math.random().toString(36).slice(2, 8)}`,
         }
         this.cache[entry.uid].unshift(fullEntry)
-        // no cap — unlimited history
         await this.save()
         return fullEntry
     }
@@ -114,11 +121,33 @@ class ActivityStore {
             return true
         } catch { return false }
     }
+
+    async updateLog(uid: string, logId: string, updates: Partial<ActivityEntry>) {
+        await this.load()
+        const logs = this.cache[uid]
+        if (!logs) return false
+        const idx = logs.findIndex(l => l.id === logId)
+        if (idx === -1) return false
+                const updated = { ...logs[idx], ...updates, ts: Date.now() }
+        logs.splice(idx, 1)
+        logs.unshift(updated)
+        await this.save()
+                emitActivityUpdate(uid, updated)
+        return true
+    }
+
+    async removeLog(uid: string, logId: string) {
+        await this.load()
+        const logs = this.cache[uid]
+        if (!logs) return false
+        this.cache[uid] = logs.filter(l => l.id !== logId)
+        await this.save()
+        return true
+    }
 }
 
 export const activityStore = new ActivityStore()
 
-// Live update listeners for real-time UI
 const activityListeners = new Set<(uid: string, entry: ActivityEntry) => void>()
 
 export function onActivityUpdate(cb: (uid: string, entry: ActivityEntry) => void) {
@@ -130,7 +159,6 @@ function emitActivityUpdate(uid: string, entry: ActivityEntry) {
     activityListeners.forEach(cb => cb(uid, entry))
 }
 
-// Enhanced logger — replaces old logActivity()
 export async function logUserActivity(
     uid: string,
     type: ActivityType,
@@ -155,31 +183,27 @@ function logActivity(uid: string, type: string, icon: string, body: string, guil
     logUserActivity(uid, type as ActivityType, icon, body, body, { guildId, channelId, msgId }).catch(() => {})
 }
 
-// ===== END ACTIVITY LOG SYSTEM =====
-// these all reset when plugin stops, pre-populated in start() to avoid false positives
 const profileCache:  Record<string, any>                          = {}
-const vcCache:       Record<string, string | null>                = {}  // last known vc per user
-const statusCache:   Record<string, string>                       = {}  // last known status
-const activityCache: Record<string, string | null | undefined>    = {}  // undefined = never seen
-const guildCache:    Record<string, Set<string>>                  = {}  // guilds each user is in
-const vcJoinTime:    Record<string, number>                         = {}  // when each user joined vc
-const clientCache:   Record<string, string | null>                  = {}  // last known client type (desktop/mobile/web)
-const cameraCache:   Record<string, boolean>                        = {}  // last known camera state
-const streamCache:   Record<string, boolean>                        = {}  // last known screen share state
+const vcCache:       Record<string, string | null>                = {}
+const statusCache:   Record<string, string>                       = {}
+const activityCache: Record<string, string | null | undefined>    = {}
+const guildCache:    Record<string, Set<string>>                  = {}
+const vcJoinTime:    Record<string, number>                       = {}
+const clientCache:   Record<string, string | null>                = {}
+const cameraCache:   Record<string, boolean>                      = {}
+const streamCache:   Record<string, boolean>                      = {}
+const statusSessionCache: Record<string, { startTime: number; startStatus: string; changes: { status: string; ts: number }[]; platforms: { platform: string; ts: number }[] } | null> = {}  // status session tracking
 
-// timestamp set when plugin starts — join/leave events in first 15s are ignored
-// discord fires GUILD_MEMBER_ADD for everyone on reconnect which causes false notifs
+const activeSessions: Record<string, { logId: string; startTime: number; channelId?: string; guildId?: string; metadata?: any }> = {}
+
 let pluginStartedAt = 0
 
 let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
 
-// grab the logged messages store from message logger enhanced
-// dynamic import doesn't work in vencord's plugin system so we check a few places
 function tryLoadLoggedMsgs() {
     if (loggedMsgs) return loggedMsgs
 
-    // try the plugin registry first — works regardless of folder name
     try {
         const plugin = (Vencord as any)?.Plugins?.plugins?.["vc-message-logger-enhanced"]
             ?? (Vencord as any)?.Plugins?.plugins?.["MessageLoggerEnhanced"]
@@ -188,7 +212,6 @@ function tryLoadLoggedMsgs() {
         if (plugin?.store?.loggedMessages) { loggedMsgs = plugin.store.loggedMessages; return loggedMsgs }
     } catch { }
 
-    // fallback: scan webpack chunks
     try {
         const { wreq } = (window as any).webpackChunkdiscord_app?.find?.(
             (x: any) => x?.[1]?.["loggedMessages"]
@@ -199,33 +222,28 @@ function tryLoadLoggedMsgs() {
     return null
 }
 
-// settings
-
 const settings = definePluginSettings({
     watchlist:          { type: OptionType.STRING,  hidden: true,  default: "[]",    description: "watchlist json — managed by the ui, don't touch" },
     globalPresetMode:   { type: OptionType.STRING,  hidden: true,  default: "custom",               description: "global preset mode" },
     installedSha:       { type: OptionType.STRING,  hidden: true,  default: "none",  description: "installed commit sha" },
-    globalMsgs:         { type: OptionType.BOOLEAN, default: true,                   description: "notify: messages" },
-    globalEdits:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: edits" },
-    globalDeletes:      { type: OptionType.BOOLEAN, default: true,                   description: "notify: deletes (needs vc-message-logger-enhanced for content)" },
-    globalTyping:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: typing" },
-    globalProfile:      { type: OptionType.BOOLEAN, default: true,                   description: "notify: profile changes (bio, banner, username)" },
-    globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "notify: avatar changes" },
-    globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: voice joins / leaves / moves" },
-    globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "notify: status changes (spammy, off by default)" },
-    showPlatform:       { type: OptionType.BOOLEAN, default: false,                  description: "show platform (desktop/mobile/web) in notifications (always shown in logs)" },
-    globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "notify: server joins / leaves" },
-    showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message content in notifications" },
-    previewLen:         { type: OptionType.NUMBER,  default: 0,                    description: "max chars in preview (0 = no limit)" },
-    quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "mute notifications during certain hours" },
+    globalMsgs:         { type: OptionType.BOOLEAN, default: true,                   description: "messages" },
+    globalEdits:        { type: OptionType.BOOLEAN, default: true,                   description: "edits" },
+    globalDeletes:      { type: OptionType.BOOLEAN, default: true,                   description: "deletes (needs msg-logger-enhanced)" },
+    globalTyping:       { type: OptionType.BOOLEAN, default: true,                   description: "typing" },
+    globalProfile:      { type: OptionType.BOOLEAN, default: true,                   description: "profile changes" },
+    globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "avatar changes" },
+    globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "voice" },
+    globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "status (spammy)" },
+    globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "server joins/leaves" },
+    showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message preview" },
+    previewLen:         { type: OptionType.NUMBER,  default: 0,                    description: "preview length (0 = unlimited)" },
+    quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "quiet hours" },
     quietStart:         { type: OptionType.STRING,  default: "23:00",                description: "quiet hours start (24h, e.g. 23:00)" },
     quietEnd:           { type: OptionType.STRING,  default: "07:00",                description: "quiet hours end (24h, e.g. 07:00)" },
-    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,                   description: "skip notification if already in that channel" },
-    debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "log all events to console" },
-    showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "show watchlist icon in discord toolbar" },
+    skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,                   description: "skip if already in that channel" },
+    debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "debug logging" },
+    showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "toolbar icon" },
 })
-
-// notification helpers
 
 function trunc(s: string, max: number) {
     return max > 0 && s.length > max ? s.slice(0, max) + "…" : s
@@ -241,7 +259,6 @@ function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
     if (channelId) findByProps("selectChannel")?.selectChannel({ guildId: guildId ?? "@me", channelId, messageId: msgId })
 }
 
-// checks if a feature is on for a specific user, respects preset mode and per-user overrides
 function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globalKey: string): boolean {
     if (!isWatched(settings, uid)) return false
     const mode = settings.store.globalPresetMode ?? "custom"
@@ -256,14 +273,12 @@ function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globa
     return featureOn(settings, uid, userKey, globalKey)
 }
 
-// debounce map — prevents exact same notification firing twice within 1.5s
-// this catches cases where two flux events fire for the same action (e.g. MESSAGE_CREATE + USER_UPDATE)
 const _notifDebounce: Record<string, number> = {}
 
 function notify(opts: { title: string; body: string; icon?: string; onClick?: () => void }) {
     if (inQuietHours(settings)) return
+    if (settings.store.globalPresetMode === "silent") return
 
-    // dedupe: skip if exact same title+body was shown in last 1.5s
     const key = `${opts.title}|${opts.body}`
     const now = Date.now()
     if (_notifDebounce[key] && now - _notifDebounce[key] < 1500) return
@@ -273,9 +288,6 @@ function notify(opts: { title: string; body: string; icon?: string; onClick?: ()
     Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
 }
 
-// cdn url helpers
-// building these manually bc getAvatarURL() changes signature every few discord updates
-
 function avatarUrl(id: string, hash?: string | null, size = 80): string {
     try {
         if (hash) return `https://cdn.discordapp.com/avatars/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=${size}`
@@ -284,8 +296,6 @@ function avatarUrl(id: string, hash?: string | null, size = 80): string {
         return `https://cdn.discordapp.com/embed/avatars/${i}.png`
     } catch { return "https://cdn.discordapp.com/embed/avatars/0.png" }
 }
-
-function safeAvatar(id: string, hash?: string | null, size = 80) { return avatarUrl(id, hash, size) }
 
 function bannerUrl(id: string, hash?: string | null): string | null {
     if (!hash) return null
@@ -299,28 +309,19 @@ function hexColor(n?: number | null): string | null {
 
 const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
 
-// profile change detection
-// only track text fields — color fields (accentColor, bannerColor) removed bc they
-// cause constant false positives from null/0/undefined endpoint inconsistencies
-
 const PROFILE_TEXT = ["username", "globalName", "bio", "banner"] as const
 const FIELD_NAME: Record<string, string> = {
     username: "username", globalName: "display name",
     bio: "bio", banner: "banner",
 }
 
-// diff a fresh profile against what we have cached and notify on any real changes
 function checkProfileChanged(uid: string, fresh: any) {
     if (!isWatched(settings, uid)) return
     const old = profileCache[uid]
     if (!old) {
-        // no baseline yet — just store it, never notify on first fetch
         profileCache[uid] = fresh
         return
     }
-    // only poll (pollProfiles) can trigger this now
-    // USER_PROFILE_FETCH_SUCCESS just sets baseline, USER_UPDATE is ws-only
-    // so no startup false positives are possible here
     if (fresh.user?.avatar !== old.user?.avatar) {
         if (isFeatureOn( uid, "avatar", "globalAvatar")) {
             const name  = displayName(fresh.user)
@@ -349,14 +350,13 @@ function checkProfileChanged(uid: string, fresh: any) {
         notify({
             title: `${dn} updated their profile`,
             body: changed.map(f => FIELD_NAME[f] ?? f).join(", "),
-            icon: u ? safeAvatar(u.id, (u as any).avatar) : undefined,
+            icon: u ? avatarUrl(u.id, (u as any).avatar) : undefined,
             onClick: () => openUserProfile(uid),
         })
     }
     profileCache[uid] = fresh
 }
 
-// poll profiles every 5 mins — discord doesn't push bio/banner changes over websocket
 async function pollProfiles() {
     const list = getWatchlist(settings)
     if (!list.length) return
@@ -371,8 +371,6 @@ async function pollProfiles() {
         await new Promise(r => setTimeout(r, 1500))
     }
 }
-
-// modal ui
 
 const STYLE_ID = "ur-s9"
 function injectStyles() {
@@ -390,10 +388,18 @@ function injectStyles() {
         .ur-expand.open { grid-template-rows:1fr; }
         .ur-expand > div { overflow:hidden; }
         .ur-row-hover:hover { background:rgba(255,255,255,0.06); }
-        .ur-scrollbar::-webkit-scrollbar { width:6px; }
-        .ur-scrollbar::-webkit-scrollbar-track { background:#232428;border-radius:3px; }
-        .ur-scrollbar::-webkit-scrollbar-thumb { background:#3f4147;border-radius:3px; }
+
+        /* Discord-style thin scrollbar - only visible on hover */
+        .ur-scrollbar::-webkit-scrollbar { width:4px; height:4px; }
+        .ur-scrollbar::-webkit-scrollbar-track { background:transparent; }
+        .ur-scrollbar::-webkit-scrollbar-thumb { background:transparent; border-radius:4px; }
+        .ur-scrollbar:hover::-webkit-scrollbar-thumb { background:#3f4147; }
         .ur-scrollbar::-webkit-scrollbar-thumb:hover { background:#4a4a6e; }
+
+        /* Firefox scrollbar */
+        .ur-scrollbar { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+        .ur-scrollbar:hover { scrollbar-color: #3f4147 transparent; }
+
         .ur-typing-dot { animation: ur-typing 1.4s infinite ease-in-out both; }
         .ur-typing-dot:nth-child(1) { animation-delay: -0.32s; }
         .ur-typing-dot:nth-child(2) { animation-delay: -0.16s; }
@@ -404,13 +410,16 @@ function injectStyles() {
         .ur-pulse { animation: ur-pulse 2s infinite; }
         @keyframes ur-flash-green { 0% { background: #248046; } 100% { background: #5865f2; } }
         .ur-flash-green { animation: ur-flash-green 0.5s ease; }
+
+        /* Activity log modal specific - prevent horizontal scroll */
+        .ur-activity-modal { overflow-x: hidden !important; }
+        .ur-activity-modal * { max-width: 100%; box-sizing: border-box; }
     `
     document.head.appendChild(s)
 }
 
-// client type helpers
 const CLIENT_EMOJI: Record<string, string> = {
-    desktop:  "🖥️",
+    desktop:  "💻",
     mobile:   "📱",
     web:      "🌐",
     embedded: "🎮",
@@ -428,16 +437,11 @@ function resolveClient(cs?: Record<string, string> | null): string | null {
     return first ?? null
 }
 
-// returns " · 📱 mobile" etc if we know their platform, empty string otherwise
 const CLIENT_LABEL_MAP: Record<string, string> = { desktop: "Desktop", mobile: "Mobile", web: "Web", embedded: "Console", vr: "VR" }
 function platformSuffixLog(uid: string): string {
     const c = clientCache[uid]
     if (!c) return ""
     return ` · on ${CLIENT_EMOJI[c] || "📡"} ${CLIENT_LABEL_MAP[c] || c}`
-}
-function platformSuffix(uid: string): string {
-    if (!settings.store.showPlatform) return ""
-    return platformSuffixLog(uid)
 }
 
 const C = {
@@ -487,24 +491,44 @@ const ico = {
     history:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
     monitor:  () => <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
     preview:  () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+    catAll:       () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>,
+    catMsg:       () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
+    catEdit:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4L18.5 2.5z"/></svg>,
+    catDelete:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>,
+    catTyping:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="18" x2="20" y2="18"/></svg>,
+    catStatus:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>,
+    catVoice:     () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>,
+    catAvatar:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>,
+    catProfile:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
+    catActivity:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
+
+    location: () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>,
+    clock:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+    filter:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
+    stats:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>,
+    download: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+    upload:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
+    clear:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>,
+    calendar: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
+
 }
 
 const CtxEyeIcon = () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-        <circle cx="12" cy="12" r="3"/>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: 18, height: 18 }}>
+        <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+        <path fillRule="evenodd" d="M1.323 11.447C2.811 6.976 7.028 3.75 12.001 3.75c4.97 0 9.185 3.223 10.675 7.69.12.362.12.752 0 1.113-1.487 4.471-5.705 7.697-10.677 7.697-4.97 0-9.186-3.223-10.675-7.69a1.762 1.762 0 0 1 0-1.113ZM17.25 12a5.25 5.25 0 1 1-10.5 0 5.25 5.25 0 0 1 10.5 0Z" clipRule="evenodd" />
     </svg>
 )
 const CtxEyeOffIcon = () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
-        <line x1="1" y1="1" x2="23" y2="23"/>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: 18, height: 18 }}>
+        <path d="M3.53 2.47a.75.75 0 0 0-1.06 1.06l18 18a.75.75 0 1 0 1.06-1.06l-18-18ZM22.676 12.553a11.249 11.249 0 0 1-2.631 4.31l-3.099-3.099a5.25 5.25 0 0 0-6.71-6.71L7.759 4.577a11.217 11.217 0 0 1 4.242-.827c4.97 0 9.185 3.223 10.675 7.69.12.362.12.752 0 1.113Z" />
+        <path d="M15.75 12c0 .18-.013.357-.037.53l-4.244-4.243A3.75 3.75 0 0 1 15.75 12ZM12.53 15.713l-4.243-4.244a3.75 3.75 0 0 0 4.244 4.243Z" />
+        <path d="M6.75 12c0-.619.107-1.213.304-1.764l-3.1-3.1a11.25 11.25 0 0 0-2.63 4.31c-.12.362-.12.752 0 1.114 1.489 4.467 5.704 7.69 10.675 7.69 1.5 0 2.933-.294 4.242-.827l-2.477-2.477A5.25 5.25 0 0 1 6.75 12Z" />
     </svg>
 )
 const CtxGearIcon = () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="3"/>
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: 18, height: 18 }}>
+        <path fillRule="evenodd" d="M2.25 5.25a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3V15a3 3 0 0 1-3 3h-3v.257c0 .597.237 1.17.659 1.591l.621.622a.75.75 0 0 1-.53 1.28h-9a.75.75 0 0 1-.53-1.28l.621-.622a2.25 2.25 0 0 0 .659-1.59V18h-3a3 3 0 0 1-3-3V5.25Zm1.5 0v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5Z" clipRule="evenodd" />
     </svg>
 )
 
@@ -539,22 +563,30 @@ type LookupStage =
 function timeAgo(ts: number): string {
     const diff = Date.now() - ts
     const d    = new Date(ts)
-    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    const now  = new Date()
     const mins = Math.floor(diff / 60000)
+    const isSameDay = d.getDate() === now.getDate() &&
+                      d.getMonth() === now.getMonth() &&
+                      d.getFullYear() === now.getFullYear()
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    const isYesterday = d.getDate() === yesterday.getDate() &&
+                        d.getMonth() === yesterday.getMonth() &&
+                        d.getFullYear() === yesterday.getFullYear()
+
     if (mins < 1)    return "just now"
     if (mins < 60)   return `${mins}m ago`
-    if (diff < 86400000) return `Today at ${time}`
-    if (diff < 172800000) return `Yesterday at ${time}`
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ` at ${time}`
+    if (isSameDay)   return "Today"
+    if (isYesterday) return "Yesterday"
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
 }
 
 function exactTime(ts: number): string {
-    return new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" })
+    return new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium", hour12: true })
 }
 
-// full timestamp for hovering on log entries
 function logTime(ts: number): string {
-    return new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" })
+    return new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium", hour12: true })
 }
 function decodeSnowflake(id: string) {
     try {
@@ -774,7 +806,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
 
             {lk.s === "done" && (
                 <div className="ur-fade-in">
-                    {/* Profile Card */}
                     <div style={{
                         background: C.bg1,
                         borderRadius: 16,
@@ -783,7 +814,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                         overflow: "hidden",
                     }}>
                         <div style={{ padding: "12px 16px" }}>
-                            {/* Avatar + Name inline */}
                             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
                                 <img
                                     src={lk.av}
@@ -824,7 +854,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                 </div>
                             </div>
 
-                            {/* About Me */}
                             {lk.user.bio && (
                                 <div style={{ marginBottom: 10 }}>
                                     <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 4 }}>
@@ -846,10 +875,8 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                 </div>
                             )}
 
-                            {/* Divider */}
                             <div style={{ height: 1, background: C.border, margin: "8px 0" }} />
 
-                            {/* Account Info Grid */}
                             {(() => {
                                 const sf = decodeSnowflake(lk.user.id)
                                 return sf && (
@@ -862,7 +889,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                         gridTemplateColumns: "repeat(2, 1fr)",
                                         gap: 6,
                                     }}>
-                                        {/* User ID */}
                                         <div
                                             onClick={() => copyId(lk.user.id)}
                                             style={{
@@ -886,7 +912,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                             </div>
                                         </div>
 
-                                        {/* Created */}
                                         <div style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}>
                                             <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Created</div>
                                             <div style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>
@@ -897,7 +922,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                             </div>
                                         </div>
 
-                                        {/* Account Age */}
                                         <div style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}>
                                             <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Account Age</div>
                                             <div style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>
@@ -913,7 +937,6 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                             </div>
                                         </div>
 
-                                        {/* Snowflake */}
                                         <div
                                             title={`Worker ${sf.workerId} · Process ${sf.processId} · Increment ${sf.increment}`}
                                             style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}
@@ -1113,7 +1136,7 @@ function previewNotification(uid: string, type: string) {
     const label = getWatchedUser(settings, uid)?.nick
     const name = displayName(u) || uid
     const dn = label ? `${label} (${name})` : name
-    const icon = u ? safeAvatar(u.id, (u as any).avatar) : undefined
+    const icon = u ? avatarUrl(u.id, (u as any).avatar) : undefined
 
     const previews: Record<string, { title: string; body: string }> = {
         msgs:     { title: `${dn} sent a message`, body: "This is a preview of how message notifications will appear." },
@@ -1133,72 +1156,225 @@ function previewNotification(uid: string, type: string) {
     Notifications.showNotification({ title: "[Preview] " + p.title, body: p.body, icon })
 }
 
-
-// ===== ACTIVITY LOG TAB COMPONENT =====
-// Full persistent activity log viewer with filters, stats, export
-
 const ACTIVITY_ICONS: Record<ActivityType, string> = {
     msg: "💬", edit: "✏️", delete: "🗑️", typing: "💭",
-    status: "🔵", activity: "🎮", voice: "🎙️",
+    status: "⚪", activity: "🎮", voice: "🎙️",
     join: "📥", leave: "📤", boost: "🚀",
     profile: "👤", avatar: "🖼️", banner: "🏳️", bio: "📝",
     username: "🏷️", displayname: "📛", online: "🟢",
     offline: "⚫", idle: "🌙", dnd: "🔴",
     game_start: "🎮", game_stop: "🛑", spotify: "🎵",
     streaming: "📺", vc_join: "🔊", vc_leave: "🔇", vc_move: "↔️",
+    session: "⏱️",
+}
+
+function getActivityIcon(entry: ActivityEntry): string {
+    const type = entry.type
+    const body = entry.body?.toLowerCase() || ""
+    const title = entry.title?.toLowerCase() || ""
+    const meta = entry.metadata || {}
+
+    if (type === "session") {
+        const action = (meta.action || "").toLowerCase()
+        if (action.includes("listening") || meta.type === 2 || meta.trackId) return "🎵"
+        if (action.includes("voice") || body.includes("voice") || title.includes("voice")) return "🎙️"
+        if (action.includes("camera") || body.includes("camera") || title.includes("camera")) return "📷"
+        if (action.includes("stream") || action.includes("screen") || body.includes("screen") || title.includes("screen") || body.includes("stream")) return "🖥️"
+        if (action.includes("activity") || action.includes("game") || body.includes("game") || title.includes("game")) return "🎮"
+        return "⏱️"
+    }
+
+    const activityType = meta.type
+    const activityName = (meta.name || "").toLowerCase()
+
+    if (activityType === 2 || meta.trackId || body.includes("listening to") || activityName === "spotify") return "🎵"
+    if (body.includes("spotify") || title.includes("spotify")) return "🎵"
+    if (body.includes("apple music") || title.includes("apple music")) return "🎧"
+    if (body.includes("youtube music") || title.includes("youtube music")) return "🎶"
+    if (body.includes("soundcloud") || title.includes("soundcloud")) return "☁️"
+
+    if (body.includes("valorant")) return "🔫"
+    if (body.includes("roblox")) return "🧱"
+    if (body.includes("minecraft")) return "⛏️"
+    if (body.includes("fortnite")) return "🪂"
+    if (body.includes("league") || body.includes("lol")) return "⚔️"
+    if (body.includes("genshin")) return "🌟"
+    if (body.includes("cs") || body.includes("counter-strike")) return "🔫"
+    if (body.includes("overwatch")) return "🎯"
+    if (body.includes("rocket league")) return "🚗"
+    if (body.includes("apex")) return "🔺"
+    if (type === "game_start" || type === "game_stop") return "🎮"
+    if (type === "activity" && activityType === 0) return "🎮"
+
+    if (activityType === 1 || body.includes("streaming")) return "📺"
+    if (body.includes("twitch") || title.includes("twitch")) return "📺"
+    if (body.includes("youtube") || title.includes("youtube")) return "▶️"
+
+    if (type === "status" || type === "online" || type === "offline" || type === "idle" || type === "dnd") {
+        if (body.includes("dnd") || title.includes("dnd") || title.includes("do not disturb")) return "🔴"
+        if (body.includes("online") || title.includes("online")) return "🟢"
+        if (body.includes("idle") || title.includes("idle")) return "🌙"
+        if (body.includes("offline") || title.includes("offline")) return "⚫"
+        if (entry.icon) return entry.icon
+        return "⚪"
+    }
+
+    if (body.includes("camera") || body.includes("video")) return "📷"
+    if (body.includes("screen") || body.includes("stream")) return "🖥️"
+    if (type === "vc_join" || type === "vc_leave" || type === "vc_move") return "🔊"
+    if (type === "voice") return "🎙️"
+
+    return ACTIVITY_ICONS[type] || "📌"
 }
 
 function formatDuration(ms: number): string {
     if (!ms || ms < 0) return "0m"
-    const mins = Math.floor(ms / 60000)
+    const totalSeconds = Math.floor(ms / 1000)
+    const mins = Math.floor(totalSeconds / 60)
     const hours = Math.floor(mins / 60)
     const days = Math.floor(hours / 24)
-    if (days > 0) return `${days}d ${hours % 24}h`
-    if (hours > 0) return `${hours}h ${mins % 60}m`
-    return `${mins}m`
-}
 
-function isOnlineEvent(log: ActivityEntry): boolean {
-    if (log.type === "online") return true
-    if (log.type === "status") {
-        const text = (log.title || log.body || "").toLowerCase()
-        return /(?:changed to|→|status\s*[:=]|now|to)\s*online/.test(text)
+    if (days > 0) {
+        const remainingHours = hours % 24
+        const remainingMins = mins % 60
+        if (remainingHours > 0 && remainingMins > 0) return `${days}d ${remainingHours}h ${remainingMins}m`
+        if (remainingHours > 0) return `${days}d ${remainingHours}h`
+        return `${days}d ${remainingMins}m`
     }
-    return false
-}
-
-function isOfflineEvent(log: ActivityEntry): boolean {
-    if (log.type === "offline" || log.type === "idle" || log.type === "dnd") return true
-    if (log.type === "status") {
-        const text = (log.title || log.body || "").toLowerCase()
-        return /(?:changed to|→|status\s*[:=]|now|to)\s*(offline|idle|dnd)/.test(text)
+    if (hours > 0) {
+        const remainingMins = mins % 60
+        if (remainingMins > 0) return `${hours}h ${remainingMins}m`
+        return `${hours}h`
     }
-    return false
+    if (mins > 0) {
+        const remainingSecs = totalSeconds % 60
+        if (remainingSecs > 0) return `${mins}m ${remainingSecs}s`
+        return `${mins}m`
+    }
+    return `${totalSeconds}s`
 }
 
-function calculateOnlineTime(logs: ActivityEntry[]): string {
-    let totalMs = 0
-    let lastOnline: number | null = null
-    const sorted = [...logs].sort((a, b) => a.ts - b.ts)
-    for (const log of sorted) {
-        if (isOnlineEvent(log)) lastOnline = log.ts
-        else if (isOfflineEvent(log) && lastOnline) {
-            totalMs += log.ts - lastOnline
-            lastOnline = null
+const _albumColorCache: Record<string, string> = {}
+
+function extractAlbumColor(imageUrl: string): Promise<string> {
+    if (_albumColorCache[imageUrl]) return Promise.resolve(_albumColorCache[imageUrl])
+    return new Promise((resolve) => {
+        const img = new Image()
+        img.crossOrigin = "anonymous"
+        img.onload = () => {
+            try {
+                const canvas = document.createElement("canvas")
+                const ctx = canvas.getContext("2d")
+                if (!ctx) { resolve("#1ed760"); return }
+                const size = 64
+                canvas.width = size
+                canvas.height = size
+                ctx.drawImage(img, 0, 0, size, size)
+                const data = ctx.getImageData(0, 0, size, size).data
+
+                const buckets: Record<string, { r: number; g: number; b: number; count: number; satSum: number }> = {}
+                const bucketSize = 24 // quantize to 24-unit steps
+
+                for (let i = 0; i < data.length; i += 8) { // sample every 2nd pixel for speed
+                    const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3]
+                    if (a < 128) continue
+
+                    const max = Math.max(r, g, b)
+                    const min = Math.min(r, g, b)
+                    const lum = (max + min) / 2
+                    // Skip near-white, near-black, and very low saturation
+                    if (lum < 35 || lum > 240) continue
+                    if (max - min < 30) continue // too gray
+
+                    const sat = max === 0 ? 0 : (max - min) / max
+                    if (sat < 0.15) continue // skip low saturation
+
+                    const br = Math.floor(r / bucketSize) * bucketSize
+                    const bg = Math.floor(g / bucketSize) * bucketSize
+                    const bb = Math.floor(b / bucketSize) * bucketSize
+                    const key = `${br},${bg},${bb}`
+
+                    if (!buckets[key]) buckets[key] = { r: 0, g: 0, b: 0, count: 0, satSum: 0 }
+                    buckets[key].r += r
+                    buckets[key].g += g
+                    buckets[key].b += b
+                    buckets[key].count++
+                    buckets[key].satSum += sat
+                }
+
+
+                let bestKey = ""
+                let bestScore = 0
+                for (const key in buckets) {
+                    const b = buckets[key]
+                                const avgSat = b.satSum / b.count
+                    const score = b.count * avgSat
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestKey = key
+                    }
+                }
+
+                let hex: string
+                if (bestKey && buckets[bestKey]) {
+                    const b = buckets[bestKey]
+                    const avgR = Math.round(b.r / b.count)
+                    const avgG = Math.round(b.g / b.count)
+                    const avgB = Math.round(b.b / b.count)
+                    hex = `#${avgR.toString(16).padStart(2, "0")}${avgG.toString(16).padStart(2, "0")}${avgB.toString(16).padStart(2, "0")}`
+                } else {
+                    hex = "#1ed760"
+                }
+
+                _albumColorCache[imageUrl] = hex
+                resolve(hex)
+            } catch {
+                resolve("#1ed760")
+            }
         }
+        img.onerror = () => resolve("#1ed760")
+        img.src = imageUrl
+    })
+}
+function hexToRgba(hex: string, alpha: number): string {
+    const r = parseInt(hex.slice(1, 3), 16)
+    const g = parseInt(hex.slice(3, 5), 16)
+    const b = parseInt(hex.slice(5, 7), 16)
+    return `rgba(${r},${g},${b},${alpha})`
+}
+
+const ACTIVITY_CATEGORIES = [
+    { key: "msg" as ActivityType, label: "Messages", Icon: ico.catMsg, color: "#5865f2" },
+    { key: "edit" as ActivityType, label: "Edits", Icon: ico.catEdit, color: "#f0b232" },
+    { key: "delete" as ActivityType, label: "Deletes", Icon: ico.catDelete, color: "#da373c" },
+    { key: "typing" as ActivityType, label: "Typing", Icon: ico.catTyping, color: "#949cf4" },
+    { key: "status" as ActivityType, label: "Status", Icon: ico.catStatus, color: "#23a55a" },
+    { key: "voice" as ActivityType, label: "Voice", Icon: ico.catVoice, color: "#dbdee1" },
+    { key: "profile" as ActivityType, label: "Profile", Icon: ico.catProfile, color: "#ff6b6b" },
+    { key: "activity" as ActivityType, label: "Activity", Icon: ico.catActivity, color: "#f0b232" },
+] as const
+
+function matchesCategory(log: ActivityEntry, category: ActivityType): boolean {
+    if (category === "msg") return log.type === "msg"
+    if (category === "edit") return log.type === "edit"
+    if (category === "delete") return log.type === "delete"
+    if (category === "typing") return log.type === "typing"
+    if (category === "status") {
+        return log.type === "online" || log.type === "offline" || log.type === "idle" || log.type === "dnd" || log.type === "status"
     }
-    // If still online, add time from last online event to now
-    if (lastOnline) {
-        totalMs += Date.now() - lastOnline
-    }
-    return formatDuration(totalMs)
+    if (category === "voice") return log.type === "voice" || log.type === "vc_join" || log.type === "vc_leave" || log.type === "vc_move" || (log.type === "session" && (["voice_session", "stream_session", "camera_session"].includes(log.metadata?.action || "") || (log.metadata?.action || "").includes("voice")))
+    if (category === "profile") return log.type === "profile" || log.type === "avatar" || log.type === "banner" || log.type === "bio" || log.type === "username" || log.type === "displayname"
+    if (category === "activity") return log.type === "activity" || log.type === "game_start" || log.type === "game_stop" || log.type === "spotify" || log.type === "streaming" || (log.type === "session" && (log.metadata?.action || "").includes("activity"))
+    return log.type === category
 }
 
 function UserRadarActivityTab({ userId }: { userId: string }) {
     const [logs, setLogs] = React.useState<ActivityEntry[]>([])
-    const [filter, setFilter] = React.useState<ActivityType | "all">("all")
+    const [activeFilters, setActiveFilters] = React.useState<Set<ActivityType>>(new Set())
     const [expandedId, setExpandedId] = React.useState<string | null>(null)
     const [loading, setLoading] = React.useState(true)
+    const [searchQuery, setSearchQuery] = React.useState("")
+    const [sortMode, setSortMode] = React.useState<"newest" | "oldest">("newest")
 
     React.useEffect(() => {
         const load = async () => {
@@ -1213,116 +1389,244 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
         return unsub
     }, [userId])
 
-    // Category matching for filters (legacy logActivity uses "status" for all status changes)
-    function matchesFilter(log: ActivityEntry, filterType: ActivityType | "all"): boolean {
-        if (filterType === "all") return true
-        if (filterType === "msg") return log.type === "msg"
-        if (filterType === "edit") return log.type === "edit"
-        if (filterType === "delete") return log.type === "delete"
-        // Status tab: online, offline, idle, dnd — all status changes
-        if (filterType === "status") {
-            return log.type === "online" || log.type === "offline" || log.type === "idle" || log.type === "dnd" || log.type === "status"
-        }
-        if (filterType === "voice") return log.type === "voice" || log.type === "vc_join" || log.type === "vc_leave" || log.type === "vc_move"
-        if (filterType === "avatar") return log.type === "avatar" || log.type === "profile" || log.type === "banner" || log.type === "bio" || log.type === "username" || log.type === "displayname"
-        if (filterType === "profile") return log.type === "profile" || log.type === "avatar" || log.type === "banner" || log.type === "bio" || log.type === "username" || log.type === "displayname"
-        if (filterType === "activity") return log.type === "activity" || log.type === "game_start" || log.type === "game_stop" || log.type === "spotify" || log.type === "streaming"
-        return log.type === filterType
+    const toggleFilter = (key: ActivityType) => {
+        setActiveFilters(prev => {
+            const next = new Set(prev)
+            if (next.has(key)) next.delete(key)
+            else next.add(key)
+            return next
+        })
     }
 
-    const filtered = filter === "all" ? logs : logs.filter(l => matchesFilter(l, filter))
-    const grouped = filtered.reduce((acc, log) => {
-        const date = new Date(log.ts).toLocaleDateString()
-        if (!acc[date]) acc[date] = []
-        acc[date].push(log)
-        return acc
-    }, {} as Record<string, ActivityEntry[]>)
+    const clearFilters = () => {
+        setActiveFilters(new Set())
+    }
 
-    const filters: { type: ActivityType | "all"; label: string; icon: string }[] = [
-        { type: "all", label: "All", icon: "📋" },
-        { type: "msg", label: "Messages", icon: "💬" },
-        { type: "edit", label: "Edits", icon: "✏️" },
-        { type: "delete", label: "Deletes", icon: "🗑️" },
-        { type: "status", label: "Status", icon: "🔵" },
-        { type: "voice", label: "Voice", icon: "🎙️" },
-        { type: "avatar", label: "Avatar", icon: "🖼️" },
-        { type: "profile", label: "Profile", icon: "👤" },
-        { type: "activity", label: "Activity", icon: "🎮" },
-    ]
+    const filtered = React.useMemo(() => {
+        let result = logs
+        if (activeFilters.size > 0) {
+            result = result.filter(l => {
+                for (const filter of activeFilters) {
+                    if (matchesCategory(l, filter)) return true
+                }
+                return false
+            })
+        }
+        if (searchQuery.trim()) {
+            const q = searchQuery.toLowerCase()
+            result = result.filter(l =>
+                l.title.toLowerCase().includes(q) ||
+                l.body.toLowerCase().includes(q) ||
+                l.type.toLowerCase().includes(q) ||
+                (l.metadata?.appName && l.metadata.appName.toLowerCase().includes(q)) ||
+                (l.metadata?.song && l.metadata.song.toLowerCase().includes(q)) ||
+                (l.metadata?.artist && l.metadata.artist.toLowerCase().includes(q))
+            )
+        }
+        const sorted = [...result]
+        if (sortMode === "oldest") sorted.sort((a, b) => a.ts - b.ts)
+        return sorted
+    }, [logs, activeFilters, searchQuery, sortMode])
+
+    const grouped = React.useMemo(() => {
+        return filtered.reduce((acc, log) => {
+            const date = new Date(log.ts).toLocaleDateString()
+            if (!acc[date]) acc[date] = []
+            acc[date].push(log)
+            return acc
+        }, {} as Record<string, ActivityEntry[]>)
+    }, [filtered])
+
+    const categoryCounts = React.useMemo(() => {
+        const counts: Record<string, number> = {}
+        for (const cat of ACTIVITY_CATEGORIES) {
+            counts[cat.key] = logs.filter(l => matchesCategory(l, cat.key)).length
+        }
+        return counts
+    }, [logs])
 
     if (loading) {
         return (
             <div style={{ padding: 40, textAlign: "center", color: C.muted }}>
                 <div className="ur-spin" style={{ width: 24, height: 24, margin: "0 auto 12px" }} />
-                <div style={{ fontSize: 13 }}>Loading activity log…</div>
+                <div style={{ fontSize: 13 }}>Loading activity log...</div>
             </div>
         )
     }
 
     return (
-        <div style={{ padding: "0 4px" }}>
-            {/* Filter tabs */}
-            <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
-                {filters.map(f => (
+        <div style={{ padding: "0 4px", overflowX: "hidden" }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center" }}>
+                <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+                    <input
+                        placeholder="Search activity..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        style={{
+                            background: C.bg1,
+                            borderRadius: 20,
+                            border: `1px solid ${C.border}`,
+                            height: 32,
+                            boxSizing: "border-box",
+                            padding: "0 32px 0 12px",
+                            width: "100%",
+                            fontSize: 13,
+                            color: C.text,
+                            outline: "none",
+                            fontFamily: "inherit",
+                            transition: "border-color 150ms ease, box-shadow 150ms ease",
+                        }}
+                        onFocus={e => { e.currentTarget.style.borderColor = C.brand; e.currentTarget.style.boxShadow = `0 0 0 1px ${C.brand}40` }}
+                        onBlur={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.boxShadow = "none" }}
+                    />
+                    <div style={{
+                        position: "absolute",
+                        right: 10,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        color: C.muted,
+                        display: "flex",
+                        alignItems: "center",
+                        pointerEvents: "none",
+                    }}>
+                        <ico.search />
+                    </div>
+                </div>
+
+                <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setSortMode(s => s === "newest" ? "oldest" : "newest")}
+                    style={{
+                        display: "flex", alignItems: "center", gap: 4,
+                        padding: "0 10px",
+                        borderRadius: 20,
+                        cursor: "pointer",
+                        background: C.bg1,
+                        border: `1px solid ${C.border}`,
+                        color: C.muted,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        userSelect: "none",
+                        height: 32,
+                        boxSizing: "border-box",
+                        transition: "all 150ms ease",
+                        flexShrink: 0,
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.color = C.text }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted }}
+                >
+                    {sortMode === "newest" ? <ico.sortDate /> : <ico.sortAz />}
+                    {sortMode === "newest" ? "Newest" : "Oldest"}
+                </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+                {ACTIVITY_CATEGORIES.map(cat => {
+                    const isActive = activeFilters.has(cat.key)
+                    const count = categoryCounts[cat.key] || 0
+                    return (
+                        <div
+                            key={cat.key}
+                            onClick={() => toggleFilter(cat.key)}
+                            style={{
+                                padding: "5px 10px",
+                                borderRadius: 12,
+                                background: isActive ? `${cat.color}25` : C.bg1,
+                                color: isActive ? cat.color : C.muted,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 5,
+                                transition: "all 150ms ease",
+                                userSelect: "none",
+                                border: `1px solid ${isActive ? `${cat.color}60` : C.border}`,
+                                opacity: count === 0 ? 0.5 : 1,
+                                flexShrink: 0,
+                            }}
+                            onMouseEnter={e => {
+                                if (!isActive) {
+                                    e.currentTarget.style.background = "rgba(255,255,255,0.04)"
+                                    e.currentTarget.style.color = C.text
+                                }
+                            }}
+                            onMouseLeave={e => {
+                                if (!isActive) {
+                                    e.currentTarget.style.background = C.bg1
+                                    e.currentTarget.style.color = C.muted
+                                }
+                            }}
+                        >
+                            <span style={{ display: "flex", alignItems: "center" }}><cat.Icon /></span>
+                            <span>{cat.label}</span>
+                            <span style={{
+                                background: isActive ? `${cat.color}40` : C.bg3,
+                                padding: "1px 5px",
+                                borderRadius: 6,
+                                fontSize: 9,
+                                fontWeight: 800,
+                                color: isActive ? cat.color : C.muted,
+                            }}>
+                                {count}
+                            </span>
+                        </div>
+                    )
+                })}
+
+                {activeFilters.size > 0 && (
                     <div
-                        key={f.type}
-                        onClick={() => setFilter(f.type)}
+                        onClick={clearFilters}
                         style={{
                             padding: "5px 10px",
                             borderRadius: 12,
-                            background: filter === f.type ? C.brand : C.bg1,
-                            color: filter === f.type ? C.white : C.muted,
+                            background: "transparent",
+                            color: C.muted,
                             fontSize: 11,
-                            fontWeight: 700,
+                            fontWeight: 600,
                             cursor: "pointer",
                             display: "flex",
                             alignItems: "center",
-                            gap: 5,
+                            gap: 4,
                             transition: "all 150ms ease",
                             userSelect: "none",
-                            border: `1px solid ${filter === f.type ? C.brand : C.border}`,
+                            border: `1px solid ${C.border}`,
+                            flexShrink: 0,
                         }}
+                        onMouseEnter={e => { e.currentTarget.style.color = C.danger; e.currentTarget.style.borderColor = C.danger }}
+                        onMouseLeave={e => { e.currentTarget.style.color = C.muted; e.currentTarget.style.borderColor = C.border }}
                     >
-                        <span>{f.icon}</span>
-                        <span>{f.label}</span>
-                        <span style={{
-                            background: filter === f.type ? "rgba(255,255,255,0.2)" : C.bg3,
-                            padding: "1px 5px",
-                            borderRadius: 6,
-                            fontSize: 9,
-                            fontWeight: 800,
-                        }}>
-                            {f.type === "all" ? logs.length : logs.filter(l => matchesFilter(l, f.type)).length}
-                        </span>
+                        <ico.x />
+                        Clear
                     </div>
-                ))}
+                )}
             </div>
 
-            {/* Stats */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 14 }}>
-                {[
-                    { label: "Total", value: logs.length, color: C.brand },
-                    { label: "Today", value: logs.filter(l => new Date(l.ts).toDateString() === new Date().toDateString()).length, color: "#23a55a" },
-                    { label: "This Week", value: logs.filter(l => Date.now() - l.ts < 7 * 86400000).length, color: "#f0b232" },
-                    { label: "Online Time", value: calculateOnlineTime(logs), color: C.brandLight },
-                ].map(stat => (
-                    <div key={stat.label} style={{ background: C.bg2, borderRadius: 12, padding: 10, border: `1px solid ${C.border}` }}>
-                        <div style={{ fontSize: 16, fontWeight: 800, color: stat.color }}>{stat.value}</div>
-                        <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>{stat.label}</div>
-                    </div>
-                ))}
-            </div>
-
-            {/* Timeline */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 420, overflowY: "auto" }} className="ur-scrollbar">
+            <div style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 12,
+                overflowX: "hidden",
+                paddingRight: 4,
+            }}>
                 {Object.entries(grouped).map(([date, dayLogs]) => (
-                    <div key={`${date}-${filter}`}>
+                    <div key={`${date}-${Array.from(activeFilters).join(",")}-${sortMode}`} style={{ overflowX: "hidden" }}>
                         <div style={{
-                            fontSize: 10, fontWeight: 800, textTransform: "uppercase",
-                            letterSpacing: 0.8, color: C.muted, marginBottom: 6,
-                            display: "flex", alignItems: "center", gap: 8,
+                            fontSize: 10,
+                            fontWeight: 800,
+                            textTransform: "uppercase",
+                            letterSpacing: 0.8,
+                            color: C.muted,
+                            marginBottom: 8,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
                         }}>
-                            <span>{date === new Date().toLocaleDateString() ? "Today" : date}</span>
+                            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                <ico.calendar />
+                                {date === new Date().toLocaleDateString() ? "Today" : date}
+                            </span>
                             <span style={{ flex: 1, height: 1, background: C.border }} />
                             <span>{dayLogs.length} events</span>
                         </div>
@@ -1331,186 +1635,988 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                 key={log.id}
                                 onClick={() => setExpandedId(expandedId === log.id ? null : log.id)}
                                 style={{
-                                    display: "flex", gap: 10, padding: "8px 10px",
-                                    borderRadius: 10, background: C.bg2,
-                                    border: `1px solid ${C.border}`, marginBottom: 5,
+                                    display: "flex",
+                                    gap: 14,
+                                    padding: "14px 16px",
+                                    borderRadius: 16,
+                                    background: C.bg2,
+                                    border: `1px solid ${C.border}`,
+                                    marginBottom: 6,
                                     cursor: "pointer",
                                     transition: "all 150ms ease",
+                                    minHeight: 56,
                                 }}
-                                onMouseEnter={e => { e.currentTarget.style.background = "#232428"; e.currentTarget.style.borderColor = C.bgEl }}
-                                onMouseLeave={e => { e.currentTarget.style.background = C.bg2; e.currentTarget.style.borderColor = C.border }}
+                                onMouseEnter={e => {
+                                    e.currentTarget.style.background = "#232428"
+                                    e.currentTarget.style.borderColor = C.bgEl
+                                }}
+                                onMouseLeave={e => {
+                                    e.currentTarget.style.background = C.bg2
+                                    e.currentTarget.style.borderColor = C.border
+                                }}
                             >
                                 <div style={{
-                                    width: 32, height: 32, borderRadius: "50%",
-                                    background: C.bg1, display: "flex",
-                                    alignItems: "center", justifyContent: "center",
-                                    fontSize: 14, flexShrink: 0,
+                                    width: 42,
+                                    height: 42,
+                                    borderRadius: 12,
+                                    background: C.bg1,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    fontSize: 20,
+                                    flexShrink: 0,
+                                    border: `1px solid ${C.border}`,
+                                    marginTop: 1,
                                 }}>
-                                    {log.icon}
+                                    {(() => {
+                                        const ic = getActivityIcon(log)
+                                        return typeof ic === "string" && (ic.startsWith("http") || ic.startsWith("/"))
+                                            ? <img src={ic} style={{ width: 28, height: 28, borderRadius: 6, objectFit: "cover" }} onError={(e: any) => { e.target.style.display = "none" }} />
+                                            : ic
+                                    })()}
                                 </div>
                                 <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ fontSize: 12, fontWeight: 600, color: C.text, display: "flex", alignItems: "center", gap: 6 }}>
-                                        <span>{log.title}</span>
-                                        <span style={{ fontSize: 9, color: C.muted }} title={exactTime(log.ts)}>{timeAgo(log.ts)}</span>
-                                    </div>
-                                    <div style={{ fontSize: 11, color: C.muted, marginTop: 1, lineHeight: 1.4 }}>
-                                        {log.body}
-                                    </div>
-                                    {/* for edits only — show before content with strikethrough */}
-                                    {log.type === "edit" && log.metadata?.before && (
-                                        <div style={{
-                                            marginTop: 4,
-                                            padding: "5px 9px",
+                                    <div style={{
+                                        fontSize: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 15 : 14,
+                                        fontWeight: 800,
+                                        color: C.header,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 8,
+                                        marginBottom: 4,
+                                    }}>
+                                        <span style={{ wordBreak: "break-word", flex: 1, minWidth: 0 }}>
+                                            {log.title}
+                                        </span>
+                                        <span style={{
+                                            fontSize: 12,
+                                            color: C.subheader,
+                                            fontWeight: 700,
                                             background: C.bg1,
-                                            borderRadius: 6,
-                                            fontSize: 11,
-                                            color: C.muted,
+                                            padding: "4px 10px",
+                                            borderRadius: 8,
                                             border: `1px solid ${C.border}`,
+                                            flexShrink: 0,
+                                            whiteSpace: "nowrap",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 6,
+                                        }} title={exactTime(log.ts)}>
+                                            <span style={{ display: "flex", alignItems: "center" }}><ico.clock /></span>
+                                            {new Date(log.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })}
+                                            <span style={{ color: C.muted, fontWeight: 500 }}>· {timeAgo(log.ts)}</span>
+                                        </span>
+                                        <div
+                                            role="button"
+                                            title="Delete this entry"
+                                            onClick={async (e) => {
+                                                e.stopPropagation()
+                                                if (!confirm("Delete this activity entry?")) return
+                                                await activityStore.removeLog(userId, log.id)
+                                                setLogs(prev => prev.filter(l => l.id !== log.id))
+                                            }}
+                                            style={{
+                                                padding: "4px 8px",
+                                                borderRadius: 6,
+                                                cursor: "pointer",
+                                                background: "transparent",
+                                                color: C.muted,
+                                                fontSize: 11,
+                                                fontWeight: 700,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                opacity: 0.4,
+                                                transition: "opacity 150ms ease, background 150ms ease, color 150ms ease",
+                                            }}
+                                            onMouseEnter={e => {
+                                                e.currentTarget.style.opacity = "1"
+                                                e.currentTarget.style.background = "rgba(218,55,60,0.12)"
+                                                e.currentTarget.style.color = C.red
+                                            }}
+                                            onMouseLeave={e => {
+                                                e.currentTarget.style.opacity = "0.4"
+                                                e.currentTarget.style.background = "transparent"
+                                                e.currentTarget.style.color = C.muted
+                                            }}
+                                        >
+                                            <ico.trash />
+                                        </div>
+                                    </div>
+                                    {log.body && log.body !== log.title && log.type !== "activity" && log.type !== "session" && log.metadata?.action !== "status_session" && (
+                                        <div style={{
+                                            fontSize: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 14 : 13,
+                                            color: log.type === "msg" || log.type === "edit" || log.type === "delete" ? C.text : C.muted,
                                             lineHeight: 1.4,
+                                            wordBreak: "break-word",
+                                            fontWeight: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 500 : 400,
+                                            marginTop: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 2 : 0,
                                         }}>
-                                            <span style={{ textDecoration: "line-through", opacity: 0.6 }}>{trunc(log.metadata.before, 120)}</span>
+                                            {log.body}
                                         </div>
                                     )}
-                                    {expandedId === log.id && log.metadata && (
+                                    {(log.type === "msg" || log.type === "edit" || log.type === "delete" || log.type === "voice" || log.type === "activity" || (log.type === "session" && ["listening_session", "activity_session", "voice_session", "camera_session", "stream_session"].includes(log.metadata?.action))) && (
                                         <div style={{
-                                            marginTop: 6, padding: "6px 10px",
-                                            background: C.bg1, borderRadius: 8,
-                                            fontSize: 10, color: C.muted, fontFamily: "monospace",
+                                            fontSize: 11,
+                                            color: C.subheader,
+                                            marginTop: 4,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 5,
+                                        }}>
+                                            <span style={{ opacity: 0.5, display: "flex", alignItems: "center" }}><ico.location /></span>
+                                            <span>
+                                                {log.metadata?.appName || log.metadata?.server || "Unknown"}
+                                                {log.metadata?.channel ? ` · #${log.metadata.channel}` : ""}
+                                                {log.metadata?.duration ? ` · ${log.metadata.duration}` : ""}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {log.type === "session" && log.metadata?.action === "status_session" && (
+                                        <div style={{
+                                            fontSize: 11,
+                                            color: C.subheader,
+                                            marginTop: 4,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 5,
+                                        }}>
+                                            <span style={{ opacity: 0.5, display: "flex", alignItems: "center" }}><ico.status /></span>
+                                            <span>
+                                                {log.metadata?.platform ? `${CLIENT_EMOJI[log.metadata.platform.toLowerCase()] || "📡"} ${log.metadata.platform}` : "Status session"}
+                                                {log.metadata?.duration ? ` · ${log.metadata.duration}` : ""}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {log.type === "edit" && log.metadata?.before && (
+                                        <div style={{
+                                            marginTop: 10,
+                                            padding: "10px 14px",
+                                            background: "rgba(240,178,50,0.08)",
+                                            borderRadius: 14,
+                                            fontSize: 12,
+                                            color: C.text,
+                                            border: `1px solid rgba(240,178,50,0.25)`,
                                             lineHeight: 1.5,
                                         }}>
-                                            {Object.entries(log.metadata).map(([key, val]) => (
-                                                <div key={key} style={{ display: "flex", gap: 6 }}>
-                                                    <span style={{ color: C.brand, minWidth: 80 }}>{key}:</span>
-                                                    <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                                        {typeof val === "object" ? JSON.stringify(val) : String(val)}
-                                                    </span>
-                                                </div>
-                                            ))}
+                                            <div style={{ fontSize: 10, fontWeight: 800, color: "#f0b232", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.6, display: "flex", alignItems: "center", gap: 6 }}>
+                                                <ico.edit />
+                                                Previous Version
+                                            </div>
+                                            <span style={{
+                                                textDecoration: "line-through",
+                                                opacity: 0.7,
+                                                wordBreak: "break-word",
+                                            }}>{trunc(log.metadata.before, 200)}</span>
+                                        </div>
+                                    )}
+                                    {expandedId === log.id && (
+                                        <div>
                                             {(log.channelId || log.guildId) && (
                                                 <div
                                                     onClick={(e) => { e.stopPropagation(); jumpTo(log.guildId, log.channelId, log.msgId) }}
                                                     style={{
-                                                        marginTop: 6, padding: "4px 10px",
-                                                        background: C.brand, borderRadius: 6,
-                                                        color: C.white, fontSize: 11,
-                                                        fontWeight: 600, cursor: "pointer",
-                                                        textAlign: "center", fontFamily: "inherit",
+                                                        marginTop: 10,
+                                                        padding: "10px 16px",
+                                                        background: C.brand,
+                                                        borderRadius: 10,
+                                                        color: C.white,
+                                                        fontSize: 13,
+                                                        fontWeight: 700,
+                                                        cursor: "pointer",
+                                                        textAlign: "center",
+                                                        fontFamily: "inherit",
+                                                        transition: "background 150ms ease",
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        justifyContent: "center",
+                                                        gap: 6,
                                                     }}
+                                                    onMouseEnter={e => { e.currentTarget.style.background = "#4752c4" }}
+                                                    onMouseLeave={e => { e.currentTarget.style.background = C.brand }}
                                                 >
+                                                    <ico.external />
                                                     Jump to Discord
+                                                </div>
+                                            )}
+                                            {log.metadata && log.type !== "msg" && log.type !== "edit" && log.type !== "delete" && (
+                                                <div style={{
+                                                    marginTop: 10,
+                                                    padding: "12px 16px",
+                                                    background: C.bg1,
+                                                    borderRadius: 12,
+                                                    fontSize: 12,
+                                                    color: C.muted,
+                                                    lineHeight: 1.6,
+                                                    border: `1px solid ${C.border}`,
+                                                }}>
+                                                    {log.metadata.song && (
+                                                        <div
+                                                            ref={(el: any) => {
+                                                                if (!el || !log.metadata.albumArtUrl) return
+                                                                const cached = _albumColorCache[log.metadata.albumArtUrl]
+                                                                if (cached) {
+                                                                    el.style.background = hexToRgba(cached, 0.06)
+                                                                    el.style.borderColor = hexToRgba(cached, 0.35)
+                                                                    return
+                                                                }
+                                                                extractAlbumColor(log.metadata.albumArtUrl).then((hex: string) => {
+                                                                    if (el) {
+                                                                        el.style.background = hexToRgba(hex, 0.06)
+                                                                        el.style.borderColor = hexToRgba(hex, 0.35)
+                                                                    }
+                                                                })
+                                                            }}
+                                                            style={{
+                                                                display: "flex",
+                                                                gap: 0,
+                                                                marginBottom: 12,
+                                                                borderRadius: 10,
+                                                                border: "1px solid rgba(30,215,96,0.2)",
+                                                                overflow: "hidden",
+                                                                background: "rgba(30,215,96,0.06)",
+                                                                transition: "background 300ms ease, border-color 300ms ease",
+                                                                position: "relative",
+                                                                minHeight: 160,
+                                                            }}
+                                                        >
+                                                            {log.metadata.albumArtUrl && (
+                                                                <div style={{
+                                                                    position: "relative",
+                                                                    width: 160,
+                                                                    height: 160,
+                                                                    overflow: "hidden",
+                                                                    borderRadius: 10,
+                                                                    flexShrink: 0,
+                                                                    alignSelf: "center",
+                                                                }}>
+                                                                    <img
+                                                                        src={log.metadata.albumArtUrl}
+                                                                        style={{
+                                                                            position: "absolute",
+                                                                            top: 0,
+                                                                            left: 0,
+                                                                            width: "100%",
+                                                                            height: "100%",
+                                                                            objectFit: "cover",
+                                                                            display: "block",
+                                                                            borderRadius: 8,
+                                                                        }}
+                                                                        onError={(e: any) => { e.target.style.display = "none" }}
+                                                                    />
+                                                                    <div style={{
+                                                                        position: "absolute",
+                                                                        top: 0,
+                                                                        right: 0,
+                                                                        width: 50,
+                                                                        height: "100%",
+                                                                        background: "linear-gradient(to right, transparent, rgba(0,0,0,0.4))",
+                                                                        pointerEvents: "none",
+                                                                    }} />
+                                                                </div>
+                                                            )}
+                                                            <div style={{
+                                                                flex: 1,
+                                                                minWidth: 0,
+                                                                display: "flex",
+                                                                flexDirection: "column",
+                                                                justifyContent: "center",
+                                                                padding: "14px 16px",
+                                                                gap: 1,
+                                                            }}>
+                                                                {log.metadata.appName && (
+                                                                    <div style={{
+                                                                        fontSize: 10,
+                                                                        fontWeight: 800,
+                                                                        textTransform: "uppercase",
+                                                                        letterSpacing: 0.8,
+                                                                        color: C.brandLight,
+                                                                        display: "flex",
+                                                                        alignItems: "center",
+                                                                        gap: 5,
+                                                                        marginBottom: 4,
+                                                                    }}>
+                                                                        {log.metadata.appName === "Spotify" && <span>🎵</span>}
+                                                                        {log.metadata.appName}
+                                                                    </div>
+                                                                )}
+                                                                <div style={{
+                                                                    fontSize: 16,
+                                                                    fontWeight: 800,
+                                                                    color: C.header,
+                                                                    whiteSpace: "nowrap",
+                                                                    overflow: "hidden",
+                                                                    textOverflow: "ellipsis",
+                                                                    lineHeight: 1.2,
+                                                                    letterSpacing: -0.2,
+                                                                }}>
+                                                                    {log.metadata.song}
+                                                                </div>
+                                                                {log.metadata.artist && (
+                                                                    <div style={{
+                                                                        fontSize: 14,
+                                                                        color: C.text,
+                                                                        whiteSpace: "nowrap",
+                                                                        overflow: "hidden",
+                                                                        textOverflow: "ellipsis",
+                                                                        fontWeight: 500,
+                                                                        marginTop: 2,
+                                                                    }}>
+                                                                        {log.metadata.artist}
+                                                                    </div>
+                                                                )}
+                                                                {log.metadata.album && (
+                                                                    <div style={{
+                                                                        fontSize: 12,
+                                                                        color: C.muted,
+                                                                        whiteSpace: "nowrap",
+                                                                        overflow: "hidden",
+                                                                        textOverflow: "ellipsis",
+                                                                        marginTop: 1,
+                                                                    }}>
+                                                                        {log.metadata.album}
+                                                                    </div>
+                                                                )}
+                                                                <div style={{
+                                                                    display: "flex",
+                                                                    gap: 6,
+                                                                    marginTop: 8,
+                                                                    flexWrap: "wrap",
+                                                                    alignItems: "center",
+                                                                }}>
+                                                                    {Array.isArray(log.metadata.allArtists) && log.metadata.allArtists.length > 1 && (
+                                                                        <span style={{
+                                                                            fontSize: 10,
+                                                                            color: C.muted,
+                                                                            background: "rgba(0,0,0,0.25)",
+                                                                            padding: "2px 8px",
+                                                                            borderRadius: 10,
+                                                                            fontWeight: 600,
+                                                                        }} title={`All artists: ${log.metadata.allArtists.join(", ")}`}>
+                                                                            +{log.metadata.allArtists.length - 1} more
+                                                                        </span>
+                                                                    )}
+                                                                    {log.metadata.contextUri && (
+                                                                        <span style={{
+                                                                            fontSize: 10,
+                                                                            color: C.muted,
+                                                                            background: "rgba(0,0,0,0.25)",
+                                                                            padding: "2px 8px",
+                                                                            borderRadius: 10,
+                                                                            fontWeight: 600,
+                                                                        }} title={log.metadata.contextUri}>
+                                                                            {log.metadata.contextUri.includes("playlist") ? "🎶 Playlist" : log.metadata.contextUri.includes("album") ? "💿 Album" : "🎵 Context"}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                {(log.metadata.startTimestamp && log.metadata.endTimestamp) && (() => {
+                                                                    const total = log.metadata.endTimestamp - log.metadata.startTimestamp
+                                                                    const totalStr = formatDuration(total)
+                                                                    return (
+                                                                        <div style={{ marginTop: 12 }}>
+                                                                            <div style={{
+                                                                                height: 4,
+                                                                                background: "rgba(0,0,0,0.3)",
+                                                                                borderRadius: 2,
+                                                                                overflow: "hidden",
+                                                                            }}>
+                                                                                <div style={{
+                                                                                    width: "100%",
+                                                                                    height: "100%",
+                                                                                    background: C.brandLight,
+                                                                                    borderRadius: 2,
+                                                                                    opacity: 0.5,
+                                                                                }} />
+                                                                            </div>
+                                                                            <div style={{
+                                                                                display: "flex",
+                                                                                justifyContent: "flex-end",
+                                                                                marginTop: 5,
+                                                                                fontSize: 11,
+                                                                                color: C.muted,
+                                                                                fontWeight: 600,
+                                                                                letterSpacing: 0.3,
+                                                                            }}>
+                                                                                {totalStr}
+                                                                            </div>
+                                                                        </div>
+                                                                    )
+                                                                })()}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {log.metadata.gameIconUrl && !log.metadata.song && (
+                                                        <div style={{
+                                                            display: "flex",
+                                                            gap: 12,
+                                                            marginBottom: 12,
+                                                            padding: "10px 12px",
+                                                            background: "rgba(88,101,242,0.08)",
+                                                            borderRadius: 10,
+                                                            border: "1px solid rgba(88,101,242,0.2)",
+                                                        }}>
+                                                            <img
+                                                                src={log.metadata.gameIconUrl}
+                                                                style={{
+                                                                    width: 56, height: 56,
+                                                                    borderRadius: 12,
+                                                                    objectFit: "cover",
+                                                                    flexShrink: 0,
+                                                                    border: `1px solid ${C.border}`,
+                                                                }}
+                                                                onError={(e: any) => { e.target.style.display = "none" }}
+                                                            />
+                                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                                {log.metadata.appName && (
+                                                                    <div style={{
+                                                                        fontSize: 9,
+                                                                        fontWeight: 800,
+                                                                        textTransform: "uppercase",
+                                                                        letterSpacing: 0.6,
+                                                                        color: C.brandLight,
+                                                                        marginBottom: 3,
+                                                                    }}>
+                                                                        {log.metadata.appName}
+                                                                    </div>
+                                                                )}
+                                                                {log.metadata.details && (
+                                                                    <div style={{
+                                                                        fontSize: 13,
+                                                                        fontWeight: 800,
+                                                                        color: C.header,
+                                                                        marginBottom: 2,
+                                                                        whiteSpace: "nowrap",
+                                                                        overflow: "hidden",
+                                                                        textOverflow: "ellipsis",
+                                                                    }}>
+                                                                        {log.metadata.details}
+                                                                    </div>
+                                                                )}
+                                                                {log.metadata.state && (
+                                                                    <div style={{
+                                                                        fontSize: 11,
+                                                                        color: C.muted,
+                                                                        whiteSpace: "nowrap",
+                                                                        overflow: "hidden",
+                                                                        textOverflow: "ellipsis",
+                                                                    }}>
+                                                                        {log.metadata.state}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {log.metadata.duration && (
+                                                        <div style={{
+                                                            marginBottom: 10,
+                                                            padding: "10px 14px",
+                                                            background: C.bg1,
+                                                            borderRadius: 10,
+                                                            border: `1px solid ${C.border}`,
+                                                        }}>
+                                                            <div style={{
+                                                                display: "flex",
+                                                                alignItems: "center",
+                                                                gap: 8,
+                                                                marginBottom: 8,
+                                                            }}>
+                                                                <span style={{
+                                                                    display: "flex",
+                                                                    alignItems: "center",
+                                                                    color: C.brandLight,
+                                                                }}><ico.clock /></span>
+                                                                <span style={{ color: C.brandLight, fontWeight: 800, fontSize: 13 }}>
+                                                                    {log.metadata.duration}
+                                                                </span>
+                                                            </div>
+
+                                                            {log.metadata.startTime && (
+                                                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                                                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                                                        <div style={{
+                                                                            width: 8, height: 8, borderRadius: "50%",
+                                                                            background: C.green,
+                                                                            flexShrink: 0,
+                                                                            boxShadow: `0 0 0 3px ${C.green}30`,
+                                                                        }} />
+                                                                        <div style={{ flex: 1 }}>
+                                                                            <div style={{ fontSize: 11, color: C.muted, fontWeight: 600 }}>
+                                                                                {log.metadata.action === "status_session" ? "Online" :
+                                                                                 log.metadata.action === "activity_session" || log.metadata.action === "listening_session" ? "Started" : "Joined"}
+                                                                            </div>
+                                                                            <div style={{ fontSize: 12, color: C.text, fontWeight: 700 }}>
+                                                                                {new Date(log.metadata.startTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
+                                                                                <span style={{ color: C.muted, fontWeight: 500, marginLeft: 6 }}>
+                                                                                    {new Date(log.metadata.startTime).toLocaleDateString([], { month: "short", day: "numeric" })}
+                                                                                </span>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+
+                                                                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: 3 }}>
+                                                                        <div style={{ width: 2, height: 20, background: `linear-gradient(to bottom, ${C.green}, ${C.red})`, borderRadius: 1 }} />
+                                                                        <div style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
+                                                                            {log.metadata.duration}
+                                                                        </div>
+                                                                    </div>
+
+                                                                    {log.metadata.endTime && (
+                                                                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                                                            <div style={{
+                                                                                width: 8, height: 8, borderRadius: "50%",
+                                                                                background: C.red,
+                                                                                flexShrink: 0,
+                                                                                boxShadow: `0 0 0 3px ${C.red}30`,
+                                                                            }} />
+                                                                            <div style={{ flex: 1 }}>
+                                                                                <div style={{ fontSize: 11, color: C.muted, fontWeight: 600 }}>
+                                                                                    {log.metadata.action === "status_session" ? "Offline" :
+                                                                                     log.metadata.action === "activity_session" || log.metadata.action === "listening_session" ? "Stopped" : "Left"}
+                                                                                </div>
+                                                                                <div style={{ fontSize: 12, color: C.text, fontWeight: 700 }}>
+                                                                                    {new Date(log.metadata.endTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
+                                                                                    <span style={{ color: C.muted, fontWeight: 500, marginLeft: 6 }}>
+                                                                                        {new Date(log.metadata.endTime).toLocaleDateString([], { month: "short", day: "numeric" })}
+                                                                                    </span>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+
+                                                                    {!log.metadata.endTime && (
+                                                                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                                                            <div style={{
+                                                                                width: 8, height: 8, borderRadius: "50%",
+                                                                                background: C.brand,
+                                                                                flexShrink: 0,
+                                                                                animation: "ur-pulse 2s infinite",
+                                                                            }} />
+                                                                            <div style={{ fontSize: 12, color: C.brandLight, fontWeight: 700 }}>
+                                                                                Still active…
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                    {log.metadata.action === "status_session" && Array.isArray(log.metadata.statusTimeline) && log.metadata.statusTimeline.length > 0 && (
+                                                        <div style={{
+                                                            marginBottom: 10,
+                                                            padding: "12px 14px",
+                                                            background: C.bg1,
+                                                            borderRadius: 10,
+                                                            border: `1px solid ${C.border}`,
+                                                        }}>
+                                                            <div style={{
+                                                                fontSize: 10,
+                                                                fontWeight: 800,
+                                                                textTransform: "uppercase",
+                                                                letterSpacing: 0.8,
+                                                                color: C.subheader,
+                                                                marginBottom: 10,
+                                                                display: "flex",
+                                                                alignItems: "center",
+                                                                gap: 6,
+                                                            }}>
+                                                                <span style={{ display: "flex", alignItems: "center" }}><ico.status /></span>
+                                                                Status Timeline
+                                                            </div>
+                                                            <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                                                                {log.metadata.statusTimeline.map((ch: any, i: number) => (
+                                                                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
+                                                                        <div style={{
+                                                                            width: 10, height: 10, borderRadius: "50%",
+                                                                            background: ch.status === "online" ? "#23a55a" : ch.status === "idle" ? "#f0b232" : ch.status === "dnd" ? "#da373c" : "#80848e",
+                                                                            flexShrink: 0,
+                                                                            boxShadow: `0 0 0 3px ${ch.status === "online" ? "#23a55a30" : ch.status === "idle" ? "#f0b23230" : ch.status === "dnd" ? "#da373c30" : "#80848e30"}`,
+                                                                        }} />
+                                                                        {i < log.metadata.statusTimeline.length - 1 && (
+                                                                            <div style={{
+                                                                                position: "absolute",
+                                                                                left: 4,
+                                                                                top: 14,
+                                                                                width: 2,
+                                                                                height: 24,
+                                                                                background: C.border,
+                                                                                borderRadius: 1,
+                                                                            }} />
+                                                                        )}
+                                                                        <div style={{ flex: 1, minWidth: 0, paddingBottom: i < log.metadata.statusTimeline.length - 1 ? 8 : 0 }}>
+                                                                            <div style={{
+                                                                                display: "flex",
+                                                                                alignItems: "center",
+                                                                                gap: 6,
+                                                                                flexWrap: "wrap",
+                                                                            }}>
+                                                                                <span style={{
+                                                                                    fontSize: 12,
+                                                                                    fontWeight: 700,
+                                                                                    color: C.header,
+                                                                                }}>
+                                                                                    {ch.emoji} {ch.label}
+                                                                                </span>
+                                                                                <span style={{
+                                                                                    fontSize: 10,
+                                                                                    color: C.muted,
+                                                                                    fontFamily: "monospace",
+                                                                                    marginLeft: "auto",
+                                                                                }}>
+                                                                                    {ch.time}
+                                                                                </span>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                            {Array.isArray(log.metadata.platformTimeline) && log.metadata.platformTimeline.length > 0 && (
+                                                                <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                                                                    <div style={{
+                                                                        fontSize: 10,
+                                                                        fontWeight: 800,
+                                                                        textTransform: "uppercase",
+                                                                        letterSpacing: 0.8,
+                                                                        color: C.subheader,
+                                                                        marginBottom: 8,
+                                                                        display: "flex",
+                                                                        alignItems: "center",
+                                                                        gap: 6,
+                                                                    }}>
+                                                                        <span style={{ display: "flex", alignItems: "center" }}><ico.activity /></span>
+                                                                        Platform Changes
+                                                                    </div>
+                                                                    <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                                                                        {log.metadata.platformTimeline.map((pt: any, i: number) => (
+                                                                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
+                                                                                <div style={{
+                                                                                    width: 10, height: 10, borderRadius: "50%",
+                                                                                    background: C.brandLight,
+                                                                                    flexShrink: 0,
+                                                                                    boxShadow: `0 0 0 3px ${C.brandLight}30`,
+                                                                                }} />
+                                                                                {i < log.metadata.platformTimeline.length - 1 && (
+                                                                                    <div style={{
+                                                                                        position: "absolute",
+                                                                                        left: 4,
+                                                                                        top: 14,
+                                                                                        width: 2,
+                                                                                        height: 24,
+                                                                                        background: C.border,
+                                                                                        borderRadius: 1,
+                                                                                    }} />
+                                                                                )}
+                                                                                <div style={{ flex: 1, minWidth: 0, paddingBottom: i < log.metadata.platformTimeline.length - 1 ? 8 : 0 }}>
+                                                                                    <div style={{
+                                                                                        display: "flex",
+                                                                                        alignItems: "center",
+                                                                                        gap: 6,
+                                                                                        flexWrap: "wrap",
+                                                                                    }}>
+                                                                                        <span style={{
+                                                                                            fontSize: 12,
+                                                                                            fontWeight: 700,
+                                                                                            color: C.header,
+                                                                                        }}>
+                                                                                            {CLIENT_EMOJI[pt.platform.toLowerCase()] || "📡"} {CLIENT_LABEL_MAP[pt.platform] || pt.platform}
+                                                                                        </span>
+                                                                                        <span style={{
+                                                                                            fontSize: 10,
+                                                                                            color: C.muted,
+                                                                                            fontFamily: "monospace",
+                                                                                            marginLeft: "auto",
+                                                                                        }}>
+                                                                                            {pt.time}
+                                                                                        </span>
+                                                                                    </div>
+                                                                                </div>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            <div style={{
+                                                                marginTop: 10,
+                                                                paddingTop: 8,
+                                                                borderTop: `1px solid ${C.border}`,
+                                                                display: "flex",
+                                                                alignItems: "center",
+                                                                justifyContent: "space-between",
+                                                            }}>
+                                                                <span style={{ fontSize: 10, color: C.muted }}>
+                                                                    Started {new Date(log.metadata.startTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
+                                                                </span>
+                                                                <span style={{
+                                                                    fontSize: 10,
+                                                                    fontWeight: 800,
+                                                                    color: C.brandLight,
+                                                                    background: "rgba(88,101,242,0.1)",
+                                                                    padding: "2px 8px",
+                                                                    borderRadius: 6,
+                                                                }}>
+                                                                    {log.metadata.duration}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {log.metadata.platform && (
+                                                        <div style={{
+                                                            display: "flex",
+                                                            gap: 10,
+                                                            marginBottom: 8,
+                                                            alignItems: "center",
+                                                            padding: "6px 10px",
+                                                            background: C.bg2,
+                                                            borderRadius: 8,
+                                                            border: `1px solid ${C.border}`,
+                                                        }}>
+                                                            <span style={{ color: C.brandLight, fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>Platform</span>
+                                                            <span style={{ color: C.text, fontSize: 12, fontWeight: 600 }}>
+                                                                {CLIENT_EMOJI[log.metadata.platformKey || String(log.metadata.platform).toLowerCase()] || "📡"} {CLIENT_LABEL_MAP[log.metadata.platform] || log.metadata.platform}
+                                                            </span>
+                                                        </div>
+                                                    )}
+                                                    {Object.entries(log.metadata)
+                                                        .filter(([key, val]) =>
+                                                            !["duration","startTime","endTime","members","metadata","type","action","name","song","artist","allArtists","album","trackId","albumId","artistIds","contextUri","trackType","albumArtUrl","largeImage","smallImage","smallText","statusDisplayType","createdAt","sessionId","partyId","partySize","appName","appLogo","gameIconUrl","applicationId","parentApplicationId","platform","platformKey","flags","buttons","secrets","url","startTimestamp","endTimestamp","timestamps","party","assets","statusTimeline","platformTimeline","startStatus","endStatus","changeCount"].includes(key) &&
+                                                            val !== undefined && val !== null && val !== "" &&
+                                                            !(typeof val === "object" && Object.keys(val).length === 0)
+                                                        )
+                                                        .map(([key, val]) => (
+                                                        <div key={key} style={{
+                                                            display: "flex",
+                                                            gap: 10,
+                                                            marginBottom: 6,
+                                                            alignItems: "center",
+                                                            padding: "6px 10px",
+                                                            background: C.bg2,
+                                                            borderRadius: 8,
+                                                            border: `1px solid ${C.border}`,
+                                                        }}>
+                                                            <span style={{
+                                                                color: C.brandLight,
+                                                                minWidth: 80,
+                                                                fontWeight: 700,
+                                                                fontSize: 11,
+                                                                textTransform: "uppercase",
+                                                                letterSpacing: 0.5
+                                                            }}>{key}</span>
+                                                            <span style={{
+                                                                color: C.text,
+                                                                wordBreak: "break-word",
+                                                                flex: 1,
+                                                                fontSize: 12,
+                                                                fontWeight: 600,
+                                                            }}>
+                                                                {typeof val === "object" ? JSON.stringify(val) : String(val)}
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                    {Array.isArray(log.metadata.members) && log.metadata.members.length > 0 && (
+                                                        <div style={{ display: "flex", gap: 10, marginBottom: 4, alignItems: "baseline" }}>
+                                                            <span style={{ color: C.brandLight, minWidth: 80, fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>WITH</span>
+                                                            <span style={{ color: C.text, flex: 1, wordBreak: "break-word" }}>{(log.metadata.members as string[]).join(", ")}</span>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>
                                     )}
                                 </div>
-                                <div style={{ color: C.muted, fontSize: 9, flexShrink: 0, opacity: 0.6 }}>
-                                    {new Date(log.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                                </div>
+
                             </div>
                         ))}
                     </div>
                 ))}
                 {logs.length === 0 && (
+                    <div style={{ textAlign: "center", padding: "40px 0", color: C.muted }}>
+                        <div style={{
+                            width: 56,
+                            height: 56,
+                            borderRadius: "50%",
+                            background: C.bg1,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            margin: "0 auto 14px",
+                            border: `1px solid ${C.border}`,
+                        }}>
+                            <ico.ghost />
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: C.header }}>No activity tracked yet</div>
+                        <div style={{ fontSize: 12, marginTop: 4, color: C.muted }}>Events will appear here once this user does something</div>
+                    </div>
+                )}
+                {logs.length > 0 && filtered.length === 0 && (
                     <div style={{ textAlign: "center", padding: "32px 0", color: C.muted }}>
-                        <div style={{ fontSize: 28, marginBottom: 10, opacity: 0.5 }}>📭</div>
-                        <div style={{ fontSize: 13, fontWeight: 600 }}>No activity tracked yet</div>
-                        <div style={{ fontSize: 11, marginTop: 3 }}>Events will appear here once this user does something</div>
+                        <div style={{ display: "flex", justifyContent: "center", marginBottom: 10, opacity: 0.5 }}>
+                            <ico.search />
+                        </div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>No matching events</div>
+                        <div style={{ fontSize: 11, marginTop: 3 }}>Try adjusting your filters or search</div>
                     </div>
                 )}
             </div>
 
-            {/* Actions */}
-            <div style={{ marginTop: 12, display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                <button
-                    onClick={() => {
-                        const input = document.createElement("input")
-                        input.type = "file"
-                        input.accept = ".json"
-                        input.onchange = async (e: any) => {
-                            const file = e.target.files[0]
-                            if (!file) return
-                            const text = await file.text()
-                            const ok = await activityStore.importAll(text)
-                            if (ok) {
-                                setLogs(activityStore.getLogs(userId))
-                                Toasts.show({
-                                    message: `Imported activity log for ${displayName(UserStore.getUser(userId)) || userId}`,
-                                    id: Toasts.genId(),
-                                    type: Toasts.Type.SUCCESS,
-                                })
-                            } else {
-                                Toasts.show({
-                                    message: "Failed to import — invalid JSON file",
-                                    id: Toasts.genId(),
-                                    type: Toasts.Type.FAILURE,
-                                })
-                            }
+                    </div>
+    )
+}
+
+// activity count badge
+
+function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: () => void }) {
+    const [count, setCount] = React.useState(0)
+
+    React.useEffect(() => {
+        const load = async () => {
+            await activityStore.load()
+            setCount(activityStore.getLogs(userId).length)
+        }
+        load()
+        const unsub = onActivityUpdate((uid) => {
+            if (uid === userId) setCount(activityStore.getLogs(userId).length)
+        })
+        return unsub
+    }, [userId])
+
+    return (
+        <div style={{
+            display: "flex",
+            gap: 8,
+            justifyContent: "flex-end",
+            alignItems: "center",
+            width: "100%",
+        }}>
+            <span style={{ fontSize: 11, color: C.muted, marginRight: "auto" }}>
+                {count} total events logged
+            </span>
+            <button
+                onClick={() => {
+                    const input = document.createElement("input")
+                    input.type = "file"
+                    input.accept = ".json"
+                    input.onchange = async (e: any) => {
+                        const file = e.target.files[0]
+                        if (!file) return
+                        const text = await file.text()
+                        const ok = await activityStore.importAll(text)
+                        if (ok) {
+                            onRefresh?.()
+                            Toasts.show({
+                                message: `Imported activity log`,
+                                id: Toasts.genId(),
+                                type: Toasts.Type.SUCCESS,
+                            })
+                        } else {
+                            Toasts.show({
+                                message: "Failed to import — invalid JSON file",
+                                id: Toasts.genId(),
+                                type: Toasts.Type.FAILURE,
+                            })
                         }
-                        input.click()
-                    }}
-                    style={{
-                        padding: "6px 14px", borderRadius: 20, background: "transparent",
-                        border: `1px solid ${C.border}`, color: C.muted, fontSize: 11,
-                        fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
-                        transition: "all 150ms ease",
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.color = C.text }}
-                    onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted }}
-                >
-                    Import JSON
-                </button>
-                {logs.length > 0 && (
-                    <button
-                        onClick={() => {
-                            const data = activityStore.exportAll()
-                            const blob = new Blob([data], { type: "application/json" })
-                            const url = URL.createObjectURL(blob)
-                            const a = document.createElement("a")
-                            a.href = url
-                            a.download = `userradar_${userId}_${new Date().toISOString().slice(0,10)}.json`
-                            a.click()
-                            URL.revokeObjectURL(url)
-                        }}
-                        style={{
-                            padding: "6px 14px", borderRadius: 20, background: "transparent",
-                            border: `1px solid ${C.border}`, color: C.muted, fontSize: 11,
-                            fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
-                            transition: "all 150ms ease",
-                        }}
-                        onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.color = C.text }}
-                        onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted }}
-                    >
-                        Export JSON
-                    </button>
-                )}
-                {logs.length > 0 && (
-                    <button
-                        onClick={async () => {
-                            if (confirm("Clear all history for this user? This cannot be undone.")) {
-                                await activityStore.clearLogs(userId)
-                                setLogs([])
-                            }
-                        }}
-                        style={{
-                            padding: "6px 14px", borderRadius: 20, background: "transparent",
-                            border: `1px solid ${C.red}`, color: C.red, fontSize: 11,
-                            fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
-                            transition: "all 150ms ease",
-                        }}
-                        onMouseEnter={e => { e.currentTarget.style.background = "rgba(218,55,60,0.1)" }}
-                        onMouseLeave={e => { e.currentTarget.style.background = "transparent" }}
-                    >
-                        Clear History
-                    </button>
-                )}
-            </div>
+                    }
+                    input.click()
+                }}
+                style={{
+                    padding: "8px 16px",
+                    borderRadius: 20,
+                    background: C.bg1,
+                    border: `1px solid ${C.border}`,
+                    color: C.text,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    transition: "all 150ms ease",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = C.bg2 }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg1 }}
+            >
+                <ico.download />
+                Import
+            </button>
+            <button
+                onClick={() => {
+                    if (count === 0) {
+                        Toasts.show({
+                            message: "No activity to export",
+                            id: Toasts.genId(),
+                            type: Toasts.Type.FAILURE,
+                        })
+                        return
+                    }
+                    const data = activityStore.exportAll()
+                    const blob = new Blob([data], { type: "application/json" })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement("a")
+                    a.href = url
+                    a.download = `userradar_${userId}_${new Date().toISOString().slice(0,10)}.json`
+                    a.click()
+                    URL.revokeObjectURL(url)
+                }}
+                style={{
+                    padding: "8px 16px",
+                    borderRadius: 20,
+                    background: C.bg1,
+                    border: `1px solid ${C.border}`,
+                    color: C.text,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    transition: "all 150ms ease",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = C.bg2 }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg1 }}
+            >
+                <ico.upload />
+                Export
+            </button>
+            <button
+                onClick={async () => {
+                    if (count === 0) {
+                        Toasts.show({
+                            message: "No activity to clear",
+                            id: Toasts.genId(),
+                            type: Toasts.Type.FAILURE,
+                        })
+                        return
+                    }
+                    if (confirm("Clear all history for this user? This cannot be undone.")) {
+                        await activityStore.clearLogs(userId)
+                        onRefresh?.()
+                    }
+                }}
+                style={{
+                    padding: "8px 16px",
+                    borderRadius: 20,
+                    background: "rgba(218,55,60,0.08)",
+                    border: `1px solid ${C.red}`,
+                    color: C.red,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    transition: "all 150ms ease",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = "rgba(218,55,60,0.15)" }}
+                onMouseLeave={e => { e.currentTarget.style.background = "rgba(218,55,60,0.08)" }}
+            >
+                <ico.clear />
+                Clear
+            </button>
         </div>
     )
 }
 
-// ===== END ACTIVITY TAB COMPONENT =====
-
-// Reactive activity count badge — updates when store loads or new events arrive
 function ActivityBadge({ userId }: { userId: string }) {
     const [count, setCount] = React.useState(0)
     const [loaded, setLoaded] = React.useState(false)
@@ -1550,8 +2656,6 @@ function ActivityBadge({ userId }: { userId: string }) {
         </span>
     )
 }
-
-
 
 function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
     user: WatchedUser
@@ -1791,6 +2895,9 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                                         <UserRadarActivityTab userId={user.id} />
                                     </div>
                                 </ModalContent>
+                                <ModalFooter>
+                                    <ActivityLogFooter userId={user.id} />
+                                </ModalFooter>
                             </ModalRoot>
                         ));
                     }}
@@ -1913,7 +3020,7 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                                         {([
                                             { key: "stalker" as const, label: "Stalker", desc: "Maximum tracking — every event", color: C.danger },
                                             { key: "lite" as const, label: "Lite", desc: "Messages, edits, deletes, typing, avatar, voice", color: C.brandLight },
-                                            { key: "silent" as const, label: "Silent", desc: "No notifications at all", color: C.muted },
+                                            { key: "silent" as const, label: "Silent", desc: "Log everything silently — no pings", color: C.muted },
                                         ]).map(preset => {
                                             const isActive = activePreset === preset.key
                                             return (
@@ -2226,7 +3333,7 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
         { key: "custom",  label: "Custom",  desc: "Per-user control",         color: C.brand },
         { key: "stalker", label: "Stalker", desc: "Everything tracked",       color: C.danger },
         { key: "lite",    label: "Lite",    desc: "Essential tracking only",  color: C.brandLight },
-        { key: "silent",  label: "Silent",  desc: "All notifications off",    color: "#b5bac1" }, // lighter gray for better active contrast
+        { key: "silent",  label: "Silent",  desc: "Log everything silently",    color: "#b5bac1" }, // lighter gray for better active contrast
     ]
     const activeIndex = presets.findIndex(p => p.key === mode)
 
@@ -2245,7 +3352,6 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
                 padding: 4,
                 position: "relative",
             }}>
-                {/* Sliding active pill */}
                 <div style={{
                     position: "absolute",
                     top: 4,
@@ -2341,11 +3447,6 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
         </div>
     )
 }
-
-
-
-
-
 
 function WatchlistModal({ modalProps }: { modalProps: any }) {
     React.useEffect(() => { injectStyles() }, [])
@@ -2463,7 +3564,145 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             </ModalContent>
 
             <ModalFooter>
-                <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", width: "100%" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 8 }}>
+                    <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                            onClick={() => {
+                                const input = document.createElement("input")
+                                input.type = "file"
+                                input.accept = ".json"
+                                input.onchange = async (e: any) => {
+                                    const file = e.target.files[0]
+                                    if (!file) return
+                                    try {
+                                        const text = await file.text()
+                                        const data = JSON.parse(text)
+                                        if (!Array.isArray(data)) throw new Error("Invalid format")
+                                        let added = 0
+                                        for (const u of data) {
+                                            if (u.id && !isWatched(settings, u.id)) {
+                                                addUser(settings, u.id, u.nick || "")
+                                                added++
+                                            }
+                                        }
+                                        refresh()
+                                        Toasts.show({
+                                            message: `Imported ${added} users to watchlist`,
+                                            id: Toasts.genId(),
+                                            type: Toasts.Type.SUCCESS,
+                                        })
+                                    } catch (err: any) {
+                                        Toasts.show({
+                                            message: `Import failed: ${err.message || "Invalid file"}`,
+                                            id: Toasts.genId(),
+                                            type: Toasts.Type.FAILURE,
+                                        })
+                                    }
+                                }
+                                input.click()
+                            }}
+                            style={{
+                                padding: "8px 16px",
+                                borderRadius: 20,
+                                background: C.bg1,
+                                border: `1px solid ${C.border}`,
+                                color: C.text,
+                                fontSize: 12,
+                                fontWeight: 700,
+                                cursor: "pointer",
+                                fontFamily: "inherit",
+                                transition: "all 150ms ease",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 6,
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = C.bg2 }}
+                            onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg1 }}
+                        >
+                            <ico.download />
+                            Import
+                        </button>
+                        <button
+                            onClick={() => {
+                                const list = getWatchlist(settings)
+                                if (list.length === 0) {
+                                    Toasts.show({
+                                        message: "Watchlist is empty",
+                                        id: Toasts.genId(),
+                                        type: Toasts.Type.FAILURE,
+                                    })
+                                    return
+                                }
+                                const data = JSON.stringify(list, null, 2)
+                                const blob = new Blob([data], { type: "application/json" })
+                                const url = URL.createObjectURL(blob)
+                                const a = document.createElement("a")
+                                a.href = url
+                                a.download = `userradar_watchlist_${new Date().toISOString().slice(0,10)}.json`
+                                a.click()
+                                URL.revokeObjectURL(url)
+                                Toasts.show({
+                                    message: `Exported ${list.length} users`,
+                                    id: Toasts.genId(),
+                                    type: Toasts.Type.SUCCESS,
+                                })
+                            }}
+                            style={{
+                                padding: "8px 16px",
+                                borderRadius: 20,
+                                background: C.bg1,
+                                border: `1px solid ${C.border}`,
+                                color: C.text,
+                                fontSize: 12,
+                                fontWeight: 700,
+                                cursor: "pointer",
+                                fontFamily: "inherit",
+                                transition: "all 150ms ease",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 6,
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = C.bg2 }}
+                            onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg1 }}
+                        >
+                            <ico.upload />
+                            Export
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (confirm("Clear all activity logs for ALL watched users? This cannot be undone.")) {
+                                    activityStore.clearAll().then(() => {
+                                        Toasts.show({
+                                            message: "All activity logs cleared",
+                                            id: Toasts.genId(),
+                                            type: Toasts.Type.SUCCESS,
+                                        })
+                                    })
+                                }
+                            }}
+                            style={{
+                                padding: "8px 16px",
+                                borderRadius: 20,
+                                background: "rgba(218,55,60,0.08)",
+                                border: `1px solid ${C.red}`,
+                                color: C.red,
+                                fontSize: 12,
+                                fontWeight: 700,
+                                cursor: "pointer",
+                                fontFamily: "inherit",
+                                transition: "all 150ms ease",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 6,
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.background = "rgba(218,55,60,0.15)" }}
+                            onMouseLeave={e => { e.currentTarget.style.background = "rgba(218,55,60,0.08)" }}
+                        >
+                            <ico.clear />
+                            Clear All Logs
+                        </button>
+                    </div>
+
                     <button
                         onClick={modalProps.onClose}
                         style={{
@@ -2495,17 +3734,19 @@ const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
             <Menu.MenuItem
                 id="ur-watch"
                 label={isW ? "Unwatch User" : "Watch User"}
+                icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
                 action={() => {
                     if (isW) { removeUser(settings, user.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(user)} from watchlist`, id: Toasts.genId() }) }
                     else { addUser(settings, user.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(user)} to watchlist`, id: Toasts.genId() }) }
                 }}
-                icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
+
             />
             <Menu.MenuItem
                 id="ur-config"
                 label="Manage Watchlist"
-                action={() => openModal(p => <WatchlistModal modalProps={p} />)}
                 icon={CtxGearIcon}
+                action={() => openModal(p => <WatchlistModal modalProps={p} />)}
+
             />
         </Menu.MenuGroup>
     )
@@ -2520,11 +3761,12 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
             <Menu.MenuItem
                 id="ur-msg-watch"
                 label={isW ? "remove author from watchlist" : "add author to watchlist"}
+                icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
                 action={() => {
                     if (isW) { removeUser(settings, message.author.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(message.author)} from watchlist`, id: Toasts.genId() }) }
                     else { addUser(settings, message.author.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(message.author)} to watchlist`, id: Toasts.genId() }) }
                 }}
-                icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
+
             />
         </Menu.MenuGroup>
     )
@@ -2532,14 +3774,11 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
 
 // the plugin itself
 
-
-// ===== DM TOOLBAR ACTIVITY BUTTON =====
-// Injects clock icon into DM chat toolbar for tracked users
+// DM toolbar — injects clock icon for tracked users
 
 const HISTORY_SVG = `<svg aria-hidden="true" role="img" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`
 
 function injectDMActivityButton() {
-    // Only run in DM channels
     const match = location.pathname.match(/\/channels\/@me\/(\d+)/)
     if (!match) return
     const channelId = match[1]
@@ -2554,10 +3793,9 @@ function injectDMActivityButton() {
     // Strategy: Find an existing toolbar button and use it as anchor.
     // Discord DM toolbar has buttons with aria-labels like "Start Voice Call",
     // "Start Video Call", "Add Friends to DM", etc.
-    // We find one of these buttons, get its parent (the toolbar), then insert our button.
     const knownButtonLabels = [
         'Start Voice Call',
-        'Start Video Call', 
+        'Start Video Call',
         'Add Friends to DM',
         'Show Member List',
         'Threads',
@@ -2632,11 +3870,14 @@ function injectDMActivityButton() {
                         <UserRadarActivityTab userId={recipientId} />
                     </div>
                 </ModalContent>
+                <ModalFooter>
+                    <ActivityLogFooter userId={recipientId} />
+                </ModalFooter>
             </ModalRoot>
         ))
     }
 
-    // Insert BEFORE the first button in the toolbar so it appears at the left side of icons
+    // prepend so it lands on the left
     toolbar.insertBefore(btn, toolbar.firstChild)
 }
 
@@ -2660,8 +3901,6 @@ function stopDMObserver() {
     }
     document.querySelectorAll('.ur-dm-activity-btn').forEach(el => el.remove())
 }
-
-// ===== END DM TOOLBAR =====
 
 export default definePlugin({
     name: "UserRadar",
@@ -2688,7 +3927,6 @@ export default definePlugin({
             const allGuilds: string[] = guildMod?.getGuildIds?.() ?? []
 
             for (const wu of getWatchlist(settings)) {
-                // voice + camera/stream
                 try {
                     const vs = vsMod?.getVoiceStateForUser?.(wu.id)
                     vcCache[wu.id]     = vs?.channelId ?? null
@@ -2696,7 +3934,6 @@ export default definePlugin({
                     streamCache[wu.id] = vs?.selfStream ?? false
                 } catch { vcCache[wu.id] = null; cameraCache[wu.id] = false; streamCache[wu.id] = false }
 
-                // client type (desktop/mobile/web)
                 try {
                     const cs = presMod?.getClientStatus?.(wu.id)
                     if (cs) clientCache[wu.id] = resolveClient(cs as any)
@@ -2794,17 +4031,17 @@ export default definePlugin({
                     icon: avatarUrl(uid, message.author?.avatar, 80),
                     onClick: () => jumpTo(ch?.guild_id, channelId, message.id),
                 })
-                logUserActivity(uid, "msg", "💬", `sent a message in ${location}`, msgPreview(message.content, message.attachments?.[0]?.filename), {
+                logUserActivity(uid, "msg", "💬", `sent a message`, msgPreview(message.content, message.attachments?.[0]?.filename), {
                     guildId: ch?.guild_id,
                     channelId,
                     msgId: message.id,
                     metadata: {
+                        server: g?.name || "Direct Message",
+                        channel: chName,
                         content: message.content,
-                        attachments: message.attachments?.map((a: any) => a.filename) || [],
-                        embeds: message.embeds?.length || 0,
                     }
                 }).catch(() => {})
-                
+
             }
         },
 
@@ -2850,12 +4087,11 @@ export default definePlugin({
                 channelId: message.channel_id,
                 msgId: message.id,
                 metadata: {
-                    before: cached?.content || "unknown",
-                    after: message.content || "",
-                    location,
+                    server: g?.name || "Direct Message",
+                    channel: chName,
                 }
             }).catch(() => {})
-            
+
         },
 
         MESSAGE_DELETE({ id, channelId }: MsgDeleteEvent) {
@@ -2896,10 +4132,8 @@ export default definePlugin({
                     channelId,
                     msgId: msg.id,
                     metadata: {
-                        content: msg.content || "",
-                        attachments: msg.attachments?.map((a: any) => a.filename) || [],
-                        author: displayName(msg.author),
-                        location,
+                        server: g?.name || "Direct Message",
+                        channel: chName,
                     }
                 }).catch(() => {})
             }
@@ -2929,15 +4163,22 @@ export default definePlugin({
                 // body format: "Server Name · #channel" or "Direct Message" for DMs
                 notify({
                     title: `${dn} is typing…`,
-                    body: location + platformSuffix(userId),
+                    body: location + "",
                     icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                     onClick: () => jumpTo(ch?.guild_id, channelId),
                 })
-                logActivity(userId, "typing", "💭", `is typing in ${location}`, ch?.guild_id, channelId)
+                logUserActivity(userId, "typing", "💭", `is typing in ${location}`, `${gName ? gName + " · " : ""}#${chName}`, {
+                    guildId: ch?.guild_id,
+                    channelId,
+                    metadata: {
+                        server: gName || "Direct Message",
+                        channel: chName,
+                    }
+                }).catch(() => {})
             }
         },
 
-        VOICE_STATE_UPDATES({ voiceStates }: VoiceStateEvent) {
+        async VOICE_STATE_UPDATES({ voiceStates }: VoiceStateEvent) {
             for (const vs of voiceStates || []) {
                 const uid = vs.userId
                 if (!isWatched(settings, uid)) continue
@@ -2945,7 +4186,6 @@ export default definePlugin({
                 const now = vs.channelId || null
                 const channelChanged = old !== now
 
-                // first time seeing this user — seed caches and skip
                 if (old === undefined) {
                     vcCache[uid] = now
                     cameraCache[uid] = vs.selfVideo ?? false
@@ -2957,8 +4197,7 @@ export default definePlugin({
                 if (channelChanged) vcCache[uid] = now
 
                 if (!isFeatureOn(uid, "voice", "globalVoice")) {
-                    // still update camera/stream cache even if feature is off
-                    cameraCache[uid] = vs.selfVideo ?? false
+                cameraCache[uid] = vs.selfVideo ?? false
                     streamCache[uid] = vs.selfStream ?? false
                     continue
                 }
@@ -2971,32 +4210,92 @@ export default definePlugin({
                 const chName = ch?.name || "unknown"
 
                 if (!channelChanged) {
-                    // channel didn't change — only here for camera/stream updates, handled below
-                    // fall through to camera/stream detection at the end
-                } else
+                                    } else
                 if (!old && now) {
                     vcJoinTime[uid] = Date.now()
                     const guildNameVc = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id)?.name : null
+                    const sk = sessionKey(uid, "voice", now!)
                     notify({
                         title: `${dn} Joined Voice`,
-                        body: (guildNameVc ? `${guildNameVc} · #${chName}` : `#${chName}`) + platformSuffix(uid),
+                        body: (guildNameVc ? `${guildNameVc} · #${chName}` : `#${chName}`) + "",
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                         onClick: () => jumpTo(ch?.guild_id, now!),
                     })
-                    logActivity(uid, "voice", "🎙️", `joined #${chName}${platformSuffixLog(uid)}`, ch?.guild_id, now!)
+                    const vcMembers = (() => {
+                        try {
+                            const vsMod = findByProps("getVoiceStatesForChannel")
+                            const raw = vsMod?.getVoiceStatesForChannel?.(now!)
+                            if (!raw) return []
+                            // handle both plain object and Map
+                            const states: any[] = raw instanceof Map ? [...raw.values()] : Object.values(raw)
+                            return states
+                                .filter((s: any) => s?.userId && s.userId !== uid)
+                                .map((s: any) => { const m = UserStore.getUser(s.userId); return m ? (m.globalName || m.username) : s.userId })
+                        } catch { return [] }
+                    })()
+                    const joinPlatform = clientCache[uid] ? CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid] : undefined
+                    const entry = await logUserActivity(uid, "voice", "🎙️", `joined #${chName}`, `${guildNameVc ? guildNameVc + " · " : ""}#${chName}${platformSuffixLog(uid)}`, {
+                        guildId: ch?.guild_id,
+                        channelId: now!,
+                        metadata: {
+                            server: guildNameVc || "DM",
+                            channel: chName,
+                            action: "joined",
+                            platform: joinPlatform,
+                            members: vcMembers.length > 0 ? vcMembers : undefined,
+                        }
+                    })
+                    activeSessions[sk] = { logId: entry.id, startTime: Date.now(), channelId: now!, guildId: ch?.guild_id, metadata: { server: guildNameVc || "DM", channel: chName, platform: joinPlatform || clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined, members: vcMembers.length > 0 ? vcMembers : undefined } }
                 } else if (old && !now) {
                     const spent = vcJoinTime[uid] ? Date.now() - vcJoinTime[uid] : 0
                     delete vcJoinTime[uid]
-                    const dur = spent > 60000 ? ` (${formatDuration(spent)})` : ""
+                    const dur = spent > 60000 ? formatDuration(spent) : ""
                     const guildNameVcLeft = (ch ?? (old ? ChannelStore.getChannel(old) : null))
                     const guildNameVcLeftStr = guildNameVcLeft?.guild_id ? findByProps("getGuild")?.getGuild(guildNameVcLeft.guild_id)?.name : null
-                    notify({
-                        title: `${dn} Left Voice`,
-                        body: guildNameVcLeftStr ? `${guildNameVcLeftStr} · #${chName}${dur}` : `#${chName}${dur}`,
-                        icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
-                        onClick: () => openUserProfile(uid),
-                    })
-                    logActivity(uid, "voice", "🎙️", `left #${chName}${dur}`, ch?.guild_id, old!)
+                    const sk = sessionKey(uid, "voice", old!)
+                    const session = activeSessions[sk]
+
+                    if (session) {
+                        // Update the original join log with session info
+                        await activityStore.updateLog(uid, session.logId, {
+                            type: "session",
+                            title: dur ? `In #${chName} · ${dur}` : `In #${chName}`,
+                            body: `${guildNameVcLeftStr || "DM"} · #${chName}`,
+                            metadata: {
+                                ...session.metadata,
+                                action: "voice_session",
+                                startTime: session.startTime,
+                                endTime: Date.now(),
+                                duration: dur || "< 1m",
+                                platform: session.metadata?.platform || (clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined),
+                                appName: session.metadata?.appName || guildNameVcLeftStr || "Discord",
+                            }
+                        })
+                        delete activeSessions[sk]
+                        notify({
+                            title: `${dn} Left Voice`,
+                            body: guildNameVcLeftStr ? `${guildNameVcLeftStr} · #${chName}${dur ? " · " + dur : ""}` : `#${chName}${dur ? " · " + dur : ""}`,
+                            icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                    } else {
+                        // No session found, log as separate leave event
+                        notify({
+                            title: `${dn} Left Voice`,
+                            body: guildNameVcLeftStr ? `${guildNameVcLeftStr} · #${chName}` : `#${chName}`,
+                            icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                        logUserActivity(uid, "voice", "🎙️", `left #${chName}`, `${guildNameVcLeftStr ? guildNameVcLeftStr + " · " : ""}#${chName}`, {
+                            guildId: ch?.guild_id || guildNameVcLeft?.guild_id,
+                            channelId: old!,
+                            metadata: {
+                                server: guildNameVcLeftStr || "DM",
+                                channel: chName,
+                                action: "left",
+                            }
+                        }).catch(() => {})
+                    }
                 } else if (old && now && old !== now) {
                     const oldCh = ChannelStore.getChannel(old)
                     const guildNameVcMove = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id)?.name : null
@@ -3008,10 +4307,18 @@ export default definePlugin({
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                         onClick: () => jumpTo(ch?.guild_id, now!),
                     })
-                    logActivity(uid, "voice", "🎙️", `moved from #${oldCh?.name || "?"} to #${chName}`, ch?.guild_id, now!)
+                    logUserActivity(uid, "voice", "🎙️", `moved voice channels`, `${guildNameVcMove ? guildNameVcMove + " · " : ""}#${oldCh?.name || "?"} → #${chName}`, {
+                        guildId: ch?.guild_id,
+                        channelId: now!,
+                        metadata: {
+                            server: guildNameVcMove || "DM",
+                            fromChannel: oldCh?.name || "?",
+                            toChannel: chName,
+                            action: "moved",
+                        }
+                    }).catch(() => {})
                 }
 
-                // ── screen share / camera detection ──────────────────
                 // runs on every VOICE_STATE_UPDATES regardless of channel change
                 // discord sends a separate event when selfVideo/selfStream flips
                 const currentCh = now ? ChannelStore.getChannel(now) : ch
@@ -3025,40 +4332,115 @@ export default definePlugin({
                     const oldCamera = cameraCache[uid] ?? false
                     if (oldCamera !== newCamera) {
                         cameraCache[uid] = newCamera
-                        notify({
-                            title: newCamera ? `${dn} turned on camera` : `${dn} turned off camera`,
-                            body: `in #${currentChName}`,
-                            icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
-                            onClick: () => jumpTo(currentGuildId, currentChId),
-                        })
-                        logActivity(uid, "voice", newCamera ? "📷" : "🚫", `${newCamera ? "turned on" : "turned off"} camera in #${currentChName}`, currentGuildId, currentChId)
+                        const camSk = sessionKey(uid, "camera", currentChId)
+                        if (newCamera) {
+                            // Camera turned on - start session
+                            notify({
+                                title: `${dn} turned on camera`,
+                                body: `in #${currentChName}`,
+                                icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                                onClick: () => jumpTo(currentGuildId, currentChId),
+                            })
+                            const camPlatform = clientCache[uid] ? CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid] : undefined
+                            logUserActivity(uid, "voice", "📷", `camera on in #${currentChName}`, `#${currentChName}`, {
+                                guildId: currentGuildId,
+                                channelId: currentChId,
+                                metadata: {
+                                    server: currentGuildId ? findByProps("getGuild")?.getGuild(currentGuildId)?.name : "DM",
+                                    channel: currentChName,
+                                    action: "camera_on",
+                                    platform: camPlatform,
+                                }
+                            }).then(camEntry => {
+                                activeSessions[camSk] = { logId: camEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: currentGuildId ? findByProps("getGuild")?.getGuild(currentGuildId)?.name : "DM", channel: currentChName, platform: camPlatform } }
+                            }).catch(() => {})
+                        } else {
+                                            const camSession = activeSessions[camSk]
+                            const camSpent = camSession ? Date.now() - camSession.startTime : 0
+                            const camDur = camSpent > 60000 ? formatDuration(camSpent) : ""
+                            if (camSession) {
+                                activityStore.updateLog(uid, camSession.logId, {
+                                    type: "session",
+                                    title: camDur ? `Camera on · ${camDur}` : `Camera on`,
+                                    body: `${camSession.metadata?.server || "DM"} · #${camSession.metadata?.channel || currentChName}`,
+                                    metadata: {
+                                        ...camSession.metadata,
+                                        action: "camera_session",
+                                        startTime: camSession.startTime,
+                                        endTime: Date.now(),
+                                        duration: camDur || "< 1m",
+                                    }
+                                }).then(() => { delete activeSessions[camSk] }).catch(() => { delete activeSessions[camSk] })
+                            }
+                            notify({
+                                title: `${dn} turned off camera`,
+                                body: `in #${currentChName}${camDur ? " · " + camDur : ""}`,
+                                icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                                onClick: () => jumpTo(currentGuildId, currentChId),
+                            })
+                        }
                     }
 
-                    // screen share / go live
                     const newStream = vs.selfStream ?? false
                     const oldStream = streamCache[uid] ?? false
                     if (oldStream !== newStream) {
                         streamCache[uid] = newStream
-                        notify({
-                            title: newStream ? `${dn} started screen sharing` : `${dn} stopped screen sharing`,
-                            body: `in #${currentChName}`,
-                            icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
-                            onClick: () => jumpTo(currentGuildId, currentChId),
-                        })
-                        logActivity(uid, "voice", newStream ? "🖥️" : "🛑", `${newStream ? "started" : "stopped"} screen sharing in #${currentChName}`, currentGuildId, currentChId)
+                        const streamSk = sessionKey(uid, "stream", currentChId)
+                        if (newStream) {
+                                notify({
+                                title: `${dn} started screen sharing`,
+                                body: `in #${currentChName}`,
+                                icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                                onClick: () => jumpTo(currentGuildId, currentChId),
+                            })
+                            const streamPlatform = clientCache[uid] ? CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid] : undefined
+                            logUserActivity(uid, "voice", "🖥️", `screen sharing in #${currentChName}`, `#${currentChName}`, {
+                                guildId: currentGuildId,
+                                channelId: currentChId,
+                                metadata: {
+                                    server: currentGuildId ? findByProps("getGuild")?.getGuild(currentGuildId)?.name : "DM",
+                                    channel: currentChName,
+                                    action: "stream_on",
+                                    platform: streamPlatform,
+                                }
+                            }).then(streamEntry => {
+                                activeSessions[streamSk] = { logId: streamEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: currentGuildId ? findByProps("getGuild")?.getGuild(currentGuildId)?.name : "DM", channel: currentChName, platform: streamPlatform } }
+                            }).catch(() => {})
+                        } else {
+                                const streamSession = activeSessions[streamSk]
+                            const streamSpent = streamSession ? Date.now() - streamSession.startTime : 0
+                            const streamDur = streamSpent > 60000 ? formatDuration(streamSpent) : ""
+                            if (streamSession) {
+                                activityStore.updateLog(uid, streamSession.logId, {
+                                    type: "session",
+                                    title: streamDur ? `Screen sharing · ${streamDur}` : `Screen sharing`,
+                                    body: `${streamSession.metadata?.server || "DM"} · #${streamSession.metadata?.channel || currentChName}`,
+                                    metadata: {
+                                        ...streamSession.metadata,
+                                        action: "stream_session",
+                                        startTime: streamSession.startTime,
+                                        endTime: Date.now(),
+                                        duration: streamDur || "< 1m",
+                                    }
+                                }).then(() => { delete activeSessions[streamSk] }).catch(() => { delete activeSessions[streamSk] })
+                            }
+                            notify({
+                                title: `${dn} stopped screen sharing`,
+                                body: `in #${currentChName}${streamDur ? " · " + streamDur : ""}`,
+                                icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                                onClick: () => jumpTo(currentGuildId, currentChId),
+                            })
+                        }
                     }
                 } else {
-                    // left vc — reset camera/stream so next join starts fresh
                     cameraCache[uid] = false
                     streamCache[uid] = false
                 }
             }
         },
 
-        PRESENCE_UPDATES({ updates }: PresenceEvent) {
-            // ignore presence events in first 15s — discord fires these on startup
-            // for everyone you share a server with, causing false online/offline spam
-            const isStartup = Date.now() - pluginStartedAt < 15000
+        async PRESENCE_UPDATES({ updates }: PresenceEvent) {
+                            const isStartup = Date.now() - pluginStartedAt < 15000
             for (const u of updates || []) {
                 const uid = u.user?.id
                 if (!uid || !isWatched(settings, uid)) continue
@@ -3066,33 +4448,122 @@ export default definePlugin({
                 const oldStatus = statusCache[uid]
                 const newStatus = u.status
 
-                // always update cache regardless of startup — so baseline is correct
-                // but don't notify during startup
-                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup) {
+                const STATUS_LABEL: Record<string, string> = { online: "Online", idle: "Away", dnd: "Do Not Disturb", offline: "Offline", invisible: "Invisible" }
+
+                const isOfflineStatus = (s: string) => s === "offline" || s === "invisible"
+                const wasOffline = isOfflineStatus(oldStatus)
+                const isOffline = isOfflineStatus(newStatus)
+                let sessionJustEnded = false
+
+                if (!isOffline && !isStartup) {
+                    if (!statusSessionCache[uid]) {
+                        statusSessionCache[uid] = {
+                            startTime: Date.now(),
+                            startStatus: newStatus,
+                            changes: [{ status: newStatus, ts: Date.now() }],
+                            platforms: clientCache[uid] ? [{ platform: clientCache[uid]!, ts: Date.now() }] : [],
+                        }
+                    }
+                }
+
+                if (!isOffline && statusSessionCache[uid] && oldStatus !== newStatus && !isStartup) {
+                    statusSessionCache[uid]!.changes.push({ status: newStatus, ts: Date.now() })
+                    const label = getWatchedUser(settings, uid)?.nick
+                    const userObj  = UserStore.getUser(uid)
+                    const name  = displayName(userObj) || uid
+                    const dn    = label ? `${label} (${name})` : name
+                    notify({
+                        title: `${dn} is now ${newStatus}`,
+                        body: `was: ${STATUS_LABEL[oldStatus] || oldStatus}`,
+                        icon: userObj ? avatarUrl(userObj.id, (userObj as any).avatar, 80) : undefined,
+                        onClick: () => openUserProfile(uid),
+                    })
+                }
+
+                if (isOffline && statusSessionCache[uid] && !isStartup) {
+                    const session = statusSessionCache[uid]!
+                    const duration = Date.now() - session.startTime
+                    const durStr = formatDuration(duration)
+                    const changes = session.changes
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
                     const name  = displayName(user) || uid
                     const dn    = label ? `${label} (${name})` : name
-                    const STATUS_LABEL: Record<string, string> = { online: "Online", idle: "Away", dnd: "Do Not Disturb", offline: "Offline", invisible: "Invisible" }
-                    const c = clientCache[uid]
-                    const platFrom = settings.store.showPlatform && c ? ` from ${CLIENT_LABEL_MAP[c] || c}` : ""
-                    const platLog = platformSuffixLog(uid)
+                    const sessionPlatform = clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined
+
+                    const statusTimeline = changes.map((ch, i) => {
+                        const prev = i > 0 ? changes[i - 1].status : session.startStatus
+                        if (ch.status === prev && i > 0) return null
+                        return {
+                            status: ch.status,
+                            emoji: STATUS_EMOJI_LOCAL[ch.status] || "⚫",
+                            label: STATUS_LABEL[ch.status] || ch.status,
+                            time: new Date(ch.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }),
+                            ts: ch.ts,
+                        }
+                    }).filter(Boolean)
+
+                    const platformTimeline = (session.platforms || []).map((pt: any, i: number) => {
+                        const prev = i > 0 ? session.platforms[i - 1].platform : null
+                        if (pt.platform === prev && i > 0) return null
+                        return {
+                            platform: pt.platform,
+                            time: new Date(pt.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }),
+                            ts: pt.ts,
+                        }
+                    }).filter(Boolean)
+
                     notify({
-                        title: `${dn} is now ${newStatus}`,
-                        body: `was: ${STATUS_LABEL[oldStatus] || oldStatus}${platFrom}`,
+                        title: `${dn} went offline`,
+                        body: durStr ? `Online for ${durStr}` : "",
                         icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
                         onClick: () => openUserProfile(uid),
                     })
-                    logActivity(uid, "status", STATUS_EMOJI[newStatus] || "🔵", `${STATUS_LABEL[oldStatus] || oldStatus} → ${STATUS_LABEL[newStatus] || newStatus}${platLog}`)
+
+                    logUserActivity(uid, "session", "⏱️", durStr ? `Online session · ${durStr}` : "Online session", "", {
+                        metadata: {
+                            action: "status_session",
+                            startTime: session.startTime,
+                            endTime: Date.now(),
+                            duration: durStr || "< 1m",
+                            startStatus: session.startStatus,
+                            endStatus: newStatus,
+                            statusTimeline,
+                            platformTimeline,
+                            changeCount: changes.length,
+                            platform: sessionPlatform,
+                        }
+                    }).catch(() => {})
+
+                    statusSessionCache[uid] = null
+                    sessionJustEnded = true
+                }
+
+                if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup && !statusSessionCache[uid] && !sessionJustEnded) {
+                    const label = getWatchedUser(settings, uid)?.nick
+                    const user  = UserStore.getUser(uid)
+                    const name  = displayName(user) || uid
+                    const dn    = label ? `${label} (${name})` : name
+                    const platLog = platformSuffixLog(uid)
+                    notify({
+                        title: `${dn} is now ${newStatus}`,
+                        body: `was: ${STATUS_LABEL[oldStatus] || oldStatus}`,
+                        icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                        onClick: () => openUserProfile(uid),
+                    })
+                    logActivity(uid, "status", STATUS_EMOJI_LOCAL[newStatus] || "⚫", `${STATUS_LABEL[oldStatus] || oldStatus} → ${STATUS_LABEL[newStatus] || newStatus}${platLog}`)
                 }
                 statusCache[uid] = newStatus
 
-                // ── client type tracking (mobile/desktop/web) ──────────
                 const newClient = resolveClient((u as any).client_status ?? (u as any).clientStatus)
                 const oldClient = clientCache[uid]
-                if (oldClient !== undefined && newClient !== null && oldClient !== newClient && !isStartup) {
+                const comingOnline = oldStatus === "offline" && newStatus !== "offline"
+                if (oldClient !== undefined && newClient !== null && oldClient !== newClient && !isStartup && !comingOnline) {
                     clientCache[uid] = newClient
-                    if (isFeatureOn(uid, "status", "globalStatus")) {
+                    if (statusSessionCache[uid]) {
+                        statusSessionCache[uid]!.platforms.push({ platform: newClient, ts: Date.now() })
+                    }
+                    if (!statusSessionCache[uid] && isFeatureOn(uid, "status", "globalStatus")) {
                         const label = getWatchedUser(settings, uid)?.nick
                         const user  = UserStore.getUser(uid)
                         const name  = displayName(user) || uid
@@ -3100,61 +4571,413 @@ export default definePlugin({
                         const emoji = CLIENT_EMOJI[newClient] || "📡"
                         const oldEmoji = oldClient ? (CLIENT_EMOJI[oldClient] || "📡") : ""
                         const CLIENT_LABEL: Record<string, string> = { desktop: "Desktop", mobile: "Mobile", web: "Web" }
-                        notify({
-                            title: `${dn} — ${CLIENT_LABEL[newClient] || newClient}`,
-                            body: oldClient ? `${oldEmoji} ${CLIENT_LABEL[oldClient] || oldClient} → ${emoji} ${CLIENT_LABEL[newClient] || newClient}` : `Now on ${CLIENT_LABEL[newClient] || newClient}`,
-                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                            onClick: () => openUserProfile(uid),
-                        })
                         logActivity(uid, "status", emoji, `${oldClient ? `${oldEmoji} ${oldClient} → ` : ""}${emoji} ${newClient}`)
                     }
                 } else if (newClient !== null) {
                     clientCache[uid] = newClient
                 }
 
-                // type 4 = custom status (just emoji + text), skip it
-                // only care about real activities: playing (0), listening (2), watching (3), competing (5)
                 const realAct = (u.activities || []).find((a: any) => a.type !== 4) ?? null
-                const newActKey = realAct ? `${realAct.type}:${realAct.name}` : null
+                const newActKey = realAct
+                    ? realAct.type === 2
+                        ? `2:${realAct.name}:${realAct.details || ""}:${realAct.state || ""}`
+                        : `${realAct.type}:${realAct.name}`
+                    : null
                 const oldAct = activityCache[uid]
 
                 if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
                     const ACT_VERB: Record<number, string> = { 0: "playing", 2: "listening to", 3: "watching", 5: "competing in" }
+                    const actPlatform = clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined
                     const label = getWatchedUser(settings, uid)?.nick
                     const user  = UserStore.getUser(uid)
                     const name  = displayName(user) || uid
                     const dn    = label ? `${label} (${name})` : name
-                    if (realAct) {
-                        const verb = ACT_VERB[realAct.type] ?? "playing"
-                        notify({
-                            title: `${dn} is ${verb} ${realAct.name}`,
-                            body: realAct.details || realAct.state || "",
-                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                            onClick: () => openUserProfile(uid),
-                        })
-                        logActivity(uid, "activity", "🎮", `${verb} ${realAct.name}`)
-                    } else if (oldAct) {
-                        const [typeStr, ...nameParts] = oldAct.split(":")
-                        const oldName = nameParts.join(":")
-                        const verb = ACT_VERB[parseInt(typeStr)] ?? "playing"
-                        notify({
-                            title: `${dn} stopped ${verb} ${oldName}`,
-                            body: "",
-                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                            onClick: () => openUserProfile(uid),
-                        })
-                        logActivity(uid, "activity", "🛑", `stopped ${verb} ${oldName}`)
+
+                    const [oldTypeStr, ...oldNameParts] = (oldAct || "").split(":")
+                    const oldType = oldAct ? parseInt(oldTypeStr) : -1
+                    const isOldListening = oldType === 2
+                    const oldSongName = isOldListening && oldNameParts.length >= 2 ? oldNameParts[1] : oldNameParts.join(":")
+                    const oldArtistName = isOldListening && oldNameParts.length >= 3 ? oldNameParts[2].replace(/;.*/, "").trim() : ""
+
+                    if (realAct && !oldAct) {
+                        if (realAct.type !== 2) {
+                            const verb = ACT_VERB[realAct.type] ?? "playing"
+                            const icon = realAct.type === 1 ? "📺" : realAct.type === 3 ? "🎬" : realAct.type === 5 ? "🏆" : "🎮"
+                            const actSk = sessionKey(uid, "activity", newActKey || undefined)
+                            let activityDesc = realAct.name || ""
+                            let logBody = `${verb} ${realAct.name}`
+
+                            if (realAct.type === 1 && realAct.details) {
+                                activityDesc = `${realAct.name}: ${realAct.details}`
+                                logBody = `streaming ${realAct.details}`
+                            } else if ((realAct.type === 0 || realAct.type === 3 || realAct.type === 5) && realAct.details) {
+                                activityDesc = `${realAct.name} — ${realAct.details}`
+                                logBody = `${realAct.name}: ${realAct.details}`
+                                if (realAct.state) logBody += ` · ${realAct.state}`
+                            }
+
+                            const actTitle = realAct.details
+                                ? `${verb} ${realAct.name} — ${realAct.details}`
+                                : `${verb} ${realAct.name}`
+
+                            notify({
+                                title: `${dn} is ${verb} ${realAct.name}`,
+                                body: activityDesc,
+                                icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                                onClick: () => openUserProfile(uid),
+                            })
+                            const gameLargeImg = realAct.assets?.large_image || ""
+                            const gameAppId = realAct.application_id || ""
+                            let gameIconUrl = ""
+                            if (gameLargeImg) {
+                                if (gameLargeImg.startsWith("mp:external/")) {
+                                    gameIconUrl = `https://media.discordapp.net/external/${gameLargeImg.slice(12)}`
+                                } else if (gameLargeImg.startsWith("mp:app-asset/")) {
+                                    gameIconUrl = `https://media.discordapp.net/app-assets/${gameLargeImg.slice(13)}`
+                                } else if (gameLargeImg.startsWith("mp:")) {
+                                    gameIconUrl = `https://media.discordapp.net/${gameLargeImg.slice(3)}`
+                                } else if (gameLargeImg.startsWith("spotify:")) {
+                                    gameIconUrl = `https://i.scdn.co/image/${gameLargeImg.slice(8)}`
+                                } else if (gameAppId && !gameLargeImg.includes(":")) {
+                                    gameIconUrl = `https://cdn.discordapp.com/app-assets/${gameAppId}/${gameLargeImg}.png`
+                                } else {
+                                    gameIconUrl = gameLargeImg
+                                }
+                            }
+
+                            const entry = await logUserActivity(uid, "activity", icon, actTitle, logBody, {
+                                metadata: {
+                                    name: realAct.name,
+                                    appName: realAct.name,
+                                    details: realAct.details,
+                                    state: realAct.state,
+                                    type: realAct.type,
+                                    platform: actPlatform,
+
+                                    action: "activity_start",
+                                    applicationId: realAct.application_id || "",
+                                    sessionId: realAct.session_id || "",
+                                    timestamps: realAct.timestamps || {},
+                                    party: realAct.party || {},
+                                    assets: realAct.assets || {},
+                                    largeImage: gameLargeImg,
+                                    gameIconUrl,
+                                    flags: realAct.flags || 0,
+                                    url: realAct.url || "",
+                                }
+                            })
+                            activeSessions[actSk] = {
+                                logId: entry.id,
+                                startTime: Date.now(),
+                                metadata: {
+                                    name: realAct.name,
+                                    appName: realAct.name,
+                                    details: realAct.details,
+                                    state: realAct.state,
+                                    platform: actPlatform,
+                                    gameIconUrl,
+                                }
+                            }
+                        }
+                    }
+
+                    else if (!realAct && oldAct) {
+                        const verb = ACT_VERB[oldType] ?? "playing"
+
+                        if (isOldListening) {
+                            const listenSk = sessionKey(uid, "listening", `${oldSongName}:${oldArtistName}`)
+                            const session = activeSessions[listenSk]
+                            if (session) {
+                                const elapsed = Date.now() - session.startTime
+                                const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
+                                await activityStore.updateLog(uid, session.logId, {
+                                    type: "session",
+                                    title: dur ? `${oldSongName} · ${dur}` : oldSongName,
+                                    body: `${oldSongName} by ${oldArtistName}`,
+                                    metadata: {
+                                        ...session.metadata,
+                                        action: "listening_session",
+                                        endTime: Date.now(),
+                                        duration: dur || "< 1m",
+                                    }
+                                })
+                                delete activeSessions[listenSk]
+                            }
+                        } else {
+                            const actSk = sessionKey(uid, "activity", oldAct || undefined)
+                            const session = activeSessions[actSk]
+                            if (session) {
+                                const elapsed = Date.now() - session.startTime
+                                const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
+                                await activityStore.updateLog(uid, session.logId, {
+                                    type: "session",
+                                    title: dur ? `${oldSongName} · ${dur}` : oldSongName,
+                                    body: `${verb} ${oldSongName}`,
+                                    metadata: {
+                                        ...session.metadata,
+                                        action: "activity_session",
+                                        startTime: session.startTime,
+                                        endTime: Date.now(),
+                                        duration: dur || "< 1m",
+                                        name: oldSongName,
+                                        type: oldType,
+                                    }
+                                })
+                                delete activeSessions[actSk]
+                                notify({
+                                    title: `${dn} stopped ${verb} ${oldSongName}`,
+                                    body: dur ? `Session lasted ${dur}` : "",
+                                    icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                                    onClick: () => openUserProfile(uid),
+                                })
+                            } else {
+                                notify({
+                                    title: `${dn} stopped ${verb} ${oldSongName}`,
+                                    body: "",
+                                    icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                                    onClick: () => openUserProfile(uid),
+                                })
+                            }
+                        }
+                    }
+                    else if (realAct && oldAct) {
+                        if (realAct.type === 2) {
+                            const smallImg = realAct.assets?.small_image || ""
+                            const smallTxt = realAct.assets?.small_text || realAct.assets?.smallText || ""
+                            const statusDisp = realAct.status_display_type ?? null
+                            const createdAt = realAct.created_at || null
+                            const sessionId = realAct.session_id || ""
+                            const flags    = realAct.flags || 0
+                            const buttons  = realAct.buttons || []
+                            const secrets  = realAct.secrets || {}
+                            const url      = realAct.url || ""
+                            const platform = realAct.platform || actPlatform || ""
+
+                            let albumArtUrl = ""
+                            if (largeImg) {
+                                if (largeImg.startsWith("spotify:")) {
+                                    albumArtUrl = `https://i.scdn.co/image/${largeImg.replace("spotify:", "")}`
+                                } else if (largeImg.startsWith("mp:")) {
+                                    albumArtUrl = `https://media.discordapp.net/${largeImg.replace("mp:", "")}`
+                                }
+                            }
+
+                            const displayTitle = song && artist
+                                ? `${song} — ${artist}`
+                                : song || realAct.name || "Unknown Track"
+                            const displayBody = song && artist
+                                ? `${song} by ${artist}${album ? ` · ${album}` : ""}`
+                                : song || realAct.name || ""
+
+                            const oldListenSk = sessionKey(uid, "listening", `${oldSongName}:${oldArtistName}`)
+                            const oldSession = activeSessions[oldListenSk]
+                            if (oldSession) {
+                                const elapsed = Date.now() - oldSession.startTime
+                                const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
+                                await activityStore.updateLog(uid, oldSession.logId, {
+                                    type: "session",
+                                    title: dur ? `${oldSongName} · ${dur}` : oldSongName,
+                                    body: `${oldSongName} by ${oldArtistName}`,
+                                    metadata: {
+                                        ...oldSession.metadata,
+                                        action: "listening_session",
+                                        endTime: Date.now(),
+                                        duration: dur || "< 1m",
+                                    }
+                                })
+                                delete activeSessions[oldListenSk]
+                            }
+
+                            notify({
+                                title: `${dn} is listening to ${song || realAct.name}`,
+                                body: displayBody,
+                                icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                                onClick: () => openUserProfile(uid),
+                            })
+
+                            const entry = await logUserActivity(uid, "activity", "🎵", displayTitle, displayBody, {
+                                metadata: {
+                                    name: realAct.name,
+                                    appName: realAct.name,
+                                    song,
+                                    artist,
+                                    allArtists,
+                                    album,
+                                    trackId,
+                                    albumId,
+                                    artistIds,
+                                    contextUri,
+                                    trackType,
+                                    albumArtUrl,
+                                    largeImage: largeImg,
+                                    smallImage: smallImg,
+                                    smallText: smallTxt,
+                                    startTimestamp: startTs,
+                                    endTimestamp: endTs,
+                                    createdAt,
+                                    sessionId,
+                                    partyId,
+                                    partySize,
+                                    applicationId: appId,
+                                    parentApplicationId: parentAppId,
+                                    platform,
+                                    statusDisplayType: statusDisp,
+                                    flags,
+                                    buttons,
+                                    secrets,
+                                    url,
+                                    type: realAct.type,
+                                    action: "listening_change",
+                                }
+                            })
+
+                            const listenSk = sessionKey(uid, "listening", trackId || `${song}:${artist}`)
+                            activeSessions[listenSk] = {
+                                logId: entry.id,
+                                startTime: Date.now(),
+                                metadata: {
+                                    name: realAct.name,
+                                    appName: realAct.name,
+                                    song,
+                                    artist,
+                                    allArtists,
+                                    album,
+                                    trackId,
+                                    albumId,
+                                    artistIds,
+                                    contextUri,
+                                    trackType,
+                                    albumArtUrl,
+                                    largeImage: largeImg,
+                                    smallImage: smallImg,
+                                    smallText: smallTxt,
+                                    startTimestamp: startTs,
+                                    endTimestamp: endTs,
+                                    createdAt,
+                                    sessionId,
+                                    partyId,
+                                    partySize,
+                                    applicationId: appId,
+                                    parentApplicationId: parentAppId,
+                                    platform,
+                                    statusDisplayType: statusDisp,
+                                    flags,
+                                    buttons,
+                                    secrets,
+                                    url,
+                                    type: realAct.type,
+                                }
+                            }
+                        }
+                        else {
+                            const verb = ACT_VERB[realAct.type] ?? "playing"
+                            const icon = realAct.type === 1 ? "📺" : realAct.type === 3 ? "🎬" : realAct.type === 5 ? "🏆" : "🎮"
+                            const actSk = sessionKey(uid, "activity", newActKey || undefined)
+
+                            const oldActSk = sessionKey(uid, "activity", oldAct || undefined)
+                            const oldSession = activeSessions[oldActSk]
+                            if (oldSession) {
+                                const elapsed = Date.now() - oldSession.startTime
+                                const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
+                                await activityStore.updateLog(uid, oldSession.logId, {
+                                    type: "session",
+                                    title: dur ? `${oldSongName} · ${dur}` : oldSongName,
+                                    body: `${ACT_VERB[oldType] ?? "playing"} ${oldSongName}`,
+                                    metadata: {
+                                        ...oldSession.metadata,
+                                        action: "activity_session",
+                                        startTime: oldSession.startTime,
+                                        endTime: Date.now(),
+                                        duration: dur || "< 1m",
+                                        name: oldSongName,
+                                        type: oldType,
+                                        appName: oldSession.metadata?.appName || oldSongName,
+                                    }
+                                })
+                                delete activeSessions[oldActSk]
+                            }
+
+                            let activityDesc = realAct.name || ""
+                            let logBody = `${verb} ${realAct.name}`
+                            if (realAct.type === 1 && realAct.details) {
+                                activityDesc = `${realAct.name}: ${realAct.details}`
+                                logBody = `streaming ${realAct.details}`
+                            } else if ((realAct.type === 0 || realAct.type === 3 || realAct.type === 5) && realAct.details) {
+                                activityDesc = `${realAct.name} — ${realAct.details}`
+                                logBody = `${realAct.name}: ${realAct.details}`
+                                if (realAct.state) logBody += ` · ${realAct.state}`
+                            }
+
+                            const actTitle = realAct.details
+                                ? `${verb} ${realAct.name} — ${realAct.details}`
+                                : `${verb} ${realAct.name}`
+
+                            notify({
+                                title: `${dn} is ${verb} ${realAct.name}`,
+                                body: activityDesc,
+                                icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                                onClick: () => openUserProfile(uid),
+                            })
+                            const gameLargeImg = realAct.assets?.large_image || ""
+                            const gameAppId = realAct.application_id || ""
+                            let gameIconUrl = ""
+                            if (gameLargeImg) {
+                                if (gameLargeImg.startsWith("mp:external/")) {
+                                    gameIconUrl = `https://media.discordapp.net/external/${gameLargeImg.slice(12)}`
+                                } else if (gameLargeImg.startsWith("mp:app-asset/")) {
+                                    gameIconUrl = `https://media.discordapp.net/app-assets/${gameLargeImg.slice(13)}`
+                                } else if (gameLargeImg.startsWith("mp:")) {
+                                    gameIconUrl = `https://media.discordapp.net/${gameLargeImg.slice(3)}`
+                                } else if (gameLargeImg.startsWith("spotify:")) {
+                                    gameIconUrl = `https://i.scdn.co/image/${gameLargeImg.slice(8)}`
+                                } else if (gameAppId && !gameLargeImg.includes(":")) {
+                                    gameIconUrl = `https://cdn.discordapp.com/app-assets/${gameAppId}/${gameLargeImg}.png`
+                                } else {
+                                    gameIconUrl = gameLargeImg
+                                }
+                            }
+
+                            const entry = await logUserActivity(uid, "activity", icon, actTitle, logBody, {
+                                metadata: {
+                                    name: realAct.name,
+                                    appName: realAct.name,
+                                    details: realAct.details,
+                                    state: realAct.state,
+                                    type: realAct.type,
+                                    platform: actPlatform,
+
+                                    action: "activity_start",
+                                    applicationId: realAct.application_id || "",
+                                    sessionId: realAct.session_id || "",
+                                    timestamps: realAct.timestamps || {},
+                                    party: realAct.party || {},
+                                    assets: realAct.assets || {},
+                                    largeImage: gameLargeImg,
+                                    gameIconUrl,
+                                    flags: realAct.flags || 0,
+                                    url: realAct.url || "",
+                                }
+                            })
+                            activeSessions[actSk] = {
+                                logId: entry.id,
+                                startTime: Date.now(),
+                                metadata: {
+                                    name: realAct.name,
+                                    appName: realAct.name,
+                                    details: realAct.details,
+                                    state: realAct.state,
+                                    platform: actPlatform,
+                                    gameIconUrl,
+                                }
+                            }
+                        }
                     }
                 }
-                activityCache[uid] = newActKey
             }
         },
 
-        // discord pushes username/avatar changes instantly over ws — fastest path for those fields
         USER_UPDATE({ user }: { user: any }) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            // USER_UPDATE fires for lots of things including presence changes
-            // only process if it actually contains profile fields we care about
             const relevant = ["username", "global_name", "globalName", "avatar", "discriminator"]
             const hasProfileChange = relevant.some(f => user[f] !== undefined)
             if (!hasProfileChange) return
@@ -3163,28 +4986,19 @@ export default definePlugin({
             checkProfileChanged(user.id, { ...old, user: { ...old.user, ...camelize(user) } })
         },
 
-        // fires when discord fetches a full profile (opening someone's card, profile page etc)
         USER_PROFILE_FETCH_SUCCESS(rawEvt: any) {
             if (!rawEvt?.user?.id) return
-            // this fires when YOU open/hover someone's profile card — NOT a change event
-            // only update cache silently, never trigger a diff from this
-            // profile change detection only comes from pollProfiles() which runs every 5min
             if (!profileCache[rawEvt.user.id]) {
                 profileCache[rawEvt.user.id] = camelize(rawEvt)
             }
-            // if we already have a cache, don't overwrite it with potentially
-            // inconsistent data from a card hover — poll will handle it
         },
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
             if (!isFeatureOn(user.id, "joins", "globalJoins")) return
 
-            // if we have no cache yet, baseline fetch hasn't finished — skip silently
-            // once baseline is done, cache will be populated and future events work correctly
             if (!guildCache[user.id]) return
 
-            // cache says they're already in this guild = reconnect sync event, not a real join
             if (guildCache[user.id].has(guildId)) return
             guildCache[user.id].add(guildId)
 
@@ -3205,10 +5019,8 @@ export default definePlugin({
             if (!user?.id || !isWatched(settings, user.id)) return
             if (!isFeatureOn(user.id, "joins", "globalJoins")) return
 
-            // no cache = baseline not ready, skip
             if (!guildCache[user.id]) return
 
-            // wasn't in cache = we never knew them to be in this guild, skip
             if (!guildCache[user.id].has(guildId)) return
             guildCache[user.id].delete(guildId)
 
