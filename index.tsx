@@ -1755,7 +1755,9 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                         }}>
                                             <span style={{ opacity: 0.5, display: "flex", alignItems: "center" }}><ico.location /></span>
                                             <span>
-                                                {log.metadata?.appName || log.metadata?.server || "Unknown"}
+                                                {(log.type === "activity" || log.type === "session") && log.metadata?.appName
+                                                    ? log.metadata.appName
+                                                    : log.metadata?.server || "Unknown"}
                                                 {log.metadata?.channel ? ` · #${log.metadata.channel}` : ""}
                                                 {log.metadata?.duration ? ` · ${log.metadata.duration}` : ""}
                                             </span>
@@ -2001,6 +2003,13 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                                                 {(log.metadata.startTimestamp && log.metadata.endTimestamp) && (() => {
                                                                     const total = log.metadata.endTimestamp - log.metadata.startTimestamp
                                                                     const totalStr = formatDuration(total)
+                                                                    // Calculate progress: if session ended, show full; if active, calculate from log time
+                                                                    const isSession = log.type === "session"
+                                                                    const elapsed = isSession && log.metadata.endTime 
+                                                                        ? log.metadata.endTime - log.metadata.startTimestamp 
+                                                                        : Date.now() - log.metadata.startTimestamp
+                                                                    const progress = Math.min(100, Math.max(0, (elapsed / total) * 100))
+                                                                    const currentStr = formatDuration(Math.min(elapsed, total))
                                                                     return (
                                                                         <div style={{ marginTop: 12 }}>
                                                                             <div style={{
@@ -2010,23 +2019,24 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                                                                 overflow: "hidden",
                                                                             }}>
                                                                                 <div style={{
-                                                                                    width: "100%",
+                                                                                    width: `${progress}%`,
                                                                                     height: "100%",
                                                                                     background: C.brandLight,
                                                                                     borderRadius: 2,
-                                                                                    opacity: 0.5,
+                                                                                    transition: "width 0.3s ease",
                                                                                 }} />
                                                                             </div>
                                                                             <div style={{
                                                                                 display: "flex",
-                                                                                justifyContent: "flex-end",
+                                                                                justifyContent: "space-between",
                                                                                 marginTop: 5,
                                                                                 fontSize: 11,
                                                                                 color: C.muted,
                                                                                 fontWeight: 600,
                                                                                 letterSpacing: 0.3,
                                                                             }}>
-                                                                                {totalStr}
+                                                                                <span>{currentStr}</span>
+                                                                                <span>{totalStr}</span>
                                                                             </div>
                                                                         </div>
                                                                     )
@@ -4574,6 +4584,7 @@ export default definePlugin({
                         : `${realAct.type}:${realAct.name}`
                     : null
                 const oldAct = activityCache[uid]
+                activityCache[uid] = newActKey
 
                 if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
                     const ACT_VERB: Record<number, string> = { 0: "playing", 2: "listening to", 3: "watching", 5: "competing in" }
@@ -4586,380 +4597,195 @@ export default definePlugin({
                     const [oldTypeStr, ...oldNameParts] = (oldAct || "").split(":")
                     const oldType = oldAct ? parseInt(oldTypeStr) : -1
                     const isOldListening = oldType === 2
-                    const oldSongName = isOldListening && oldNameParts.length >= 2 ? oldNameParts[1] : oldNameParts.join(":")
+                    const oldSongName   = isOldListening && oldNameParts.length >= 2 ? oldNameParts[1] : oldNameParts.join(":")
                     const oldArtistName = isOldListening && oldNameParts.length >= 3 ? oldNameParts[2].replace(/;.*/, "").trim() : ""
 
-                    if (realAct && !oldAct) {
-                        if (realAct.type !== 2) {
-                            const verb = ACT_VERB[realAct.type] ?? "playing"
-                            const icon = realAct.type === 1 ? "📺" : realAct.type === 3 ? "🎬" : realAct.type === 5 ? "🏆" : "🎮"
-                            const actSk = sessionKey(uid, "activity", newActKey || undefined)
-                            let activityDesc = realAct.name || ""
-                            let logBody = `${verb} ${realAct.name}`
+                    const getSpotifyFields = (act: any) => {
+                        const li = act.assets?.large_image || ""
+                        const song   = act.details || ""
+                        const artist = (act.state || "").replace(/;.*/, "").trim()
+                        const album  = act.assets?.large_text || act.assets?.largeText || ""
+                        const trackId = act.sync_id || ""
+                        let albumArtUrl = ""
+                        if (li.startsWith("spotify:")) albumArtUrl = `https://i.scdn.co/image/${li.replace("spotify:", "")}`
+                        else if (li.startsWith("mp:")) albumArtUrl = `https://media.discordapp.net/${li.replace("mp:", "")}`
+                        return { song, artist, album, trackId, albumArtUrl }
+                    }
 
-                            if (realAct.type === 1 && realAct.details) {
-                                activityDesc = `${realAct.name}: ${realAct.details}`
-                                logBody = `streaming ${realAct.details}`
-                            } else if ((realAct.type === 0 || realAct.type === 3 || realAct.type === 5) && realAct.details) {
-                                activityDesc = `${realAct.name} — ${realAct.details}`
-                                logBody = `${realAct.name}: ${realAct.details}`
-                                if (realAct.state) logBody += ` · ${realAct.state}`
+                    const getGameIcon = (act: any) => {
+                        const img = act.assets?.large_image || ""
+                        const appId = act.application_id || ""
+                        if (!img) return ""
+                        if (img.startsWith("mp:external/")) return `https://media.discordapp.net/external/${img.slice(12)}`
+                        if (img.startsWith("mp:app-asset/")) return `https://media.discordapp.net/app-assets/${img.slice(13)}`
+                        if (img.startsWith("mp:")) return `https://media.discordapp.net/${img.slice(3)}`
+                        if (img.startsWith("spotify:")) return `https://i.scdn.co/image/${img.slice(8)}`
+                        if (appId && !img.includes(":")) return `https://cdn.discordapp.com/app-assets/${appId}/${img}.png`
+                        return img
+                    }
+
+                    const closeListening = async (songName: string, artistName: string) => {
+                        const sk = sessionKey(uid, "listening", `${songName}:${artistName}`)
+                        const sess = activeSessions[sk]
+                        if (!sess) return
+                        const elapsed = Date.now() - sess.startTime
+                        const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
+                        await activityStore.updateLog(uid, sess.logId, {
+                            type: "session",
+                            title: dur ? `${songName} · ${dur}` : songName,
+                            body: `${songName} by ${artistName}`,
+                            metadata: { 
+                                ...sess.metadata, 
+                                type: 2,
+                                appName: sess.metadata?.appName || "Spotify",
+                                action: "listening_session", 
+                                endTime: Date.now(), 
+                                duration: dur || "< 1m" 
                             }
+                        })
+                        delete activeSessions[sk]
+                    }
 
-                            const actTitle = realAct.details
-                                ? `${verb} ${realAct.name} — ${realAct.details}`
-                                : `${verb} ${realAct.name}`
-
-                            notify({
-                                title: `${dn} is ${verb} ${realAct.name}`,
-                                body: activityDesc,
-                                icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                                onClick: () => openUserProfile(uid),
-                            })
-                            const gameLargeImg = realAct.assets?.large_image || ""
-                            const gameAppId = realAct.application_id || ""
-                            let gameIconUrl = ""
-                            if (gameLargeImg) {
-                                if (gameLargeImg.startsWith("mp:external/")) {
-                                    gameIconUrl = `https://media.discordapp.net/external/${gameLargeImg.slice(12)}`
-                                } else if (gameLargeImg.startsWith("mp:app-asset/")) {
-                                    gameIconUrl = `https://media.discordapp.net/app-assets/${gameLargeImg.slice(13)}`
-                                } else if (gameLargeImg.startsWith("mp:")) {
-                                    gameIconUrl = `https://media.discordapp.net/${gameLargeImg.slice(3)}`
-                                } else if (gameLargeImg.startsWith("spotify:")) {
-                                    gameIconUrl = `https://i.scdn.co/image/${gameLargeImg.slice(8)}`
-                                } else if (gameAppId && !gameLargeImg.includes(":")) {
-                                    gameIconUrl = `https://cdn.discordapp.com/app-assets/${gameAppId}/${gameLargeImg}.png`
-                                } else {
-                                    gameIconUrl = gameLargeImg
-                                }
+                    const closeActivity = async (sk: string, actName: string, type: number) => {
+                        const sess = activeSessions[sk]
+                        if (!sess) return
+                        const elapsed = Date.now() - sess.startTime
+                        const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
+                        await activityStore.updateLog(uid, sess.logId, {
+                            type: "session",
+                            title: dur ? `${actName} · ${dur}` : actName,
+                            body: `${ACT_VERB[type] ?? "playing"} ${actName}`,
+                            metadata: { 
+                                ...sess.metadata, 
+                                appName: sess.metadata?.appName || actName,
+                                action: "activity_session", 
+                                endTime: Date.now(), 
+                                duration: dur || "< 1m" 
                             }
+                        })
+                        delete activeSessions[sk]
+                    }
 
-                            const entry = await logUserActivity(uid, "activity", icon, actTitle, logBody, {
-                                metadata: {
-                                    name: realAct.name,
-                                    appName: realAct.name,
-                                    details: realAct.details,
-                                    state: realAct.state,
-                                    type: realAct.type,
-                                    platform: actPlatform,
-
-                                    action: "activity_start",
-                                    applicationId: realAct.application_id || "",
-                                    sessionId: realAct.session_id || "",
-                                    timestamps: realAct.timestamps || {},
-                                    party: realAct.party || {},
-                                    assets: realAct.assets || {},
-                                    largeImage: gameLargeImg,
-                                    gameIconUrl,
-                                    flags: realAct.flags || 0,
-                                    url: realAct.url || "",
-                                }
-                            })
-                            activeSessions[actSk] = {
-                                logId: entry.id,
-                                startTime: Date.now(),
-                                metadata: {
-                                    name: realAct.name,
-                                    appName: realAct.name,
-                                    details: realAct.details,
-                                    state: realAct.state,
-                                    platform: actPlatform,
-                                    gameIconUrl,
-                                }
+                    const openListening = async (act: any) => {
+                        const { song, artist, album, trackId, albumArtUrl } = getSpotifyFields(act)
+                        const sk = sessionKey(uid, "listening", trackId || `${song}:${artist}`)
+                        const title = song && artist ? `${song} — ${artist}` : song || act.name
+                        const body  = song && artist ? `${song} by ${artist}${album ? ` · ${album}` : ""}` : song || act.name
+                        notify({
+                            title: `${dn} is listening to ${song || act.name}`,
+                            body,
+                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                        const entry = await logUserActivity(uid, "activity", "🎵", title, body, {
+                            metadata: { 
+                                type: 2, 
+                                appName: act.name || "Spotify",
+                                song, 
+                                artist, 
+                                album, 
+                                albumArtUrl, 
+                                platform: actPlatform, 
+                                startTimestamp: act.timestamps?.start,
+                                endTimestamp: act.timestamps?.end,
+                                action: "listening_start" 
                             }
+                        })
+                        activeSessions[sk] = { 
+                            logId: entry.id, 
+                            startTime: Date.now(), 
+                            metadata: { 
+                                type: 2,
+                                appName: act.name || "Spotify",
+                                song, 
+                                artist, 
+                                album, 
+                                albumArtUrl, 
+                                platform: actPlatform,
+                                startTimestamp: act.timestamps?.start,
+                                endTimestamp: act.timestamps?.end
+                            } 
                         }
                     }
 
-                    else if (!realAct && oldAct) {
-                        const verb = ACT_VERB[oldType] ?? "playing"
+                    const openActivity = async (act: any) => {
+                        const verb = ACT_VERB[act.type] ?? "playing"
+                        const icon = act.type === 1 ? "📺" : act.type === 3 ? "🎬" : act.type === 5 ? "🏆" : "🎮"
+                        const sk = sessionKey(uid, "activity", `${act.type}:${act.name}`)
+                        let desc = act.name || ""
+                        let body = `${verb} ${act.name}`
+                        if (act.type === 1 && act.details) { desc = `${act.name}: ${act.details}`; body = `streaming ${act.details}` }
+                        else if (act.details) { desc = `${act.name} — ${act.details}`; body = `${act.name}: ${act.details}${act.state ? ` · ${act.state}` : ""}` }
+                        const title = act.details ? `${verb} ${act.name} — ${act.details}` : `${verb} ${act.name}`
+                        const iconUrl = getGameIcon(act)
+                        notify({
+                            title: `${dn} is ${verb} ${act.name}`,
+                            body: desc,
+                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                        const entry = await logUserActivity(uid, "activity", icon, title, body, {
+                            metadata: { 
+                                type: act.type,
+                                appName: act.name,
+                                name: act.name, 
+                                details: act.details, 
+                                state: act.state, 
+                                platform: actPlatform, 
+                                gameIconUrl: iconUrl,
+                                startTimestamp: act.timestamps?.start,
+                                endTimestamp: act.timestamps?.end,
+                                action: "activity_start" 
+                            }
+                        })
+                        activeSessions[sk] = { 
+                            logId: entry.id, 
+                            startTime: Date.now(), 
+                            metadata: { 
+                                type: act.type,
+                                appName: act.name,
+                                name: act.name, 
+                                platform: actPlatform, 
+                                gameIconUrl: iconUrl,
+                                startTimestamp: act.timestamps?.start,
+                                endTimestamp: act.timestamps?.end
+                            } 
+                        }
+                    }
 
+                    if (realAct && !oldAct) {
+                        if (realAct.type === 2) await openListening(realAct)
+                        else await openActivity(realAct)
+                    }
+                    else if (!realAct && oldAct) {
                         if (isOldListening) {
-                            const listenSk = sessionKey(uid, "listening", `${oldSongName}:${oldArtistName}`)
-                            const session = activeSessions[listenSk]
-                            if (session) {
-                                const elapsed = Date.now() - session.startTime
-                                const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
-                                await activityStore.updateLog(uid, session.logId, {
-                                    type: "session",
-                                    title: dur ? `${oldSongName} · ${dur}` : oldSongName,
-                                    body: `${oldSongName} by ${oldArtistName}`,
-                                    metadata: {
-                                        ...session.metadata,
-                                        action: "listening_session",
-                                        endTime: Date.now(),
-                                        duration: dur || "< 1m",
-                                    }
-                                })
-                                delete activeSessions[listenSk]
-                            }
+                            await closeListening(oldSongName, oldArtistName)
                         } else {
-                            const actSk = sessionKey(uid, "activity", oldAct || undefined)
-                            const session = activeSessions[actSk]
-                            if (session) {
-                                const elapsed = Date.now() - session.startTime
-                                const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
-                                await activityStore.updateLog(uid, session.logId, {
-                                    type: "session",
-                                    title: dur ? `${oldSongName} · ${dur}` : oldSongName,
-                                    body: `${verb} ${oldSongName}`,
-                                    metadata: {
-                                        ...session.metadata,
-                                        action: "activity_session",
-                                        startTime: session.startTime,
-                                        endTime: Date.now(),
-                                        duration: dur || "< 1m",
-                                        name: oldSongName,
-                                        type: oldType,
-                                    }
-                                })
-                                delete activeSessions[actSk]
-                                notify({
-                                    title: `${dn} stopped ${verb} ${oldSongName}`,
-                                    body: dur ? `Session lasted ${dur}` : "",
-                                    icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                                    onClick: () => openUserProfile(uid),
-                                })
-                            } else {
-                                notify({
-                                    title: `${dn} stopped ${verb} ${oldSongName}`,
-                                    body: "",
-                                    icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                                    onClick: () => openUserProfile(uid),
-                                })
-                            }
+                            const sk = sessionKey(uid, "activity", oldAct)
+                            await closeActivity(sk, oldSongName, oldType)
+                            notify({
+                                title: `${dn} stopped ${ACT_VERB[oldType] ?? "playing"} ${oldSongName}`,
+                                body: "",
+                                icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                                onClick: () => openUserProfile(uid),
+                            })
                         }
                     }
                     else if (realAct && oldAct) {
-                        if (realAct.type === 2) {
-                            const smallImg = realAct.assets?.small_image || ""
-                            const smallTxt = realAct.assets?.small_text || realAct.assets?.smallText || ""
-                            const statusDisp = realAct.status_display_type ?? null
-                            const createdAt = realAct.created_at || null
-                            const sessionId = realAct.session_id || ""
-                            const flags    = realAct.flags || 0
-                            const buttons  = realAct.buttons || []
-                            const secrets  = realAct.secrets || {}
-                            const url      = realAct.url || ""
-                            const platform = realAct.platform || actPlatform || ""
-
-                            let albumArtUrl = ""
-                            if (largeImg) {
-                                if (largeImg.startsWith("spotify:")) {
-                                    albumArtUrl = `https://i.scdn.co/image/${largeImg.replace("spotify:", "")}`
-                                } else if (largeImg.startsWith("mp:")) {
-                                    albumArtUrl = `https://media.discordapp.net/${largeImg.replace("mp:", "")}`
-                                }
-                            }
-
-                            const displayTitle = song && artist
-                                ? `${song} — ${artist}`
-                                : song || realAct.name || "Unknown Track"
-                            const displayBody = song && artist
-                                ? `${song} by ${artist}${album ? ` · ${album}` : ""}`
-                                : song || realAct.name || ""
-
-                            const oldListenSk = sessionKey(uid, "listening", `${oldSongName}:${oldArtistName}`)
-                            const oldSession = activeSessions[oldListenSk]
-                            if (oldSession) {
-                                const elapsed = Date.now() - oldSession.startTime
-                                const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
-                                await activityStore.updateLog(uid, oldSession.logId, {
-                                    type: "session",
-                                    title: dur ? `${oldSongName} · ${dur}` : oldSongName,
-                                    body: `${oldSongName} by ${oldArtistName}`,
-                                    metadata: {
-                                        ...oldSession.metadata,
-                                        action: "listening_session",
-                                        endTime: Date.now(),
-                                        duration: dur || "< 1m",
-                                    }
-                                })
-                                delete activeSessions[oldListenSk]
-                            }
-
-                            notify({
-                                title: `${dn} is listening to ${song || realAct.name}`,
-                                body: displayBody,
-                                icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                                onClick: () => openUserProfile(uid),
-                            })
-
-                            const entry = await logUserActivity(uid, "activity", "🎵", displayTitle, displayBody, {
-                                metadata: {
-                                    name: realAct.name,
-                                    appName: realAct.name,
-                                    song,
-                                    artist,
-                                    allArtists,
-                                    album,
-                                    trackId,
-                                    albumId,
-                                    artistIds,
-                                    contextUri,
-                                    trackType,
-                                    albumArtUrl,
-                                    largeImage: largeImg,
-                                    smallImage: smallImg,
-                                    smallText: smallTxt,
-                                    startTimestamp: startTs,
-                                    endTimestamp: endTs,
-                                    createdAt,
-                                    sessionId,
-                                    partyId,
-                                    partySize,
-                                    applicationId: appId,
-                                    parentApplicationId: parentAppId,
-                                    platform,
-                                    statusDisplayType: statusDisp,
-                                    flags,
-                                    buttons,
-                                    secrets,
-                                    url,
-                                    type: realAct.type,
-                                    action: "listening_change",
-                                }
-                            })
-
-                            const listenSk = sessionKey(uid, "listening", trackId || `${song}:${artist}`)
-                            activeSessions[listenSk] = {
-                                logId: entry.id,
-                                startTime: Date.now(),
-                                metadata: {
-                                    name: realAct.name,
-                                    appName: realAct.name,
-                                    song,
-                                    artist,
-                                    allArtists,
-                                    album,
-                                    trackId,
-                                    albumId,
-                                    artistIds,
-                                    contextUri,
-                                    trackType,
-                                    albumArtUrl,
-                                    largeImage: largeImg,
-                                    smallImage: smallImg,
-                                    smallText: smallTxt,
-                                    startTimestamp: startTs,
-                                    endTimestamp: endTs,
-                                    createdAt,
-                                    sessionId,
-                                    partyId,
-                                    partySize,
-                                    applicationId: appId,
-                                    parentApplicationId: parentAppId,
-                                    platform,
-                                    statusDisplayType: statusDisp,
-                                    flags,
-                                    buttons,
-                                    secrets,
-                                    url,
-                                    type: realAct.type,
-                                }
-                            }
-                        }
-                        else {
-                            const verb = ACT_VERB[realAct.type] ?? "playing"
-                            const icon = realAct.type === 1 ? "📺" : realAct.type === 3 ? "🎬" : realAct.type === 5 ? "🏆" : "🎮"
-                            const actSk = sessionKey(uid, "activity", newActKey || undefined)
-
-                            const oldActSk = sessionKey(uid, "activity", oldAct || undefined)
-                            const oldSession = activeSessions[oldActSk]
-                            if (oldSession) {
-                                const elapsed = Date.now() - oldSession.startTime
-                                const dur = elapsed > 60000 ? formatDuration(elapsed) : ""
-                                await activityStore.updateLog(uid, oldSession.logId, {
-                                    type: "session",
-                                    title: dur ? `${oldSongName} · ${dur}` : oldSongName,
-                                    body: `${ACT_VERB[oldType] ?? "playing"} ${oldSongName}`,
-                                    metadata: {
-                                        ...oldSession.metadata,
-                                        action: "activity_session",
-                                        startTime: oldSession.startTime,
-                                        endTime: Date.now(),
-                                        duration: dur || "< 1m",
-                                        name: oldSongName,
-                                        type: oldType,
-                                        appName: oldSession.metadata?.appName || oldSongName,
-                                    }
-                                })
-                                delete activeSessions[oldActSk]
-                            }
-
-                            let activityDesc = realAct.name || ""
-                            let logBody = `${verb} ${realAct.name}`
-                            if (realAct.type === 1 && realAct.details) {
-                                activityDesc = `${realAct.name}: ${realAct.details}`
-                                logBody = `streaming ${realAct.details}`
-                            } else if ((realAct.type === 0 || realAct.type === 3 || realAct.type === 5) && realAct.details) {
-                                activityDesc = `${realAct.name} — ${realAct.details}`
-                                logBody = `${realAct.name}: ${realAct.details}`
-                                if (realAct.state) logBody += ` · ${realAct.state}`
-                            }
-
-                            const actTitle = realAct.details
-                                ? `${verb} ${realAct.name} — ${realAct.details}`
-                                : `${verb} ${realAct.name}`
-
-                            notify({
-                                title: `${dn} is ${verb} ${realAct.name}`,
-                                body: activityDesc,
-                                icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                                onClick: () => openUserProfile(uid),
-                            })
-                            const gameLargeImg = realAct.assets?.large_image || ""
-                            const gameAppId = realAct.application_id || ""
-                            let gameIconUrl = ""
-                            if (gameLargeImg) {
-                                if (gameLargeImg.startsWith("mp:external/")) {
-                                    gameIconUrl = `https://media.discordapp.net/external/${gameLargeImg.slice(12)}`
-                                } else if (gameLargeImg.startsWith("mp:app-asset/")) {
-                                    gameIconUrl = `https://media.discordapp.net/app-assets/${gameLargeImg.slice(13)}`
-                                } else if (gameLargeImg.startsWith("mp:")) {
-                                    gameIconUrl = `https://media.discordapp.net/${gameLargeImg.slice(3)}`
-                                } else if (gameLargeImg.startsWith("spotify:")) {
-                                    gameIconUrl = `https://i.scdn.co/image/${gameLargeImg.slice(8)}`
-                                } else if (gameAppId && !gameLargeImg.includes(":")) {
-                                    gameIconUrl = `https://cdn.discordapp.com/app-assets/${gameAppId}/${gameLargeImg}.png`
-                                } else {
-                                    gameIconUrl = gameLargeImg
-                                }
-                            }
-
-                            const entry = await logUserActivity(uid, "activity", icon, actTitle, logBody, {
-                                metadata: {
-                                    name: realAct.name,
-                                    appName: realAct.name,
-                                    details: realAct.details,
-                                    state: realAct.state,
-                                    type: realAct.type,
-                                    platform: actPlatform,
-
-                                    action: "activity_start",
-                                    applicationId: realAct.application_id || "",
-                                    sessionId: realAct.session_id || "",
-                                    timestamps: realAct.timestamps || {},
-                                    party: realAct.party || {},
-                                    assets: realAct.assets || {},
-                                    largeImage: gameLargeImg,
-                                    gameIconUrl,
-                                    flags: realAct.flags || 0,
-                                    url: realAct.url || "",
-                                }
-                            })
-                            activeSessions[actSk] = {
-                                logId: entry.id,
-                                startTime: Date.now(),
-                                metadata: {
-                                    name: realAct.name,
-                                    appName: realAct.name,
-                                    details: realAct.details,
-                                    state: realAct.state,
-                                    platform: actPlatform,
-                                    gameIconUrl,
-                                }
-                            }
+                        if (realAct.type === 2 && isOldListening) {
+                            await closeListening(oldSongName, oldArtistName)
+                            await openListening(realAct)
+                        } else if (realAct.type === 2) {
+                            const oldSk = sessionKey(uid, "activity", oldAct)
+                            await closeActivity(oldSk, oldSongName, oldType)
+                            await openListening(realAct)
+                        } else if (isOldListening) {
+                            await closeListening(oldSongName, oldArtistName)
+                            await openActivity(realAct)
+                        } else {
+                            const oldSk = sessionKey(uid, "activity", oldAct)
+                            await closeActivity(oldSk, oldSongName, oldType)
+                            await openActivity(realAct)
                         }
                     }
                 }
