@@ -1,133 +1,116 @@
 # UserRadar
 
-A powerful [Vencord](https://vencord.dev/) plugin for tracking specific Discord users and logging their activity — messages, edits, deletes, typing, profile changes, voice channel activity, status changes, game/music activity, and server joins/leaves.
-
-> ⚠️ **Upgrading from a previous version?** If you are updating from an older version of UserRadar, please **clear all activity logs for all users** before using the new session tracking features. Old log entries are not compatible with the new session timeline and metadata format. If this is your first time installing UserRadar, you can ignore this message.
+A Vencord plugin for keeping tabs on specific people on Discord. Add someone to your watchlist and UserRadar logs everything they do in the background — messages, voice activity, profile changes, status, music, games — and saves it all into a searchable activity log you can open anytime.
 
 ---
 
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| **Message Tracking** | Log new messages, edits, and deleted messages (requires MessageLoggerEnhanced for deleted message recovery) |
-| **Typing Indicators** | Get notified when a watched user starts typing |
-| **Status Monitoring** | Track online/away/DND/offline transitions with session timelines |
-| **Voice Activity** | Log voice channel joins, leaves, moves, camera toggles, and screen sharing sessions |
-| **Game & Music Activity** | Track game sessions, Spotify/YouTube Music listening with album art and progress bars |
-| **Profile Changes** | Detect avatar, banner, bio, username, and display name changes |
-| **Server Joins/Leaves** | Monitor when watched users join or leave mutual servers |
-| **Platform Detection** | See which platform (Desktop, Mobile, Web, Console, VR) the user is on |
-| **Activity Log** | Full searchable, filterable, exportable activity history per user |
-| **Per-User Controls** | Granular toggles for every feature on a per-user basis |
-| **Quick Presets** | Stalker, Lite, and Silent presets for one-click configuration |
-| **Quiet Hours** | Suppress notifications during configurable hours |
-| **DM Toolbar Button** | Quick-access activity log button in DM headers |
+### 👀 Watchlist
+
+Add anyone by user ID or by right-clicking their profile. Give them a custom nickname, search through your list, sort by name or date added, and remove anyone instantly. Each person on your list can have their own tracking settings independent of everyone else.
+
+### 📝 Message Tracking
+
+- Logs every message sent by a watched user
+- Logs edits with the **before and after text shown side by side**
+- Logs deletions (requires a message logger plugin to recover deleted content)
+- Shows typing indicators if enabled
+- Click any message log to jump straight to it in Discord
+
+### 🎙️ Voice Tracking
+
+- Tracks joining and leaving voice channels
+- Shows a live **"In #channel"** badge while they're still there
+- Full join → left timeline with exact timestamps and duration
+- Shows what platform they joined from (mobile / desktop / web)
+
+### 🎵 Spotify & Activity Tracking
+
+- Live "Now Playing" card with album art, artist, and a real-time progress bar
+- Tracks games being played and streaming sessions
+- Session duration and start/end times saved automatically
+- A green **Live** badge appears on anything currently active
+
+### 🟢 Status Tracking
+
+- Online / idle / DND / offline changes
+- Which platform they're using
+- Custom status (the emoji + text people set manually) with before/after
+- Smart enough to ignore false status blips caused by reconnecting — won't spam you every time someone's internet drops for a second
+
+### 🪪 Profile Tracking
+
+Every profile field is tracked individually, each with a clean **before → after card**:
+
+| Field | What you see |
+|---|---|
+| Avatar | Old and new profile picture side by side |
+| Username | Old name struck through, new name highlighted |
+| Display Name | Same before/after card |
+| About Me / Bio | Full text comparison |
+| Banner | Before/after |
+| Pronouns | Before/after |
+
+### 🔔 Notifications
+
+Get a desktop notification the instant something happens. Fully customizable per category, with:
+- **Quiet Hours** — mute notifications during set hours (e.g. 11pm–7am)
+- **Silent Mode** — global presets to mute everything at once
+- Spam protection so the same event never double-notifies you
+
+### 📋 Activity Log
+
+- Filter by category (messages, voice, profile, status, etc.) with one tap — the active filter blinks so you always know what you're looking at
+- Search across your entire log
+- Expand any card for full detail
+- Export your log to a file, or import one back in
+- Clear all logs whenever you want a fresh start
+
+### ⚙️ Global Presets
+
+Switch tracking behavior instantly with built-in modes:
+- **Custom** — fully manual control over every toggle
+- **Stalker** — track absolutely everything
+- **Lite** — track only the essentials (messages, deletes, typing, avatar, voice, status)
+- **Silent** — pause all notifications without losing any logged data
 
 ---
 
-## Presets
+## Settings Reference
 
-| Preset | Behavior |
-|--------|----------|
-| **Stalker** | Maximum tracking — every event logged and notified |
-| **Lite** | Essential tracking only (messages, edits, deletes, typing, avatar, voice) |
-| **Silent** | Log everything silently — no notifications, all events recorded |
-| **Custom** | Per-user control — configure each feature individually |
+| Setting | Default | What it does |
+|---|---|---|
+| Messages | On | Logs sent messages |
+| Edits | On | Logs edited messages with before/after |
+| Deletes | On | Logs deleted messages (needs a message logger) |
+| Typing | On | Logs typing indicators |
+| Profile changes | On | Tracks username, display name, bio, banner, pronouns |
+| Avatar changes | On | Tracks profile picture changes |
+| Voice | On | Tracks voice channel join/leave |
+| Status | Off | Tracks online/idle/dnd/offline (can be spammy) |
+| Activity changes | Off | Tracks game/app activity changes (can be spammy) |
+| Server joins/leaves | On | Tracks shared server join/leave events |
+| Show message preview | On | Shows message content in notifications |
+| Preview length | Unlimited | How much of a message to preview |
+| Quiet hours | Off | Mutes notifications during a set time range |
+| Skip current channel | On | Doesn't notify for activity in the channel you're already viewing |
+| Toolbar icon | On | Shows the UserRadar icon in the chat toolbar |
 
----
-
-## Installation
-
-1. Install [Vencord](https://vencord.dev/)
-2. Navigate to your Vencord userplugins folder:
-   - **Vencord Desktop**: `%AppData%\Vencord\src\userplugins\`
-3. Create a folder named `UserRadar`
-4. Copy `index.tsx`, `store.ts`, and `types.ts` into the folder and `build`
-5. Restart Discord — the plugin will appear in your Vencord plugins list
-
----
-
-## Usage
-
-### Adding Users
-
-1. Open the **UserRadar** toolbar icon (eye icon in the top bar)
-2. Paste a Discord User ID (enable Developer Mode → right-click user → Copy User ID)
-3. Optionally add a private label (e.g., "bestie", "the rat", "ex")
-4. Click **Look Up** then **Add to Watchlist**
-
-### Context Menu Shortcuts
-
-- Right-click any user → **Watch User** / **Unwatch User**
-- Right-click any message → **Add Author to Watchlist**
-
-### Activity Log
-
-- Click **Activity** on any watched user to open their full history
-- Filter by category (Messages, Edits, Deletes, Typing, Status, Voice, Profile, Activity)
-- Search by content, app name, song, or artist
-- Sort by newest or oldest
-- Export/import as JSON
-- **Delete individual entries** — hover any card and click the trash icon
-- **Clear all logs** — use the Clear button in the footer
-
-### Listening Sessions (Spotify/YouTube Music)
-
-When a user starts listening to music, UserRadar creates a live session card with:
-- Album artwork with dynamic color extraction
-- Song name, artist, album
-- Progress bar and duration
-- Playlist/album context
-- Platform badge
-
-When the session ends, the card updates to show total listening time.
-
-### Status Sessions
-
-Online sessions track the full timeline:
-- Start time and end time
-- All status changes during the session (Online → Away → DND → Online)
-- Platform switches (Desktop → Mobile → Web)
-- Total duration
+Every setting above can also be overridden per-person from the watchlist manager.
 
 ---
 
-## Settings
+## How to Use
 
-| Setting | Description |
-|---------|-------------|
-| Messages | Track new messages |
-| Edits | Track message edits |
-| Deletes | Track deleted messages (requires MessageLoggerEnhanced) |
-| Typing | Track typing indicators |
-| Status | Track status changes (spammy — off by default) |
-| Activity | Track game/music activity |
-| Voice | Track voice channel activity |
-| Profile | Track profile changes |
-| Avatar | Track avatar updates |
-| Joins/Leaves | Track server joins and leaves |
-| Show Preview | Show message content in notifications |
-| Preview Length | Truncate previews (0 = unlimited) |
-| Quiet Hours | Suppress notifications during set hours |
-| Skip Current Channel | Don't notify if you're already in the same channel |
-| Toolbar Icon | Show/hide the toolbar button |
+1. Open the watchlist manager from the toolbar icon
+2. Add a user by ID, or right-click someone's profile and pick "Add to UserRadar"
+3. Customize what you want tracked for them (or leave it on the global defaults)
+4. Open the Activity Log anytime to see what they've been up to
+5. Tap any card to expand it for full details
 
 ---
 
-## Dependencies
+## Privacy
 
-- **Vencord** — the Discord client mod framework
-- **MessageLoggerEnhanced** (optional) — for recovering deleted message content
-
----
-
-## License
-
-This plugin is provided as-is for personal use. Discord client modifications are against Discord's Terms of Service. Use at your own risk.
-
----
-
-## Author
-
-**k1ng_op** — built for stalking your **friends** ofc ;>
+Everything is stored **locally on your device only**. UserRadar doesn't send your data anywhere — it only reads the same public profile and presence info Discord already shows you in the app.
