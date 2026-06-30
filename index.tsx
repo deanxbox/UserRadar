@@ -1,9 +1,5 @@
-// index.tsx — UserRadar
-// k1ng_op
-//
-// stalker plugin, basically
-// watch specific discord users and get pinged whenever they do anything
-// msgs, edits, deletes, typing, profile/pfp changes, voice, status, activity, boosts, joins
+// UserRadar — k1ng_op
+// tracks watched users: msgs, edits, deletes, typing, profile/pfp, voice, status, activity, boosts, joins
 
 import { addContextMenuPatch, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu"
 import { DataStore, Notifications } from "@api/index"
@@ -41,6 +37,7 @@ export type ActivityType =
     | "status" | "activity" | "voice"
     | "join" | "leave" | "boost"
     | "profile" | "avatar" | "banner" | "bio" | "username" | "displayname"
+    | "pronouns" | "custom_status"
     | "online" | "offline" | "idle" | "dnd"
     | "game_start" | "game_stop" | "spotify" | "streaming"
     | "vc_join" | "vc_leave" | "vc_move"
@@ -116,7 +113,18 @@ class ActivityStore {
 
     async importAll(json: string) {
         try {
-            this.cache = JSON.parse(json)
+            const parsed = JSON.parse(json)
+            // Validate it's a plain object whose values are arrays of entries
+            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false
+            for (const [uid, entries] of Object.entries(parsed)) {
+                if (typeof uid !== "string") return false
+                if (!Array.isArray(entries)) return false
+                for (const e of entries as any[]) {
+                    if (typeof e !== "object" || e === null) return false
+                    if (typeof e.id !== "string" || typeof e.uid !== "string" || typeof e.ts !== "number") return false
+                }
+            }
+            this.cache = parsed as Record<string, ActivityEntry[]>
             await this.save()
             return true
         } catch { return false }
@@ -179,8 +187,8 @@ export async function logUserActivity(
     return entry
 }
 
-function logActivity(uid: string, type: string, icon: string, body: string, guildId?: string, channelId?: string, msgId?: string) {
-    logUserActivity(uid, type as ActivityType, icon, body, body, { guildId, channelId, msgId }).catch(() => {})
+function logActivity(uid: string, type: string, icon: string, title: string, body?: string, guildId?: string, channelId?: string, msgId?: string) {
+    logUserActivity(uid, type as ActivityType, icon, title, body ?? title, { guildId, channelId, msgId }).catch(() => {})
 }
 
 const profileCache:  Record<string, any>                          = {}
@@ -192,6 +200,7 @@ const vcJoinTime:    Record<string, number>                       = {}
 const clientCache:   Record<string, string | null>                = {}
 const cameraCache:   Record<string, boolean>                      = {}
 const streamCache:   Record<string, boolean>                      = {}
+const customStatusCache: Record<string, string | null>            = {}  // text status (activity type 4)
 const statusSessionCache: Record<string, { startTime: number; startStatus: string; changes: { status: string; ts: number }[]; platforms: { platform: string; ts: number }[] } | null> = {}  // status session tracking
 
 const activeSessions: Record<string, { logId: string; startTime: number; channelId?: string; guildId?: string; metadata?: any }> = {}
@@ -234,6 +243,7 @@ const settings = definePluginSettings({
     globalAvatar:       { type: OptionType.BOOLEAN, default: true,                   description: "avatar changes" },
     globalVoice:        { type: OptionType.BOOLEAN, default: true,                   description: "voice" },
     globalStatus:       { type: OptionType.BOOLEAN, default: false,                  description: "status (spammy)" },
+    globalActivity:     { type: OptionType.BOOLEAN, default: false,                  description: "activity changes (spammy)" },
     globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "server joins/leaves" },
     showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message preview" },
     previewLen:         { type: OptionType.NUMBER,  default: 0,                    description: "preview length (0 = unlimited)" },
@@ -266,7 +276,7 @@ function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globa
         if (mode === "silent") return false
         if (mode === "stalker") return true
         if (mode === "lite") {
-            const liteFeatures = ["msgs", "edits", "deletes", "typing", "avatar", "voice"]
+            const liteFeatures = ["msgs", "deletes", "typing", "avatar", "voice", "status"]
             return liteFeatures.includes(userKey as string)
         }
     }
@@ -274,12 +284,13 @@ function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globa
 }
 
 const _notifDebounce: Record<string, number> = {}
+const _logDebounce: Record<string, number> = {}
 
-function notify(opts: { title: string; body: string; icon?: string; onClick?: () => void }) {
+function notify(opts: { title: string; body: string; icon?: string; onClick?: () => void; _uid?: string }) {
     if (inQuietHours(settings)) return
     if (settings.store.globalPresetMode === "silent") return
 
-    const key = `${opts.title}|${opts.body}`
+    const key = `${opts._uid ?? ""}\x00${opts.title}\x00${opts.body}`
     const now = Date.now()
     if (_notifDebounce[key] && now - _notifDebounce[key] < 1500) return
     _notifDebounce[key] = now
@@ -297,6 +308,11 @@ function avatarUrl(id: string, hash?: string | null, size = 80): string {
     } catch { return "https://cdn.discordapp.com/embed/avatars/0.png" }
 }
 
+function guildName(guildId?: string | null): string | null {
+    if (!guildId) return null
+    return findByProps("getGuild")?.getGuild(guildId)?.name ?? null
+}
+
 function bannerUrl(id: string, hash?: string | null): string | null {
     if (!hash) return null
     return `https://cdn.discordapp.com/banners/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=480`
@@ -309,10 +325,24 @@ function hexColor(n?: number | null): string | null {
 
 const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
 
-const PROFILE_TEXT = ["username", "globalName", "bio", "banner"] as const
+const PROFILE_TEXT = ["username", "globalName", "bio", "banner", "pronouns"] as const
 const FIELD_NAME: Record<string, string> = {
     username: "username", globalName: "display name",
-    bio: "bio", banner: "banner",
+    bio: "about me", banner: "banner", pronouns: "pronouns",
+}
+const PROFILE_TYPE_MAP: Record<string, ActivityType> = {
+    username: "username",
+    globalName: "displayname",
+    bio: "bio",
+    banner: "banner",
+    pronouns: "pronouns",
+}
+const PROFILE_ICON_MAP: Record<string, string> = {
+    username: "🏷️",
+    globalName: "📛",
+    bio: "📝",
+    banner: "🏳️",
+    pronouns: "🪪",
 }
 
 function checkProfileChanged(uid: string, fresh: any) {
@@ -322,53 +352,95 @@ function checkProfileChanged(uid: string, fresh: any) {
         profileCache[uid] = fresh
         return
     }
-    if (fresh.user?.avatar !== old.user?.avatar) {
-        if (isFeatureOn( uid, "avatar", "globalAvatar")) {
+
+    // avatar — separate feature flag
+    const oldAvatar = old.user?.avatar ?? old.user?.avatarUrl ?? null
+    const newAvatar = fresh.user?.avatar ?? fresh.user?.avatarUrl ?? null
+    if (newAvatar !== oldAvatar) {
+        if (isFeatureOn(uid, "avatar", "globalAvatar")) {
             const name  = displayName(fresh.user)
             const label = getWatchedUser(settings, uid)?.nick
             const dn    = label ? `${label} (${name})` : name
+            const oldAvatarUrl = oldAvatar ? avatarUrl(uid, oldAvatar, 256) : null
+            const newAvatarUrl = newAvatar ? avatarUrl(uid, newAvatar, 256) : null
             notify({
                 title: `${dn} changed their avatar`,
                 body: "click to see new pfp",
-                icon: fresh.user?.avatar
-                    ? `https://cdn.discordapp.com/avatars/${uid}/${fresh.user.avatar}.webp?size=128`
-                    : undefined,
+                icon: newAvatarUrl ?? undefined,
                 onClick: () => openUserProfile(uid),
             })
+            logUserActivity(uid, "avatar", "🖼️",
+                `changed their avatar`,
+                "",
+                { metadata: { oldAvatar: oldAvatarUrl, newAvatar: newAvatarUrl } }
+            ).catch(() => {})
         }
-        profileCache[uid] = { ...profileCache[uid], user: { ...profileCache[uid].user, avatar: fresh.user?.avatar } }
     }
-    const changed: string[] = []
-    for (const f of PROFILE_TEXT) {
-        if ((fresh.user?.[f] ?? null) !== (old.user?.[f] ?? null)) changed.push(f)
-    }
-    if (changed.length > 0 && isFeatureOn( uid, "profile", "globalProfile")) {
+
+    // text profile fields — one log per changed field
+    if (isFeatureOn(uid, "profile", "globalProfile")) {
         const u     = UserStore.getUser(uid)
         const name  = displayName(fresh.user)
         const label = getWatchedUser(settings, uid)?.nick
         const dn    = label ? `${label} (${name})` : name
-        notify({
-            title: `${dn} updated their profile`,
-            body: changed.map(f => FIELD_NAME[f] ?? f).join(", "),
-            icon: u ? avatarUrl(u.id, (u as any).avatar) : undefined,
-            onClick: () => openUserProfile(uid),
-        })
+        const icon  = u ? avatarUrl(u.id, (u as any).avatar) : undefined
+
+        for (const f of PROFILE_TEXT) {
+            // pronouns sits at root, not under user
+            const rawOld = f === "pronouns"
+                ? (old.pronouns ?? old.user?.pronouns ?? null)
+                : (old.user?.[f] ?? null)
+            const rawNew = f === "pronouns"
+                ? (fresh.pronouns ?? fresh.user?.pronouns ?? null)
+                : (fresh.user?.[f] ?? null)
+            const oldVal = rawOld === "" ? null : rawOld
+            const newVal = rawNew === "" ? null : rawNew
+            if (oldVal === newVal) continue
+
+            const fieldLabel = FIELD_NAME[f] ?? f
+            const actType    = PROFILE_TYPE_MAP[f] ?? "profile"
+            const actIcon    = PROFILE_ICON_MAP[f] ?? "👤"
+
+            const notifyBody = newVal
+                ? (oldVal ? `${oldVal} → ${newVal}` : newVal)
+                : `removed ${fieldLabel}`
+            const bodyText = ""  // shown via diff card instead
+
+            notify({
+                title: `${dn} changed their ${fieldLabel}`,
+                body: notifyBody,
+                icon,
+                onClick: () => openUserProfile(uid),
+            })
+            logUserActivity(uid, actType, actIcon,
+                `changed their ${fieldLabel}`,
+                bodyText,
+                { metadata: { field: f, before: oldVal, after: newVal } }
+            ).catch(() => {})
+        }
     }
+
     profileCache[uid] = fresh
 }
 
+let _pollRunning = false
 async function pollProfiles() {
+    if (_pollRunning) return
+    _pollRunning = true
     const list = getWatchlist(settings)
-    if (!list.length) return
-    for (const wu of list) {
-        try {
-            const { body } = await RestAPI.get({
-                url: `/users/${wu.id}/profile`,
-                query: { with_mutual_guilds: false, with_mutual_friends_count: false },
-            })
-            checkProfileChanged(wu.id, camelize(body))
-        } catch { }
-        await new Promise(r => setTimeout(r, 1500))
+    try {
+        for (const wu of list) {
+            try {
+                const { body } = await RestAPI.get({
+                    url: `/users/${wu.id}/profile`,
+                    query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+                })
+                checkProfileChanged(wu.id, camelize(body))
+            } catch { }
+            await new Promise(r => setTimeout(r, 1500))
+        }
+    } finally {
+        _pollRunning = false
     }
 }
 
@@ -410,6 +482,8 @@ function injectStyles() {
         .ur-pulse { animation: ur-pulse 2s infinite; }
         @keyframes ur-flash-green { 0% { background: #248046; } 100% { background: #5865f2; } }
         .ur-flash-green { animation: ur-flash-green 0.5s ease; }
+        @keyframes ur-blink-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.25; transform: scale(0.7); } }
+        .ur-blink-dot { animation: ur-blink-dot 1.4s ease-in-out infinite; }
 
         /* Activity log modal specific - prevent horizontal scroll */
         .ur-activity-modal { overflow-x: hidden !important; }
@@ -576,7 +650,7 @@ function timeAgo(ts: number): string {
 
     if (mins < 1)    return "just now"
     if (mins < 60)   return `${mins}m ago`
-    if (isSameDay)   return "Today"
+    if (isSameDay)   return `${Math.floor(mins / 60)}h ago`
     if (isYesterday) return "Yesterday"
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
 }
@@ -585,9 +659,6 @@ function exactTime(ts: number): string {
     return new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium", hour12: true })
 }
 
-function logTime(ts: number): string {
-    return new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium", hour12: true })
-}
 function decodeSnowflake(id: string) {
     try {
         const snowflake = BigInt(id)
@@ -1102,7 +1173,7 @@ function SearchInput({ query, setQuery }: { query: string; setQuery: (v: string)
                 top: "50%",
                 transform: "translateY(-50%)",
                 color: "#949ba4",
-                display: "flex",
+                display: query ? "none" : "flex",
                 alignItems: "center",
                 pointerEvents: "none",
             }}>
@@ -1161,7 +1232,8 @@ const ACTIVITY_ICONS: Record<ActivityType, string> = {
     status: "⚪", activity: "🎮", voice: "🎙️",
     join: "📥", leave: "📤", boost: "🚀",
     profile: "👤", avatar: "🖼️", banner: "🏳️", bio: "📝",
-    username: "🏷️", displayname: "📛", online: "🟢",
+    username: "🏷️", displayname: "📛", pronouns: "🪪", custom_status: "💬",
+    online: "🟢",
     offline: "⚫", idle: "🌙", dnd: "🔴",
     game_start: "🎮", game_stop: "🛑", spotify: "🎵",
     streaming: "📺", vc_join: "🔊", vc_leave: "🔇", vc_move: "↔️",
@@ -1292,7 +1364,6 @@ function extractAlbumColor(imageUrl: string): Promise<string> {
                     buckets[key].satSum += sat
                 }
 
-
                 let bestKey = ""
                 let bestScore = 0
                 for (const key in buckets) {
@@ -1353,7 +1424,7 @@ function matchesCategory(log: ActivityEntry, category: ActivityType): boolean {
         return log.type === "online" || log.type === "offline" || log.type === "idle" || log.type === "dnd" || log.type === "status"
     }
     if (category === "voice") return log.type === "voice" || log.type === "vc_join" || log.type === "vc_leave" || log.type === "vc_move" || (log.type === "session" && (["voice_session", "stream_session", "camera_session"].includes(log.metadata?.action || "") || (log.metadata?.action || "").includes("voice")))
-    if (category === "profile") return log.type === "profile" || log.type === "avatar" || log.type === "banner" || log.type === "bio" || log.type === "username" || log.type === "displayname"
+    if (category === "profile") return log.type === "profile" || log.type === "avatar" || log.type === "banner" || log.type === "bio" || log.type === "username" || log.type === "displayname" || log.type === "pronouns" || log.type === "custom_status"
     if (category === "activity") return log.type === "activity" || log.type === "game_start" || log.type === "game_stop" || log.type === "spotify" || log.type === "streaming" || (log.type === "session" && (log.metadata?.action || "").includes("activity"))
     return log.type === category
 }
@@ -1549,6 +1620,19 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                 }
                             }}
                         >
+                            {isActive && (
+                                <span
+                                    className="ur-blink-dot"
+                                    style={{
+                                        display: "inline-block",
+                                        width: 5,
+                                        height: 5,
+                                        borderRadius: "50%",
+                                        background: cat.color,
+                                        flexShrink: 0,
+                                    }}
+                                />
+                            )}
                             <span style={{ display: "flex", alignItems: "center" }}><cat.Icon /></span>
                             <span>{cat.label}</span>
                             <span style={{
@@ -1666,6 +1750,30 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                     })()}
                                 </div>
                                 <div style={{ flex: 1, minWidth: 0 }}>
+                                    {(() => {
+                                        // Check if this log entry has an ongoing active session
+                                        const isLiveSession = Object.values(activeSessions).some(s => s.logId === log.id)
+                                        return isLiveSession ? (
+                                            <div style={{
+                                                display: "inline-flex",
+                                                alignItems: "center",
+                                                gap: 5,
+                                                fontSize: 10,
+                                                fontWeight: 800,
+                                                textTransform: "uppercase",
+                                                letterSpacing: 0.6,
+                                                color: "#23a55a",
+                                                background: "rgba(35,165,90,0.12)",
+                                                border: "1px solid rgba(35,165,90,0.3)",
+                                                borderRadius: 8,
+                                                padding: "3px 8px",
+                                                marginBottom: 5,
+                                            }}>
+                                                <span className="ur-blink-dot" style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#23a55a", flexShrink: 0 }} />
+                                                Live
+                                            </div>
+                                        ) : null
+                                    })()}
                                     <div style={{
                                         fontSize: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 15 : 14,
                                         fontWeight: 800,
@@ -1676,7 +1784,14 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                         marginBottom: 4,
                                     }}>
                                         <span style={{ wordBreak: "break-word", flex: 1, minWidth: 0 }}>
-                                            {log.title}
+                                            {(() => {
+                                                // While user is still in VC (session not closed yet), show "In #channel" instead of "joined #channel"
+                                                const isLive = Object.values(activeSessions).some(s => s.logId === log.id)
+                                                if (isLive && log.type === "voice" && log.metadata?.action === "joined") {
+                                                    return `In #${log.metadata.channel || "voice"}`
+                                                }
+                                                return log.title
+                                            })()}
                                         </span>
                                         <span style={{
                                             fontSize: 12,
@@ -1732,7 +1847,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                             <ico.trash />
                                         </div>
                                     </div>
-                                    {log.body && log.body !== log.title && log.type !== "activity" && log.type !== "session" && log.metadata?.action !== "status_session" && (
+                                    {log.body && log.body !== log.title && log.type !== "activity" && log.type !== "session" && log.type !== "edit" && log.metadata?.action !== "status_session" && (
                                         <div style={{
                                             fontSize: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 14 : 13,
                                             color: log.type === "msg" || log.type === "edit" || log.type === "delete" ? C.text : C.muted,
@@ -1759,7 +1874,6 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                                     ? log.metadata.appName
                                                     : log.metadata?.server || "Unknown"}
                                                 {log.metadata?.channel ? ` · #${log.metadata.channel}` : ""}
-                                                {log.metadata?.duration ? ` · ${log.metadata.duration}` : ""}
                                             </span>
                                         </div>
                                     )}
@@ -1782,23 +1896,28 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                     {log.type === "edit" && log.metadata?.before && (
                                         <div style={{
                                             marginTop: 10,
-                                            padding: "10px 14px",
-                                            background: "rgba(240,178,50,0.08)",
                                             borderRadius: 14,
-                                            fontSize: 12,
-                                            color: C.text,
+                                            overflow: "hidden",
                                             border: `1px solid rgba(240,178,50,0.25)`,
-                                            lineHeight: 1.5,
                                         }}>
-                                            <div style={{ fontSize: 10, fontWeight: 800, color: "#f0b232", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.6, display: "flex", alignItems: "center", gap: 6 }}>
+                                            <div style={{ padding: "8px 14px", background: "rgba(240,178,50,0.08)", fontSize: 10, fontWeight: 800, color: "#f0b232", textTransform: "uppercase", letterSpacing: 0.6, display: "flex", alignItems: "center", gap: 6 }}>
                                                 <ico.edit />
-                                                Previous Version
+                                                Message Edit
                                             </div>
-                                            <span style={{
-                                                textDecoration: "line-through",
-                                                opacity: 0.7,
-                                                wordBreak: "break-word",
-                                            }}>{trunc(log.metadata.before, 200)}</span>
+                                            <div style={{ padding: "10px 14px", borderBottom: log.metadata?.after ? `1px solid rgba(240,178,50,0.15)` : "none", background: "rgba(218,55,60,0.06)" }}>
+                                                <div style={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>Before</div>
+                                                <span style={{ fontSize: 12, textDecoration: "line-through", opacity: 0.7, wordBreak: "break-word", lineHeight: 1.5, color: C.text }}>
+                                                    {trunc(log.metadata.before, 300)}
+                                                </span>
+                                            </div>
+                                            {log.metadata?.after && (
+                                                <div style={{ padding: "10px 14px", background: "rgba(36,128,70,0.06)" }}>
+                                                    <div style={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>After</div>
+                                                    <span style={{ fontSize: 12, wordBreak: "break-word", lineHeight: 1.5, color: C.text }}>
+                                                        {trunc(log.metadata.after, 300)}
+                                                    </span>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                     {expandedId === log.id && (
@@ -1830,7 +1949,115 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                                     Jump to Discord
                                                 </div>
                                             )}
-                                            {log.metadata && log.type !== "msg" && log.type !== "edit" && log.type !== "delete" && (
+                                            {/* Profile field before/after diff card */}
+                                            {(["username","displayname","bio","banner","pronouns","custom_status","avatar"] as ActivityType[]).includes(log.type) && log.metadata && (log.metadata.before !== undefined || log.metadata.after !== undefined || log.metadata.oldAvatar !== undefined || log.metadata.newAvatar !== undefined) && (
+                                                <div style={{
+                                                    marginTop: 10,
+                                                    borderRadius: 14,
+                                                    overflow: "hidden",
+                                                    border: `1px solid rgba(255,107,107,0.3)`,
+                                                }}>
+                                                    {/* Header */}
+                                                    <div style={{
+                                                        padding: "8px 14px",
+                                                        background: "rgba(255,107,107,0.12)",
+                                                        fontSize: 10,
+                                                        fontWeight: 800,
+                                                        textTransform: "uppercase",
+                                                        letterSpacing: 0.6,
+                                                        color: "#ff6b6b",
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        gap: 6,
+                                                    }}>
+                                                        <span>{ACTIVITY_ICONS[log.type] || "👤"}</span>
+                                                        <span>{FIELD_NAME[log.metadata.field ?? ""] ?? log.type.replace("_", " ")} change</span>
+                                                    </div>
+                                                    {/* Avatar images row */}
+                                                    {log.type === "avatar" && (log.metadata.oldAvatar || log.metadata.newAvatar) && (
+                                                        <div style={{
+                                                            display: "flex",
+                                                            gap: 12,
+                                                            padding: "14px",
+                                                            background: C.bg1,
+                                                            alignItems: "center",
+                                                        }}>
+                                                            <div style={{ textAlign: "center" }}>
+                                                                <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Before</div>
+                                                                {log.metadata.oldAvatar
+                                                                    ? <img src={log.metadata.oldAvatar} style={{ width: 64, height: 64, borderRadius: "50%", border: `2px solid ${C.border}` }} onError={(e: any) => { e.target.style.display = "none" }} />
+                                                                    : <div style={{ width: 64, height: 64, borderRadius: "50%", background: C.bg2, border: `2px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🚫</div>
+                                                                }
+                                                            </div>
+                                                            <div style={{ fontSize: 20, color: C.muted, flexShrink: 0 }}>→</div>
+                                                            <div style={{ textAlign: "center" }}>
+                                                                <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>After</div>
+                                                                {log.metadata.newAvatar
+                                                                    ? <img src={log.metadata.newAvatar} style={{ width: 64, height: 64, borderRadius: "50%", border: `2px solid rgba(255,107,107,0.5)` }} onError={(e: any) => { e.target.style.display = "none" }} />
+                                                                    : <div style={{ width: 64, height: 64, borderRadius: "50%", background: C.bg2, border: `2px solid rgba(255,107,107,0.5)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🚫</div>
+                                                                }
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {/* Text before/after */}
+                                                    {log.type !== "avatar" && (
+                                                        <div style={{ background: C.bg1 }}>
+                                                            {log.metadata.before != null && (
+                                                                <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}` }}>
+                                                                    <div style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, color: C.muted, marginBottom: 5 }}>Before</div>
+                                                                    <div style={{
+                                                                        fontSize: 12,
+                                                                        color: C.text,
+                                                                        background: "rgba(218,55,60,0.08)",
+                                                                        border: "1px solid rgba(218,55,60,0.25)",
+                                                                        borderRadius: 8,
+                                                                        padding: "8px 10px",
+                                                                        whiteSpace: "pre-wrap",
+                                                                        wordBreak: "break-word",
+                                                                        lineHeight: 1.5,
+                                                                        textDecoration: "line-through",
+                                                                        opacity: 0.8,
+                                                                    }}>
+                                                                        {String(log.metadata.before)}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            {log.metadata.after != null && (
+                                                                <div style={{ padding: "10px 14px" }}>
+                                                                    <div style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, color: C.muted, marginBottom: 5 }}>After</div>
+                                                                    <div style={{
+                                                                        fontSize: 12,
+                                                                        color: C.text,
+                                                                        background: "rgba(36,128,70,0.08)",
+                                                                        border: "1px solid rgba(36,128,70,0.25)",
+                                                                        borderRadius: 8,
+                                                                        padding: "8px 10px",
+                                                                        whiteSpace: "pre-wrap",
+                                                                        wordBreak: "break-word",
+                                                                        lineHeight: 1.5,
+                                                                    }}>
+                                                                        {String(log.metadata.after)}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            {log.metadata.after == null && log.metadata.before != null && (
+                                                                <div style={{ padding: "10px 14px" }}>
+                                                                    <div style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, color: C.muted, marginBottom: 5 }}>After</div>
+                                                                    <div style={{
+                                                                        fontSize: 12,
+                                                                        color: C.muted,
+                                                                        fontStyle: "italic",
+                                                                        padding: "8px 10px",
+                                                                    }}>
+                                                                        (removed)
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                            {log.metadata && log.type !== "msg" && log.type !== "edit" && log.type !== "delete" && !(["username","displayname","bio","banner","pronouns","custom_status","avatar"] as ActivityType[]).includes(log.type) && (
                                                 <div style={{
                                                     marginTop: 10,
                                                     padding: "12px 16px",
@@ -2105,7 +2332,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                                             </div>
                                                         </div>
                                                     )}
-                                                    {log.metadata.duration && (
+                                                    {log.metadata.duration && log.metadata.action !== "listening_session" && (
                                                         <div style={{
                                                             marginBottom: 10,
                                                             padding: "10px 14px",
@@ -2377,7 +2604,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                                     )}
                                                     {Object.entries(log.metadata)
                                                         .filter(([key, val]) =>
-                                                            !["duration","startTime","endTime","members","metadata","type","action","name","song","artist","allArtists","album","trackId","albumId","artistIds","contextUri","trackType","albumArtUrl","largeImage","smallImage","smallText","statusDisplayType","createdAt","sessionId","partyId","partySize","appName","appLogo","gameIconUrl","applicationId","parentApplicationId","platform","platformKey","flags","buttons","secrets","url","startTimestamp","endTimestamp","timestamps","party","assets","statusTimeline","platformTimeline","startStatus","endStatus","changeCount"].includes(key) &&
+                                                            !["duration","startTime","endTime","members","metadata","type","action","name","song","artist","allArtists","album","trackId","albumId","artistIds","contextUri","trackType","albumArtUrl","largeImage","smallImage","smallText","statusDisplayType","createdAt","sessionId","partyId","partySize","appName","appLogo","gameIconUrl","applicationId","parentApplicationId","platform","platformKey","flags","buttons","secrets","url","startTimestamp","endTimestamp","timestamps","party","assets","statusTimeline","platformTimeline","startStatus","endStatus","changeCount","before","after","field","oldAvatar","newAvatar"].includes(key) &&
                                                             val !== undefined && val !== null && val !== "" &&
                                                             !(typeof val === "object" && Object.keys(val).length === 0)
                                                         )
@@ -2782,14 +3009,14 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
         }
         if (preset === "lite") {
             newOverrides["msgs"] = true
-            newOverrides["edits"] = true
             newOverrides["deletes"] = true
             newOverrides["typing"] = true
             newOverrides["avatar"] = true
             newOverrides["voice"] = true
+            newOverrides["status"] = true
             Object.keys(OV_GROUPS).forEach(g => {
                 OV_GROUPS[g as OvTab].forEach(r => {
-                    if (!["msgs","edits","deletes","typing","avatar","voice"].includes(r.key)) {
+                    if (!["msgs","deletes","typing","avatar","voice","status"].includes(r.key)) {
                         newOverrides[r.key] = false
                     }
                 })
@@ -2819,7 +3046,7 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
         if (allFalse) return "silent"
         const allTrue = allKeys.every(k => ov[k] === true)
         if (allTrue) return "stalker"
-        const liteKeys = ["msgs","edits","deletes","typing","avatar","voice"]
+        const liteKeys = ["msgs","deletes","typing","avatar","voice","status"]
         const isLite = liteKeys.every(k => ov[k] === true) &&
             allKeys.filter(k => !liteKeys.includes(k)).every(k => ov[k] === false)
         if (isLite) return "lite"
@@ -3019,7 +3246,7 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
                                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                                         {([
                                             { key: "stalker" as const, label: "Stalker", desc: "Maximum tracking — every event", color: C.danger },
-                                            { key: "lite" as const, label: "Lite", desc: "Messages, edits, deletes, typing, avatar, voice", color: C.brandLight },
+                                            { key: "lite" as const, label: "Lite", desc: "Messages, deletes, typing, avatar, voice, status", color: C.brandLight },
                                             { key: "silent" as const, label: "Silent", desc: "Log everything silently — no pings", color: C.muted },
                                         ]).map(preset => {
                                             const isActive = activePreset === preset.key
@@ -3278,7 +3505,6 @@ function createToolbarButton() {
 }
 
 let __urToolbarTimer: ReturnType<typeof setInterval> | null = null
-let __urDmTimer: ReturnType<typeof setInterval> | null = null
 
 function injectToolbarButton() {
     if (document.getElementById("ur-toolbar-btn")) return true
@@ -3552,13 +3778,13 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
 
                     {shown.map(u => (
                         <WatchedRow
-                        key={u.id}
-                        user={u}
-                        refresh={refresh}
-                        expandedId={expandedId}
-                        setExpandedId={setExpandedId}
-                        onRemove={() => { removeUser(settings, u.id); refresh() }}
-                    />
+                            key={u.id}
+                            user={u}
+                            refresh={refresh}
+                            expandedId={expandedId}
+                            setExpandedId={setExpandedId}
+                            onRemove={() => { removeUser(settings, u.id); refresh() }}
+                        />
                     ))}
                 </div>
             </ModalContent>
@@ -3790,9 +4016,7 @@ function injectDMActivityButton() {
     if (!recipientId) return
     if (!isWatched(settings, recipientId)) return
 
-    // Strategy: Find an existing toolbar button and use it as anchor.
-    // Discord DM toolbar has buttons with aria-labels like "Start Voice Call",
-    // "Start Video Call", "Add Friends to DM", etc.
+    // anchor on a known toolbar button by aria-label
     const knownButtonLabels = [
         'Start Voice Call',
         'Start Video Call',
@@ -3811,14 +4035,13 @@ function injectDMActivityButton() {
         if (anchorBtn) break
     }
 
-    // Also try finding by role=button in the header area
+    // fallback: any visible toolbar-looking button up top
     if (!anchorBtn) {
         const header = document.querySelector('[class*="chat_"]') || document.querySelector('[class*="chatContent_"]')
         if (header) {
             const buttons = header.querySelectorAll('[role="button"]')
             for (const btn of buttons) {
                 const rect = btn.getBoundingClientRect()
-                // Must be visible and in the top area (toolbar)
                 if (rect.width > 20 && rect.height > 20 && rect.top < 100) {
                     anchorBtn = btn
                     break
@@ -3829,14 +4052,10 @@ function injectDMActivityButton() {
 
     if (!anchorBtn) return
 
-    // Get the toolbar container (parent of the anchor button)
     const toolbar = anchorBtn.parentElement
     if (!toolbar) return
-
-    // Don't inject if already present
     if (toolbar.querySelector('.ur-dm-activity-btn')) return
 
-    // Create the icon button — matches Discord's native toolbar icons exactly
     const btn = document.createElement('div')
     btn.className = 'ur-dm-activity-btn'
     btn.setAttribute('role', 'button')
@@ -3883,17 +4102,12 @@ function injectDMActivityButton() {
 
 function startDMObserver() {
     injectDMActivityButton()
-    __urDmTimer = setInterval(() => injectDMActivityButton(), 600)
     const observer = new MutationObserver(() => injectDMActivityButton())
     observer.observe(document.body, { childList: true, subtree: true })
     ;(window as any).__urDmObserver = observer
 }
 
 function stopDMObserver() {
-    if (__urDmTimer) {
-        clearInterval(__urDmTimer)
-        __urDmTimer = null
-    }
     const observer = (window as any).__urDmObserver
     if (observer) {
         observer.disconnect()
@@ -3914,11 +4128,9 @@ export default definePlugin({
         if (settings.store.showToolbarIcon) startToolbarObserver()
         startDMObserver()
 
-        // load persistent activity log from disk so badges are correct on first render
         activityStore.load().catch(() => {})
 
-        // pre-populate all caches BEFORE flux events start arriving
-        // if we don't do this, the first VOICE_STATE_UPDATES looks like a join even if they were already in vc
+        // pre-populate caches before flux events arrive, or first VOICE_STATE_UPDATES looks like a join
         try {
             const vsMod    = findByProps("getVoiceStateForUser")
             const presMod  = findByProps("getStatus", "getActivities")
@@ -3940,24 +4152,25 @@ export default definePlugin({
                     else clientCache[wu.id] = null
                 } catch { }
 
-                // status + activity
+                // status + activity + custom status
                 try {
                     const status = presMod?.getStatus?.(wu.id)
                     if (status) statusCache[wu.id] = status
                     const acts: any[] = presMod?.getActivities?.(wu.id) ?? []
                     const realAct = acts.find((a: any) => a.type !== 4) ?? null
                     activityCache[wu.id] = realAct ? `${realAct.type}:${realAct.name}` : null
+                    const customAct = acts.find((a: any) => a.type === 4) ?? null
+                    customStatusCache[wu.id] = customAct
+                        ? [customAct.emoji?.name, customAct.state].filter(Boolean).join(" ") || null
+                        : null
                 } catch { }
 
-                // don't try to snapshot guild membership — isMember() returns wrong results
-                // during discord's startup sequence while the member store is still loading
-                // the 45s cooldown in GUILD_MEMBER_ADD handles this correctly instead
+                // isMember() is unreliable during startup — GUILD_MEMBER_ADD's cooldown handles it instead
                 guildCache[wu.id] = new Set()
             }
         } catch (e) { log.warn("snapshot failed", e) }
 
-        // fetch baseline profiles in background — staggered so we don't get ratelimited
-        // using setTimeout(fetchNext) instead of await-in-loop so start() returns fast
+        // staggered fetch to avoid ratelimits — start() returns immediately, fetch keeps going in background
         const list = getWatchlist(settings)
         let i = 0
         const fetchNext = () => {
@@ -3969,15 +4182,13 @@ export default definePlugin({
             }).then((res: any) => {
                 const data = camelize(res.body)
                 profileCache[wu.id] = data
-                // populate guild cache from mutual_guilds — this is accurate data
-                // no isMember() guesswork, straight from discord's api
                 if (Array.isArray(data.mutualGuilds)) {
                     guildCache[wu.id] = new Set(data.mutualGuilds.map((g: any) => g.id))
                 }
                 setTimeout(fetchNext, 800)
             }).catch(() => setTimeout(fetchNext, 800))
         }
-        setTimeout(fetchNext, 500)  // small delay so discord finishes its own startup first
+        setTimeout(fetchNext, 500)  // let discord finish its own startup first
 
         pollTimer = setInterval(pollProfiles, 5 * 60 * 1000)
         pluginStartedAt = Date.now()
@@ -3998,6 +4209,7 @@ export default definePlugin({
         Object.keys(clientCache).forEach(k => delete clientCache[k])
         Object.keys(cameraCache).forEach(k => delete cameraCache[k])
         Object.keys(streamCache).forEach(k => delete streamCache[k])
+        Object.keys(customStatusCache).forEach(k => delete customStatusCache[k])
         pluginStartedAt = 0
         loggedMsgs = null
     },
@@ -4012,9 +4224,8 @@ export default definePlugin({
                 const name  = displayName(message.author)
                 const dn    = label ? `${label} (${name})` : name
                 const ch    = ChannelStore.getChannel(channelId)
-                const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
+                const gName = guildName(ch?.guild_id)
                 const chName  = ch?.name || "dm"
-                const gName   = g?.name || ""
                 // for DMs, ch.name is null — show recipient context instead
                 const location = gName
                     ? `${gName} · #${chName}`
@@ -4036,7 +4247,7 @@ export default definePlugin({
                     channelId,
                     msgId: message.id,
                     metadata: {
-                        server: g?.name || "Direct Message",
+                        server: gName || "Direct Message",
                         channel: chName,
                         content: message.content,
                     }
@@ -4059,36 +4270,42 @@ export default definePlugin({
             const name  = displayName(message.author)
             const dn    = label ? `${label} (${name})` : name
             const ch    = ChannelStore.getChannel(message.channel_id)
-            const g     = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id) : null
+            const gName = guildName(ch?.guild_id)
             const chName = ch?.name || "dm"
-            const gName  = g?.name || ""
-            const location = gName ? `${gName} · #${chName}` : `DM · #${chName}`
+            const location = gName
+                ? `${gName} · #${chName}`
+                : ch?.recipients?.length
+                    ? "Direct Message"
+                    : `#${chName}`
 
             if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === message.channel_id) return
 
             // try to get old content from cache for before → after preview
             // MessageStore still has the old version at the time MESSAGE_UPDATE fires
-            const cached = MessageStore.getMessage(message.channel_id, message.id)
-            const before = cached?.content && cached.content !== message.content
-                ? `"${trunc(cached.content, 60)}" → `
-                : ""
-            const after = message.content
-                ? `"${trunc(message.content, 60)}"`
-                : "click to view"
+            const beforeContent = cached?.content && cached.content !== message.content
+                ? cached.content
+                : null
+            const afterContent = message.content || null
+
+            const notifyBody = beforeContent
+                ? `"${trunc(beforeContent, 60)}" → "${trunc(afterContent || "", 60)}"`
+                : afterContent ? `"${trunc(afterContent, 60)}"` : "click to view"
 
             notify({
                 title: `${dn} edited a message`,
-                body: `${before}${after}`,
+                body: notifyBody,
                 icon: avatarUrl(uid, message.author?.avatar, 80),
                 onClick: () => jumpTo(ch?.guild_id, message.channel_id, message.id),
             })
-            logUserActivity(uid, "edit", "✏️", `edited a message in ${location}`, `${before}${after}`, {
+            logUserActivity(uid, "edit", "✏️", `edited a message`, location, {
                 guildId: ch?.guild_id,
                 channelId: message.channel_id,
                 msgId: message.id,
                 metadata: {
-                    server: g?.name || "Direct Message",
+                    server: gName || "Direct Message",
                     channel: chName,
+                    before: beforeContent,
+                    after: afterContent,
                 }
             }).catch(() => {})
 
@@ -4108,9 +4325,8 @@ export default definePlugin({
                 const name  = displayName(msg.author)
                 const dn    = label ? `${label} (${name})` : name
                 const ch    = ChannelStore.getChannel(channelId)
-                const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
+                const gName = guildName(ch?.guild_id)
                 const chName  = ch?.name || "dm"
-                const gName   = g?.name || ""
                 // for DMs, ch.name is null — show recipient context instead
                 const location = gName
                     ? `${gName} · #${chName}`
@@ -4132,7 +4348,7 @@ export default definePlugin({
                     channelId,
                     msgId: msg.id,
                     metadata: {
-                        server: g?.name || "Direct Message",
+                        server: gName || "Direct Message",
                         channel: chName,
                     }
                 }).catch(() => {})
@@ -4147,9 +4363,8 @@ export default definePlugin({
                 const name  = displayName(u) || userId
                 const dn    = label ? `${label} (${name})` : name
                 const ch    = ChannelStore.getChannel(channelId)
-                const g     = ch?.guild_id ? findByProps("getGuild").getGuild(ch.guild_id) : null
+                const gName = guildName(ch?.guild_id)
                 const chName  = ch?.name || "dm"
-                const gName   = g?.name || ""
                 // for DMs, ch.name is null — show recipient context instead
                 const location = gName
                     ? `${gName} · #${chName}`
@@ -4197,7 +4412,7 @@ export default definePlugin({
                 if (channelChanged) vcCache[uid] = now
 
                 if (!isFeatureOn(uid, "voice", "globalVoice")) {
-                cameraCache[uid] = vs.selfVideo ?? false
+                    cameraCache[uid] = vs.selfVideo ?? false
                     streamCache[uid] = vs.selfStream ?? false
                     continue
                 }
@@ -4209,11 +4424,9 @@ export default definePlugin({
                 const ch    = now ? ChannelStore.getChannel(now) : (old ? ChannelStore.getChannel(old) : null)
                 const chName = ch?.name || "unknown"
 
-                if (!channelChanged) {
-                                    } else
                 if (!old && now) {
                     vcJoinTime[uid] = Date.now()
-                    const guildNameVc = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id)?.name : null
+                    const guildNameVc = guildName(ch?.guild_id)
                     const sk = sessionKey(uid, "voice", now!)
                     notify({
                         title: `${dn} Joined Voice`,
@@ -4234,7 +4447,7 @@ export default definePlugin({
                         } catch { return [] }
                     })()
                     const joinPlatform = clientCache[uid] ? CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid] : undefined
-                    const entry = await logUserActivity(uid, "voice", "🎙️", `joined #${chName}`, `${guildNameVc ? guildNameVc + " · " : ""}#${chName}${platformSuffixLog(uid)}`, {
+                    const entry = await logUserActivity(uid, "voice", "🎙️", `joined #${chName}`, joinPlatform ? `on ${joinPlatform}` : "", {
                         guildId: ch?.guild_id,
                         channelId: now!,
                         metadata: {
@@ -4245,13 +4458,13 @@ export default definePlugin({
                             members: vcMembers.length > 0 ? vcMembers : undefined,
                         }
                     })
-                    activeSessions[sk] = { logId: entry.id, startTime: Date.now(), channelId: now!, guildId: ch?.guild_id, metadata: { server: guildNameVc || "DM", channel: chName, platform: joinPlatform || clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined, members: vcMembers.length > 0 ? vcMembers : undefined } }
+                    activeSessions[sk] = { logId: entry.id, startTime: Date.now(), channelId: now!, guildId: ch?.guild_id, metadata: { server: guildNameVc || "DM", channel: chName, platform: joinPlatform, members: vcMembers.length > 0 ? vcMembers : undefined } }
                 } else if (old && !now) {
                     const spent = vcJoinTime[uid] ? Date.now() - vcJoinTime[uid] : 0
                     delete vcJoinTime[uid]
                     const dur = spent > 60000 ? formatDuration(spent) : ""
                     const guildNameVcLeft = (ch ?? (old ? ChannelStore.getChannel(old) : null))
-                    const guildNameVcLeftStr = guildNameVcLeft?.guild_id ? findByProps("getGuild")?.getGuild(guildNameVcLeft.guild_id)?.name : null
+                    const guildNameVcLeftStr = guildName(guildNameVcLeft?.guild_id)
                     const sk = sessionKey(uid, "voice", old!)
                     const session = activeSessions[sk]
 
@@ -4259,7 +4472,7 @@ export default definePlugin({
                         // Update the original join log with session info
                         await activityStore.updateLog(uid, session.logId, {
                             type: "session",
-                            title: dur ? `In #${chName} · ${dur}` : `In #${chName}`,
+                            title: `In #${chName}`,
                             body: `${guildNameVcLeftStr || "DM"} · #${chName}`,
                             metadata: {
                                 ...session.metadata,
@@ -4298,7 +4511,7 @@ export default definePlugin({
                     }
                 } else if (old && now && old !== now) {
                     const oldCh = ChannelStore.getChannel(old)
-                    const guildNameVcMove = ch?.guild_id ? findByProps("getGuild")?.getGuild(ch.guild_id)?.name : null
+                    const guildNameVcMove = guildName(ch?.guild_id)
                     notify({
                         title: `${dn} Moved Voice Channels`,
                         body: guildNameVcMove
@@ -4346,13 +4559,13 @@ export default definePlugin({
                                 guildId: currentGuildId,
                                 channelId: currentChId,
                                 metadata: {
-                                    server: currentGuildId ? findByProps("getGuild")?.getGuild(currentGuildId)?.name : "DM",
+                                    server: guildName(currentGuildId) || "DM",
                                     channel: currentChName,
                                     action: "camera_on",
                                     platform: camPlatform,
                                 }
                             }).then(camEntry => {
-                                activeSessions[camSk] = { logId: camEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: currentGuildId ? findByProps("getGuild")?.getGuild(currentGuildId)?.name : "DM", channel: currentChName, platform: camPlatform } }
+                                activeSessions[camSk] = { logId: camEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: guildName(currentGuildId) || "DM", channel: currentChName, platform: camPlatform } }
                             }).catch(() => {})
                         } else {
                                             const camSession = activeSessions[camSk]
@@ -4398,13 +4611,13 @@ export default definePlugin({
                                 guildId: currentGuildId,
                                 channelId: currentChId,
                                 metadata: {
-                                    server: currentGuildId ? findByProps("getGuild")?.getGuild(currentGuildId)?.name : "DM",
+                                    server: guildName(currentGuildId) || "DM",
                                     channel: currentChName,
                                     action: "stream_on",
                                     platform: streamPlatform,
                                 }
                             }).then(streamEntry => {
-                                activeSessions[streamSk] = { logId: streamEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: currentGuildId ? findByProps("getGuild")?.getGuild(currentGuildId)?.name : "DM", channel: currentChName, platform: streamPlatform } }
+                                activeSessions[streamSk] = { logId: streamEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: guildName(currentGuildId) || "DM", channel: currentChName, platform: streamPlatform } }
                             }).catch(() => {})
                         } else {
                                 const streamSession = activeSessions[streamSk]
@@ -4468,16 +4681,18 @@ export default definePlugin({
 
                 if (!isOffline && statusSessionCache[uid] && oldStatus !== newStatus && !isStartup) {
                     statusSessionCache[uid]!.changes.push({ status: newStatus, ts: Date.now() })
-                    const label = getWatchedUser(settings, uid)?.nick
-                    const userObj  = UserStore.getUser(uid)
-                    const name  = displayName(userObj) || uid
-                    const dn    = label ? `${label} (${name})` : name
-                    notify({
-                        title: `${dn} is now ${newStatus}`,
-                        body: `was: ${STATUS_LABEL[oldStatus] || oldStatus}`,
-                        icon: userObj ? avatarUrl(userObj.id, (userObj as any).avatar, 80) : undefined,
-                        onClick: () => openUserProfile(uid),
-                    })
+                    if (isFeatureOn(uid, "status", "globalStatus")) {
+                        const label = getWatchedUser(settings, uid)?.nick
+                        const userObj  = UserStore.getUser(uid)
+                        const name  = displayName(userObj) || uid
+                        const dn    = label ? `${label} (${name})` : name
+                        notify({
+                            title: `${dn} is now ${newStatus}`,
+                            body: `was: ${STATUS_LABEL[oldStatus] || oldStatus}`,
+                            icon: userObj ? avatarUrl(userObj.id, (userObj as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                    }
                 }
 
                 if (isOffline && statusSessionCache[uid] && !isStartup) {
@@ -4513,12 +4728,14 @@ export default definePlugin({
                         }
                     }).filter(Boolean)
 
-                    notify({
-                        title: `${dn} went offline`,
-                        body: durStr ? `Online for ${durStr}` : "",
-                        icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
-                        onClick: () => openUserProfile(uid),
-                    })
+                    if (isFeatureOn(uid, "status", "globalStatus")) {
+                        notify({
+                            title: `${dn} went offline`,
+                            body: durStr ? `Online for ${durStr}` : "",
+                            icon: user ? avatarUrl(user.id, (user as any).avatar, 80) : undefined,
+                            onClick: () => openUserProfile(uid),
+                        })
+                    }
 
                     logUserActivity(uid, "session", "⏱️", durStr ? `Online session · ${durStr}` : "Online session", "", {
                         metadata: {
@@ -4555,9 +4772,11 @@ export default definePlugin({
                 }
                 statusCache[uid] = newStatus
 
+                const comingOnline = wasOffline && !isOffline
+                const goingOffline = !wasOffline && isOffline
+                const onlineStateChange = comingOnline || goingOffline
                 const newClient = resolveClient((u as any).client_status ?? (u as any).clientStatus)
                 const oldClient = clientCache[uid]
-                const comingOnline = oldStatus === "offline" && newStatus !== "offline"
                 if (oldClient !== undefined && newClient !== null && oldClient !== newClient && !isStartup && !comingOnline) {
                     clientCache[uid] = newClient
                     if (statusSessionCache[uid]) {
@@ -4570,7 +4789,6 @@ export default definePlugin({
                         const dn    = label ? `${label} (${name})` : name
                         const emoji = CLIENT_EMOJI[newClient] || "📡"
                         const oldEmoji = oldClient ? (CLIENT_EMOJI[oldClient] || "📡") : ""
-                        const CLIENT_LABEL: Record<string, string> = { desktop: "Desktop", mobile: "Mobile", web: "Web" }
                         logActivity(uid, "status", emoji, `${oldClient ? `${oldEmoji} ${oldClient} → ` : ""}${emoji} ${newClient}`)
                     }
                 } else if (newClient !== null) {
@@ -4668,7 +4886,7 @@ export default definePlugin({
 
                     const openListening = async (act: any) => {
                         const { song, artist, album, trackId, albumArtUrl } = getSpotifyFields(act)
-                        const sk = sessionKey(uid, "listening", trackId || `${song}:${artist}`)
+                        const sk = sessionKey(uid, "listening", `${song}:${artist}`)
                         const title = song && artist ? `${song} — ${artist}` : song || act.name
                         const body  = song && artist ? `${song} by ${artist}${album ? ` · ${album}` : ""}` : song || act.name
                         notify({
@@ -4789,12 +5007,53 @@ export default definePlugin({
                         }
                     }
                 }
+
+                // custom text status (activity type 4) tracking
+                if (isFeatureOn(uid, "profile", "globalProfile") && !isStartup) {
+                    const customAct = (u.activities || []).find((a: any) => a.type === 4) ?? null
+                    const newCustomStatus = customAct
+                        ? [customAct.emoji?.name, customAct.state].filter(Boolean).join(" ") || null
+                        : null
+                    const oldCustomStatus = customStatusCache[uid]
+
+                    // skip on connect/disconnect — discord re-sends old activity, not a real change
+                    if (oldCustomStatus !== undefined && oldCustomStatus !== newCustomStatus && !onlineStateChange) {
+                        customStatusCache[uid] = newCustomStatus
+                        const csLabel = getWatchedUser(settings, uid)?.nick
+                        const csUser  = UserStore.getUser(uid)
+                        const csName  = displayName(csUser) || uid
+                        const csDn    = csLabel ? `${csLabel} (${csName})` : csName
+                        const bodyText = newCustomStatus
+                            ? (oldCustomStatus ? `${oldCustomStatus} → ${newCustomStatus}` : newCustomStatus)
+                            : "removed custom status"
+                        // dedupe — discord fires this twice in a row sometimes
+                        const _ldk = `cs:${uid}:${oldCustomStatus}:${newCustomStatus}`
+                        const _ldt = Date.now()
+                        if (!_logDebounce[_ldk] || _ldt - _logDebounce[_ldk] > 2000) {
+                            _logDebounce[_ldk] = _ldt
+                            notify({
+                                title: `${csDn} changed their status`,
+                                body: bodyText,
+                                icon: csUser ? avatarUrl(csUser.id, (csUser as any).avatar, 80) : undefined,
+                                onClick: () => openUserProfile(uid),
+                            })
+                            logUserActivity(uid, "custom_status", "💬",
+                                `changed their status`,
+                                bodyText,
+                                { metadata: { before: oldCustomStatus, after: newCustomStatus } }
+                            ).catch(() => {})
+                        }
+                    } else {
+                        // Always keep cache fresh — including on reconnect so next real change is detected correctly
+                        customStatusCache[uid] = newCustomStatus
+                    }
+                }
             }
         },
 
         USER_UPDATE({ user }: { user: any }) {
             if (!user?.id || !isWatched(settings, user.id)) return
-            const relevant = ["username", "global_name", "globalName", "avatar", "discriminator"]
+            const relevant = ["username", "global_name", "globalName", "avatar", "discriminator", "pronouns"]
             const hasProfileChange = relevant.some(f => user[f] !== undefined)
             if (!hasProfileChange) return
             const old = profileCache[user.id]
@@ -4804,53 +5063,51 @@ export default definePlugin({
 
         USER_PROFILE_FETCH_SUCCESS(rawEvt: any) {
             if (!rawEvt?.user?.id) return
-            if (!profileCache[rawEvt.user.id]) {
-                profileCache[rawEvt.user.id] = camelize(rawEvt)
-            }
+            profileCache[rawEvt.user.id] = camelize(rawEvt)
         },
 
         GUILD_MEMBER_ADD({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
             if (!isFeatureOn(user.id, "joins", "globalJoins")) return
 
-            if (!guildCache[user.id]) return
+            if (!guildCache[user.id]) guildCache[user.id] = new Set()
 
             if (guildCache[user.id].has(guildId)) return
             guildCache[user.id].add(guildId)
 
-            const g     = findByProps("getGuild")?.getGuild(guildId)
+            const gn    = guildName(guildId)
             const label = getWatchedUser(settings, user.id)?.nick
             const name  = displayName(user)
             const dn    = label ? `${label} (${name})` : name
             notify({
                 title: `${dn} Joined a Server`,
-                body: g?.name || guildId,
+                body: gn || guildId,
                 icon: avatarUrl(user.id, user.avatar, 80),
                 onClick: () => jumpTo(guildId),
             })
-            logActivity(user.id, "join", "📥", `joined ${g?.name || guildId}`, guildId)
+            logActivity(user.id, "join", "📥", `joined ${gn || guildId}`, guildId)
         },
 
         GUILD_MEMBER_REMOVE({ guildId, user }: GuildMemberEvent) {
             if (!user?.id || !isWatched(settings, user.id)) return
             if (!isFeatureOn(user.id, "joins", "globalJoins")) return
 
-            if (!guildCache[user.id]) return
+            if (!guildCache[user.id]) guildCache[user.id] = new Set()
 
             if (!guildCache[user.id].has(guildId)) return
             guildCache[user.id].delete(guildId)
 
-            const g     = findByProps("getGuild")?.getGuild(guildId)
+            const gn    = guildName(guildId)
             const label = getWatchedUser(settings, user.id)?.nick
             const name  = displayName(user)
             const dn    = label ? `${label} (${name})` : name
             notify({
                 title: `${dn} Left a Server`,
-                body: g?.name || guildId,
+                body: gn || guildId,
                 icon: avatarUrl(user.id, user.avatar, 80),
                 onClick: () => jumpTo(guildId),
             })
-            logActivity(user.id, "leave", "📤", `left ${g?.name || guildId}`, guildId)
+            logActivity(user.id, "leave", "📤", `left ${gn || guildId}`, guildId)
         },
     },
 })
