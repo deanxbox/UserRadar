@@ -8,12 +8,17 @@ A Vencord plugin for keeping tabs on specific people on Discord. Add someone to 
 
 ### 👀 Watchlist
 
-Add anyone by user ID or by right-clicking their profile. Give them a custom nickname, search through your list, sort by name or date added, and remove anyone instantly. Each person on your list can have their own tracking settings independent of everyone else.
+- Add anyone by user ID or by right-clicking their profile
+- Give people a custom nickname so you don't lose track of who's who
+- Search through your list, sort by name or date added
+- **Pin/favorite users** — pinned people always float to the top of the list regardless of sort order
+- Each person can have their own tracking settings, independent of everyone else
+- Auto-cleanup — logs for a person can be deleted automatically the moment you remove them from the watchlist (on by default, toggle in plugin settings)
 
 ### 📝 Message Tracking
 
 - Logs every message sent by a watched user
-- Logs edits with the **before and after text shown side by side**
+- Logs edits with **before and after text shown side by side**
 - Logs deletions (requires a message logger plugin to recover deleted content)
 - Shows typing indicators if enabled
 - Click any message log to jump straight to it in Discord
@@ -21,7 +26,7 @@ Add anyone by user ID or by right-clicking their profile. Give them a custom nic
 ### 🎙️ Voice Tracking
 
 - Tracks joining and leaving voice channels
-- Shows a live **"In #channel"** badge while they're still there
+- Live **"In #channel"** badge while they're still there
 - Full join → left timeline with exact timestamps and duration
 - Shows what platform they joined from (mobile / desktop / web)
 
@@ -37,7 +42,7 @@ Add anyone by user ID or by right-clicking their profile. Give them a custom nic
 - Online / idle / DND / offline changes
 - Which platform they're using
 - Custom status (the emoji + text people set manually) with before/after
-- Smart enough to ignore false status blips caused by reconnecting — won't spam you every time someone's internet drops for a second
+- Smart enough to tell a real status change apart from someone briefly reconnecting — won't spam you every time their internet blips
 
 ### 🪪 Profile Tracking
 
@@ -61,10 +66,13 @@ Get a desktop notification the instant something happens. Fully customizable per
 
 ### 📋 Activity Log
 
+- **Quick stats header** — see messages sent, voice time, status changes, and total events for today at a glance
 - Filter by category (messages, voice, profile, status, etc.) with one tap — the active filter blinks so you always know what you're looking at
 - Search across your entire log
 - Expand any card for full detail
-- Export your log to a file, or import one back in
+- **Compact view** — toggle a denser layout to fit more on screen at once
+- Export your log to a file — export everything, or just one category (messages only, voice only, etc.)
+- Import a log back in
 - Clear all logs whenever you want a fresh start
 
 ### ⚙️ Global Presets
@@ -96,8 +104,11 @@ Switch tracking behavior instantly with built-in modes:
 | Quiet hours | Off | Mutes notifications during a set time range |
 | Skip current channel | On | Doesn't notify for activity in the channel you're already viewing |
 | Toolbar icon | On | Shows the UserRadar icon in the chat toolbar |
+| Max logs per user | 500 | Caps how many logs are kept per person (0 = unlimited) |
+| Auto cleanup logs | On | Deletes a person's logs when removed from the watchlist |
+| Compact log view | Off | Denser activity log cards |
 
-Every setting above can also be overridden per-person from the watchlist manager.
+Every setting above (except cleanup and compact view) can also be overridden per-person from the watchlist manager.
 
 ---
 
@@ -106,8 +117,9 @@ Every setting above can also be overridden per-person from the watchlist manager
 1. Open the watchlist manager from the toolbar icon
 2. Add a user by ID, or right-click someone's profile and pick "Add to UserRadar"
 3. Customize what you want tracked for them (or leave it on the global defaults)
-4. Open the Activity Log anytime to see what they've been up to
-5. Tap any card to expand it for full details
+4. Pin anyone you check often so they stay at the top of the list
+5. Open the Activity Log anytime to see what they've been up to
+6. Tap any card to expand it for full details
 
 ---
 
