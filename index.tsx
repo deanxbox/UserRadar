@@ -255,6 +255,9 @@ const settings = definePluginSettings({
     quietEnd:           { type: OptionType.STRING,  default: "07:00",                description: "quiet hours end (24h, e.g. 07:00)" },
     skipCurrentChannel: { type: OptionType.BOOLEAN, default: true,                   description: "skip if already in that channel" },
     maxLogsPerUser:     { type: OptionType.NUMBER,  default: 500,                    description: "max logs per user (0 = unlimited)" },
+    pinnedUsers:        { type: OptionType.STRING,  hidden: true,  default: "[]",    description: "pinned watchlist user ids" },
+    compactLogView:     { type: OptionType.BOOLEAN, default: false,                  description: "compact activity log cards" },
+    autoCleanupLogs:    { type: OptionType.BOOLEAN, default: true,                   description: "delete logs when removing a user from watchlist" },
     debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "debug logging" },
     showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "toolbar icon" },
 })
@@ -271,6 +274,15 @@ function msgPreview(content: string, filename?: string) {
 function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
     if (guildId)   findByProps("transitionToGuildSync")?.transitionToGuildSync(guildId)
     if (channelId) findByProps("selectChannel")?.selectChannel({ guildId: guildId ?? "@me", channelId, messageId: msgId })
+}
+
+function getPinned(): string[] {
+    try { return JSON.parse(settings.store.pinnedUsers || "[]") } catch { return [] }
+}
+function togglePin(uid: string) {
+    const cur = getPinned()
+    const next = cur.includes(uid) ? cur.filter(id => id !== uid) : [...cur, uid]
+    settings.store.pinnedUsers = JSON.stringify(next)
 }
 
 function isFeatureOn(uid: string, userKey: keyof WatchedUser["overrides"], globalKey: string): boolean {
@@ -494,6 +506,17 @@ function injectStyles() {
         @keyframes ur-blink-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.25; transform: scale(0.7); } }
         .ur-blink-dot { animation: ur-blink-dot 1.4s ease-in-out infinite; }
 
+        .ur-compact [data-ur-card-body] { padding: 6px 10px !important; gap: 8px !important; margin-bottom: 3px !important; min-height: 0 !important; border-radius: 10px !important; }
+        .ur-compact [data-ur-card-icon] { width: 22px !important; height: 22px !important; border-radius: 6px !important; font-size: 12px !important; margin-top: 0 !important; }
+        .ur-compact [data-ur-card-icon] img { width: 14px !important; height: 14px !important; }
+        .ur-compact [data-ur-card-title] { font-size: 12px !important; margin-bottom: 0 !important; gap: 5px !important; }
+        .ur-compact [data-ur-card-body-text="meta"] { display: none !important; }
+        .ur-compact [data-ur-card-body-text="content"] { font-size: 11px !important; margin-top: 0 !important; -webkit-line-clamp: 1; display: -webkit-box !important; -webkit-box-orient: vertical; overflow: hidden; }
+        .ur-compact [data-ur-card-location] { display: none !important; }
+        .ur-compact [data-ur-card-live] { padding: 1px 5px !important; font-size: 8px !important; margin-bottom: 0 !important; }
+        .ur-compact { gap: 4px !important; }
+        .ur-compact [data-ur-day-header] { margin-bottom: 3px !important; }
+
         /* Activity log modal specific - prevent horizontal scroll */
         .ur-activity-modal { overflow-x: hidden !important; }
         .ur-activity-modal * { max-width: 100%; box-sizing: border-box; }
@@ -590,6 +613,9 @@ const ico = {
     filter:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
     stats:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>,
     download: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+    pin:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1"><path d="M16 3l5 5-5.5 5.5L17 17l-2 2-4.5-4.5L5 20l-1-1 5.5-5.5L5 9l2-2 3.5 3.5L16 3z"/></svg>,
+    pinOutline: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 3l5 5-5.5 5.5L17 17l-2 2-4.5-4.5L5 20l-1-1 5.5-5.5L5 9l2-2 3.5 3.5L16 3z"/></svg>,
+    compact:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>,
     upload:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
     clear:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>,
     calendar: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
@@ -1448,6 +1474,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
     return (
             <div
                 key={log.id}
+                data-ur-card-body
                 onClick={() => onToggle()}
                 style={{
                     display: "flex",
@@ -1470,7 +1497,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                     e.currentTarget.style.borderColor = C.border
                 }}
             >
-                <div style={{
+                <div data-ur-card-icon style={{
                     width: 42,
                     height: 42,
                     borderRadius: 12,
@@ -1495,7 +1522,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                         // Check if this log entry has an ongoing active session
                         const isLiveSession = Object.values(activeSessions).some(s => s.logId === log.id)
                         return isLiveSession ? (
-                            <div style={{
+                            <div data-ur-card-live style={{
                                 display: "inline-flex",
                                 alignItems: "center",
                                 gap: 5,
@@ -1515,7 +1542,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                             </div>
                         ) : null
                     })()}
-                    <div style={{
+                    <div data-ur-card-title style={{
                         fontSize: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 15 : 14,
                         fontWeight: 800,
                         color: C.header,
@@ -1589,7 +1616,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                         </div>
                     </div>
                     {log.body && log.body !== log.title && log.type !== "activity" && log.type !== "session" && log.type !== "edit" && log.metadata?.action !== "status_session" && (
-                        <div style={{
+                        <div data-ur-card-body-text={(log.type === "msg" || log.type === "edit" || log.type === "delete") ? "content" : "meta"} style={{
                             fontSize: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 14 : 13,
                             color: log.type === "msg" || log.type === "edit" || log.type === "delete" ? C.text : C.muted,
                             lineHeight: 1.4,
@@ -1601,7 +1628,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                         </div>
                     )}
                     {(log.type === "msg" || log.type === "edit" || log.type === "delete" || log.type === "voice" || log.type === "activity" || (log.type === "session" && ["listening_session", "activity_session", "voice_session", "camera_session", "stream_session"].includes(log.metadata?.action))) && (
-                        <div style={{
+                        <div data-ur-card-location style={{
                             fontSize: 11,
                             color: C.subheader,
                             marginTop: 4,
@@ -1619,7 +1646,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                         </div>
                     )}
                     {log.type === "session" && log.metadata?.action === "status_session" && (
-                        <div style={{
+                        <div data-ur-card-location style={{
                             fontSize: 11,
                             color: C.subheader,
                             marginTop: 4,
@@ -2402,6 +2429,13 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
     const [loading, setLoading] = React.useState(true)
     const [searchQuery, setSearchQuery] = React.useState("")
     const [sortMode, setSortMode] = React.useState<"newest" | "oldest">("newest")
+    const [compact, setCompact] = React.useState(() => !!settings.store.compactLogView)
+
+    const toggleCompact = () => {
+        const next = !compact
+        setCompact(next)
+        settings.store.compactLogView = next
+    }
 
     React.useEffect(() => {
         const load = async () => {
@@ -2472,6 +2506,36 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
         return counts
     }, [logs])
 
+    const todayStats = React.useMemo(() => {
+        const startOfDay = new Date()
+        startOfDay.setHours(0, 0, 0, 0)
+        const dayStartMs = startOfDay.getTime()
+        const now = Date.now()
+        const todayLogs = logs.filter(l => l.ts >= dayStartMs)
+
+        const msgCount = todayLogs.filter(l => l.type === "msg").length
+
+        let voiceMs = 0
+        for (const l of todayLogs) {
+            if (l.type === "session" && typeof l.metadata?.startTime === "number" && typeof l.metadata?.endTime === "number") {
+                // clamp to today's boundary in case the session started yesterday
+                const start = Math.max(l.metadata.startTime, dayStartMs)
+                voiceMs += Math.max(0, l.metadata.endTime - start)
+            }
+        }
+        // add time from a session that's still ongoing (hasn't closed yet, so it has no log entry with endTime)
+        for (const s of Object.values(activeSessions)) {
+            if (s.logId && todayLogs.some(l => l.id === s.logId)) {
+                const start = Math.max(s.startTime, dayStartMs)
+                voiceMs += Math.max(0, now - start)
+            }
+        }
+
+        const statusChanges = todayLogs.filter(l => matchesCategory(l, "status") || l.type === "custom_status").length
+
+        return { msgCount, voiceMs, statusChanges, total: todayLogs.length }
+    }, [logs])
+
     if (loading) {
         return (
             <div style={{ padding: 40, textAlign: "center", color: C.muted }}>
@@ -2483,6 +2547,32 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
 
     return (
         <div style={{ padding: "0 4px", overflowX: "hidden" }}>
+            {logs.length > 0 && (
+                <div style={{
+                    display: "flex",
+                    gap: 6,
+                    marginBottom: 12,
+                    flexWrap: "wrap",
+                }}>
+                    <div style={{ flex: "1 1 auto", minWidth: 70, background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 10px" }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: C.header }}>{todayStats.msgCount}</div>
+                        <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>messages today</div>
+                    </div>
+                    <div style={{ flex: "1 1 auto", minWidth: 70, background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 10px" }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: C.header }}>{todayStats.voiceMs > 0 ? formatDuration(todayStats.voiceMs) : "0m"}</div>
+                        <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>voice today</div>
+                    </div>
+                    <div style={{ flex: "1 1 auto", minWidth: 70, background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 10px" }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: C.header }}>{todayStats.statusChanges}</div>
+                        <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>status changes</div>
+                    </div>
+                    <div style={{ flex: "1 1 auto", minWidth: 70, background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 10px" }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: C.header }}>{todayStats.total}</div>
+                        <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>events today</div>
+                    </div>
+                </div>
+            )}
+
             <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center" }}>
                 <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
                     <input
@@ -2545,6 +2635,30 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 >
                     {sortMode === "newest" ? <ico.sortDate /> : <ico.sortAz />}
                     {sortMode === "newest" ? "Newest" : "Oldest"}
+                </div>
+
+                <div
+                    role="button"
+                    tabIndex={0}
+                    title={compact ? "switch to normal view" : "switch to compact view"}
+                    onClick={toggleCompact}
+                    style={{
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        width: 32,
+                        borderRadius: 20,
+                        cursor: "pointer",
+                        background: compact ? `${C.brand}25` : C.bg1,
+                        border: `1px solid ${compact ? C.brand : C.border}`,
+                        color: compact ? C.brandLight : C.muted,
+                        height: 32,
+                        boxSizing: "border-box",
+                        transition: "all 150ms ease",
+                        flexShrink: 0,
+                    }}
+                    onMouseEnter={e => { if (!compact) { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.color = C.text } }}
+                    onMouseLeave={e => { if (!compact) { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted } }}
+                >
+                    <ico.compact />
                 </div>
             </div>
 
@@ -2643,7 +2757,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 )}
             </div>
 
-            <div style={{
+            <div className={compact ? "ur-compact" : ""} style={{
                 display: "flex",
                 flexDirection: "column",
                 gap: 12,
@@ -2652,7 +2766,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
             }}>
                 {Object.entries(grouped).map(([date, dayLogs]) => (
                     <div key={`${date}-${Array.from(activeFilters).join(",")}-${sortMode}`} style={{ overflowX: "hidden" }}>
-                        <div style={{
+                        <div data-ur-day-header style={{
                             fontSize: 10,
                             fontWeight: 800,
                             textTransform: "uppercase",
@@ -2720,6 +2834,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
 
 function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: () => void }) {
     const [count, setCount] = React.useState(0)
+    const [exportCat, setExportCat] = React.useState<ActivityType | "all">("all")
 
     React.useEffect(() => {
         const load = async () => {
@@ -2792,24 +2907,55 @@ function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: 
                 <ico.download />
                 Import
             </button>
+            <select
+                value={exportCat}
+                onChange={(e) => setExportCat(e.target.value as ActivityType | "all")}
+                style={{
+                    padding: "0 10px",
+                    height: 34,
+                    borderRadius: 20,
+                    background: C.bg1,
+                    border: `1px solid ${C.border}`,
+                    color: C.text,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    outline: "none",
+                }}
+                title="what to export"
+            >
+                <option value="all">All categories</option>
+                {ACTIVITY_CATEGORIES.map(cat => (
+                    <option key={cat.key} value={cat.key}>{cat.label} only</option>
+                ))}
+            </select>
             <button
                 onClick={() => {
-                    if (count === 0) {
+                    const userLogs = activityStore.getLogs(userId)
+                    const scoped = exportCat === "all" ? userLogs : userLogs.filter(l => matchesCategory(l, exportCat))
+                    if (scoped.length === 0) {
                         Toasts.show({
-                            message: "No activity to export",
+                            message: exportCat === "all" ? "No activity to export" : `No ${exportCat} logs to export`,
                             id: Toasts.genId(),
                             type: Toasts.Type.FAILURE,
                         })
                         return
                     }
-                    const data = activityStore.exportAll()
+                    const data = JSON.stringify({ [userId]: scoped }, null, 2)
                     const blob = new Blob([data], { type: "application/json" })
                     const url = URL.createObjectURL(blob)
                     const a = document.createElement("a")
+                    const suffix = exportCat === "all" ? "" : `_${exportCat}`
                     a.href = url
-                    a.download = `userradar_${userId}_${new Date().toISOString().slice(0,10)}.json`
+                    a.download = `userradar_${userId}${suffix}_${new Date().toISOString().slice(0,10)}.json`
                     a.click()
                     URL.revokeObjectURL(url)
+                    Toasts.show({
+                        message: `Exported ${scoped.length} ${exportCat === "all" ? "events" : exportCat + " events"}`,
+                        id: Toasts.genId(),
+                        type: Toasts.Type.SUCCESS,
+                    })
                 }}
                 style={{
                     padding: "8px 16px",
@@ -2912,12 +3058,14 @@ function ActivityBadge({ userId }: { userId: string }) {
     )
 }
 
-function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
+function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinned, onTogglePin }: {
     user: WatchedUser
     refresh: () => void
     expandedId: string | null
     setExpandedId: (id: string | null) => void
     onRemove: () => void
+    isPinned?: boolean
+    onTogglePin?: () => void
 }) {
     const [nick,     setNick] = React.useState(user.nick || "")
     const expanded = expandedId === user.id
@@ -3084,11 +3232,28 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove }: {
     const activePreset = detectPreset()
 
     return (
-        <div style={{ background: C.bg2, borderRadius: 20, marginBottom: 8, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+        <div style={{ background: C.bg2, borderRadius: 20, marginBottom: 8, border: `1px solid ${isPinned ? C.brandLight + "60" : C.border}`, overflow: "hidden" }}>
             <div className="ur-row-hover" onClick={() => setExp(!expanded)} style={{
                 display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer",
                 borderRadius: expanded ? "20px 20px 0 0" : 20, transition: "background 100ms",
             }}>
+                <div
+                    role="button"
+                    title={isPinned ? "unpin" : "pin to top"}
+                    onClick={(e: any) => { e.stopPropagation(); onTogglePin?.() }}
+                    style={{
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        color: isPinned ? C.brandLight : C.muted,
+                        opacity: isPinned ? 1 : 0.35,
+                        flexShrink: 0,
+                        cursor: "pointer",
+                        transition: "opacity 120ms, color 120ms",
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.opacity = "1" }}
+                    onMouseLeave={e => { e.currentTarget.style.opacity = isPinned ? "1" : "0.35" }}
+                >
+                    {isPinned ? <ico.pin /> : <ico.pinOutline />}
+                </div>
                 <img src={av} style={{ width: 44, height: 44, borderRadius: "50%", flexShrink: 0 }}
                     onError={(e: any) => { e.target.src = FALLBACK_AV }} />
 
@@ -3709,8 +3874,14 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     const [query, setQuery]       = React.useState("")
     const [sort,  setSort]        = React.useState<SortMode>("date")
     const [expandedId, setExpandedId] = React.useState<string | null>(null)
+    const [pinned, setPinned]     = React.useState<string[]>(() => getPinned())
 
     const refresh = () => { try { setUsers(getWatchlist(settings)) } catch { setUsers([]) } }
+
+    const onTogglePin = (uid: string) => {
+        togglePin(uid)
+        setPinned(getPinned())
+    }
 
     const shown = React.useMemo(() => {
         let list = users.filter(u => {
@@ -3719,10 +3890,16 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
             const du = UserStore.getUser(u.id)
             return [displayName(du), u.nick ?? "", u.id].join(" ").toLowerCase().includes(q)
         })
-        return sort === "az"
+        const sorted = sort === "az"
             ? [...list].sort((a, b) => (displayName(UserStore.getUser(a.id)) || a.id).localeCompare(displayName(UserStore.getUser(b.id)) || b.id))
             : [...list].sort((a, b) => b.addedAt - a.addedAt)
-    }, [users, query, sort])
+        // pinned users always float to the top, keeping their relative sort order otherwise
+        return [...sorted].sort((a, b) => {
+            const ap = pinned.includes(a.id) ? 1 : 0
+            const bp = pinned.includes(b.id) ? 1 : 0
+            return bp - ap
+        })
+    }, [users, query, sort, pinned])
 
     return (
         <ModalRoot {...modalProps} size={ModalSize.LARGE}>
@@ -3811,7 +3988,14 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                             refresh={refresh}
                             expandedId={expandedId}
                             setExpandedId={setExpandedId}
-                            onRemove={() => { removeUser(settings, u.id); refresh() }}
+                            onRemove={() => {
+                                removeUser(settings, u.id)
+                                if (settings.store.autoCleanupLogs) activityStore.clearLogs(u.id)
+                                if (getPinned().includes(u.id)) onTogglePin(u.id)
+                                refresh()
+                            }}
+                            isPinned={pinned.includes(u.id)}
+                            onTogglePin={() => onTogglePin(u.id)}
                         />
                     ))}
                 </div>
