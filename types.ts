@@ -122,7 +122,6 @@ export interface WatchedUser {
         avatar:   boolean | null
         voice:    boolean | null
         status:   boolean | null
-        boosts:   boolean | null
         activity: boolean | null
         joins:    boolean | null
     }
