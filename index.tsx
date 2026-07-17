@@ -10,8 +10,6 @@ import definePlugin, { OptionType } from "@utils/types"
 import { findByProps } from "@webpack"
 import { Button, ChannelStore, Menu, MessageStore, React, RestAPI, Text, TextInput, Toasts, UserStore } from "@webpack/common"
 
-import { Message } from "discord-types/general"
-
 import {
     addUser, camelize, displayName, featureOn,
     getWatchedUser, getWatchlist, inQuietHours,
@@ -64,14 +62,19 @@ function sessionKey(uid: string, type: string, channelId?: string): string {
 class ActivityStore {
     private cache: Record<string, ActivityEntry[]> = {}
     private loaded = false
+    private loadPromise: Promise<void> | null = null
 
     async load() {
         if (this.loaded) return
-        try {
-            const data = await DataStore.get(ACTIVITY_LOG_KEY)
-            if (data) this.cache = JSON.parse(data)
-        } catch (e) { console.error("[UserRadar] Failed to load activity log", e) }
-        this.loaded = true
+        if (this.loadPromise) return this.loadPromise
+        this.loadPromise = (async () => {
+            try {
+                const data = await DataStore.get(ACTIVITY_LOG_KEY)
+                if (data) this.cache = JSON.parse(data)
+            } catch (e) { console.error("[UserRadar] Failed to load activity log", e) }
+            this.loaded = true
+        })()
+        return this.loadPromise
     }
 
     async save() {
@@ -80,34 +83,75 @@ class ActivityStore {
         } catch (e) { console.error("[UserRadar] Failed to save activity log", e) }
     }
 
+    // batches rapid-fire addLog calls into one write instead of hitting DataStore every time
+    private saveTimer: ReturnType<typeof setTimeout> | null = null
+    private pendingSave: { resolve: () => void }[] = []
+    private scheduleSave(): Promise<void> {
+        return new Promise(resolve => {
+            this.pendingSave.push({ resolve })
+            if (this.saveTimer) return
+            this.saveTimer = setTimeout(async () => {
+                this.saveTimer = null
+                const waiters = this.pendingSave
+                this.pendingSave = []
+                await this.save()
+                waiters.forEach(w => w.resolve())
+            }, 1500)
+        })
+    }
+    // forces any pending debounced save to happen immediately — used before the plugin
+    // stops, or for actions the user expects to persist right away (delete, clear, import)
+    async flushSave() {
+        if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null }
+        const waiters = this.pendingSave
+        this.pendingSave = []
+        await this.save()
+        waiters.forEach(w => w.resolve())
+    }
+
     getLogs(uid: string): ActivityEntry[] {
         return this.cache[uid] || []
     }
 
+    // every mutation goes through this so addLog/removeLog/updateLog never interleave
+    private writeQueue: Promise<any> = Promise.resolve()
+    private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+        const next = this.writeQueue.then(fn, fn)
+        this.writeQueue = next.catch(() => {})
+        return next
+    }
+
     async addLog(entry: Omit<ActivityEntry, "id">) {
-        await this.load()
-        if (!this.cache[entry.uid]) this.cache[entry.uid] = []
-        const fullEntry: ActivityEntry = {
-            ...entry,
-            id: `${entry.uid}_${entry.ts}_${Math.random().toString(36).slice(2, 8)}`,
-        }
-        this.cache[entry.uid].unshift(fullEntry)
-        const max = settings.store.maxLogsPerUser
-        if (max > 0 && this.cache[entry.uid].length > max)
-            this.cache[entry.uid].length = max
-        await this.save()
-        return fullEntry
+        return this.enqueue(async () => {
+            await this.load()
+            if (!this.cache[entry.uid]) this.cache[entry.uid] = []
+            const fullEntry: ActivityEntry = {
+                ...entry,
+                id: `${entry.uid}_${entry.ts}_${Math.random().toString(36).slice(2, 8)}`,
+            }
+            this.cache[entry.uid].unshift(fullEntry)
+            const rawMax = settings.store.maxLogsPerUser
+            const max = rawMax < 0 ? 0 : Math.min(rawMax, 50000)
+            if (max > 0 && this.cache[entry.uid].length > max)
+                this.cache[entry.uid].length = max
+            await this.scheduleSave()
+            return fullEntry
+        })
     }
 
     async clearLogs(uid: string) {
-        await this.load()
-        delete this.cache[uid]
-        await this.save()
+        return this.enqueue(async () => {
+            await this.load()
+            delete this.cache[uid]
+            await this.save()
+        })
     }
 
     async clearAll() {
-        this.cache = {}
-        await DataStore.del(ACTIVITY_LOG_KEY)
+        return this.enqueue(async () => {
+            this.cache = {}
+            await DataStore.del(ACTIVITY_LOG_KEY)
+        })
     }
 
     exportAll(): string {
@@ -115,45 +159,61 @@ class ActivityStore {
     }
 
     async importAll(json: string) {
-        try {
-            const parsed = JSON.parse(json)
-            // Validate it's a plain object whose values are arrays of entries
-            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false
-            for (const [uid, entries] of Object.entries(parsed)) {
-                if (typeof uid !== "string") return false
-                if (!Array.isArray(entries)) return false
-                for (const e of entries as any[]) {
-                    if (typeof e !== "object" || e === null) return false
-                    if (typeof e.id !== "string" || typeof e.uid !== "string" || typeof e.ts !== "number") return false
+        return this.enqueue(async () => {
+            try {
+                const parsed = JSON.parse(json)
+                // Validate it's a plain object whose values are arrays of entries
+                if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false
+                for (const [uid, entries] of Object.entries(parsed)) {
+                    if (typeof uid !== "string") return false
+                    if (!Array.isArray(entries)) return false
+                    for (const e of entries as any[]) {
+                        if (typeof e !== "object" || e === null) return false
+                        if (typeof e.id !== "string" || typeof e.uid !== "string" || typeof e.ts !== "number") return false
+                    }
                 }
-            }
-            this.cache = parsed as Record<string, ActivityEntry[]>
-            await this.save()
-            return true
-        } catch { return false }
+                await this.load()
+                // merge by entry id instead of replacing the whole cache — otherwise a
+                // category-scoped export (messages only, etc.) would wipe every other category
+                for (const [uid, entries] of Object.entries(parsed as Record<string, ActivityEntry[]>)) {
+                    if (!this.cache[uid]) this.cache[uid] = []
+                    const existingIds = new Set(this.cache[uid].map(e => e.id))
+                    for (const e of entries) {
+                        if (!existingIds.has(e.id)) this.cache[uid].push(e)
+                    }
+                    this.cache[uid].sort((a, b) => b.ts - a.ts)
+                }
+                await this.save()
+                return true
+            } catch { return false }
+        })
     }
 
     async updateLog(uid: string, logId: string, updates: Partial<ActivityEntry>) {
-        await this.load()
-        const logs = this.cache[uid]
-        if (!logs) return false
-        const idx = logs.findIndex(l => l.id === logId)
-        if (idx === -1) return false
-                const updated = { ...logs[idx], ...updates, ts: Date.now() }
-        logs.splice(idx, 1)
-        logs.unshift(updated)
-        await this.save()
-                emitActivityUpdate(uid, updated)
-        return true
+        return this.enqueue(async () => {
+            await this.load()
+            const logs = this.cache[uid]
+            if (!logs) return false
+            const idx = logs.findIndex(l => l.id === logId)
+            if (idx === -1) return false
+            const updated = { ...logs[idx], ...updates, ts: Date.now() }
+            logs.splice(idx, 1)
+            logs.unshift(updated)
+            await this.save()
+            emitActivityUpdate(uid, updated)
+            return true
+        })
     }
 
     async removeLog(uid: string, logId: string) {
-        await this.load()
-        const logs = this.cache[uid]
-        if (!logs) return false
-        this.cache[uid] = logs.filter(l => l.id !== logId)
-        await this.save()
-        return true
+        return this.enqueue(async () => {
+            await this.load()
+            const logs = this.cache[uid]
+            if (!logs) return false
+            this.cache[uid] = logs.filter(l => l.id !== logId)
+            await this.save()
+            return true
+        })
     }
 }
 
@@ -208,27 +268,42 @@ const statusSessionCache: Record<string, { startTime: number; startStatus: strin
 
 const activeSessions: Record<string, { logId: string; startTime: number; channelId?: string; guildId?: string; metadata?: any }> = {}
 
+const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000  // 24h — a session stuck this long means the close event never arrived (client crash, force quit, etc)
+
+async function sweepStaleSessions() {
+    const now = Date.now()
+    for (const [sk, sess] of Object.entries(activeSessions)) {
+        if (now - sess.startTime < MAX_SESSION_AGE_MS) continue
+        delete activeSessions[sk]
+        try {
+            await activityStore.updateLog(sk.split("_")[0], sess.logId, {
+                title: sess.metadata?.channel ? `Was in #${sess.metadata.channel}` : "Session ended",
+                body: "session ended unexpectedly (no close event received)",
+                metadata: { ...sess.metadata, duration: formatDuration(now - sess.startTime), startTime: sess.startTime, endTime: now },
+            })
+        } catch { }
+    }
+}
+
 let pluginStartedAt = 0
 
-let loggedMsgs: Record<string, Message> | null = null
 let pollTimer:  ReturnType<typeof setInterval> | null = null
+let pluginActive = false
 
 function tryLoadLoggedMsgs() {
-    if (loggedMsgs) return loggedMsgs
-
     try {
         const plugin = (Vencord as any)?.Plugins?.plugins?.["vc-message-logger-enhanced"]
             ?? (Vencord as any)?.Plugins?.plugins?.["MessageLoggerEnhanced"]
             ?? (Vencord as any)?.Plugins?.plugins?.["messageLoggerEnhanced"]
-        if (plugin?.loggedMessages)       { loggedMsgs = plugin.loggedMessages;       return loggedMsgs }
-        if (plugin?.store?.loggedMessages) { loggedMsgs = plugin.store.loggedMessages; return loggedMsgs }
+        if (plugin?.loggedMessages) return plugin.loggedMessages
+        if (plugin?.store?.loggedMessages) return plugin.store.loggedMessages
     } catch { }
 
     try {
         const { wreq } = (window as any).webpackChunkdiscord_app?.find?.(
             (x: any) => x?.[1]?.["loggedMessages"]
         )?.[1] ?? {}
-        if (wreq?.["loggedMessages"]) { loggedMsgs = wreq["loggedMessages"]; return loggedMsgs }
+        if (wreq?.["loggedMessages"]) return wreq["loggedMessages"]
     } catch { }
 
     return null
@@ -249,7 +324,7 @@ const settings = definePluginSettings({
     globalActivity:     { type: OptionType.BOOLEAN, default: false,                  description: "activity changes (spammy)" },
     globalJoins:        { type: OptionType.BOOLEAN, default: true,                   description: "server joins/leaves" },
     showPreview:        { type: OptionType.BOOLEAN, default: true,                   description: "show message preview" },
-    previewLen:         { type: OptionType.NUMBER,  default: 0,                    description: "preview length (0 = unlimited)" },
+    previewLen:         { type: OptionType.NUMBER,  default: 120,                  description: "preview length (0 = unlimited)" },
     quietHours:         { type: OptionType.BOOLEAN, default: false,                  description: "quiet hours" },
     quietStart:         { type: OptionType.STRING,  default: "23:00",                description: "quiet hours start (24h, e.g. 23:00)" },
     quietEnd:           { type: OptionType.STRING,  default: "07:00",                description: "quiet hours end (24h, e.g. 07:00)" },
@@ -260,6 +335,7 @@ const settings = definePluginSettings({
     autoCleanupLogs:    { type: OptionType.BOOLEAN, default: true,                   description: "delete logs when removing a user from watchlist" },
     debugLog:           { type: OptionType.BOOLEAN, default: false,                  description: "debug logging" },
     showToolbarIcon:    { type: OptionType.BOOLEAN, default: true,                   description: "toolbar icon" },
+    logVcMembers:       { type: OptionType.BOOLEAN, default: false,                  description: "also log names of other people in the voice channel (privacy: logs non-watched users too)" },
 })
 
 function trunc(s: string, max: number) {
@@ -332,16 +408,6 @@ function avatarUrl(id: string, hash?: string | null, size = 80): string {
 function guildName(guildId?: string | null): string | null {
     if (!guildId) return null
     return findByProps("getGuild")?.getGuild(guildId)?.name ?? null
-}
-
-function bannerUrl(id: string, hash?: string | null): string | null {
-    if (!hash) return null
-    return `https://cdn.discordapp.com/banners/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=480`
-}
-
-function hexColor(n?: number | null): string | null {
-    if (n == null) return null
-    try { return "#" + n.toString(16).padStart(6, "0") } catch { return null }
 }
 
 const FALLBACK_AV = "https://cdn.discordapp.com/embed/avatars/0.png"
@@ -446,11 +512,13 @@ function checkProfileChanged(uid: string, fresh: any) {
 
 let _pollRunning = false
 async function pollProfiles() {
-    if (_pollRunning) return
+    if (_pollRunning || !pluginActive) return
     _pollRunning = true
     const list = getWatchlist(settings)
     try {
+        await sweepStaleSessions()
         for (const wu of list) {
+            if (!pluginActive) break
             try {
                 const { body } = await RestAPI.get({
                     url: `/users/${wu.id}/profile`,
@@ -534,6 +602,7 @@ const CLIENT_EMOJI: Record<string, string> = {
 
 function resolveClient(cs?: Record<string, string> | null): string | null {
     if (!cs) return null
+    // priority order for the "primary" platform (used as the cache key / session tracking)
     if (cs.mobile)   return "mobile"
     if (cs.desktop)  return "desktop"
     if (cs.web)      return "web"
@@ -541,6 +610,14 @@ function resolveClient(cs?: Record<string, string> | null): string | null {
     if (cs.vr)       return "vr"
     const first = Object.keys(cs).find(k => cs[k])
     return first ?? null
+}
+
+// unlike resolveClient (which picks one "primary" platform for session tracking),
+// this returns every platform currently active — used only for display, so a user
+// on both desktop and mobile at once shows both instead of just one
+function resolveAllClients(cs?: Record<string, string> | null): string[] {
+    if (!cs) return []
+    return Object.keys(cs).filter(k => cs[k])
 }
 
 const CLIENT_LABEL_MAP: Record<string, string> = { desktop: "Desktop", mobile: "Mobile", web: "Web", embedded: "Console", vr: "VR" }
@@ -591,27 +668,21 @@ const ico = {
     avatar:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke="currentColor" strokeWidth="2"/><circle cx="12" cy="10" r="3" stroke="currentColor" strokeWidth="2"/><path d="M7 21c0-2.76 2.24-5 5-5s5 2.24 5 5" stroke="currentColor" strokeWidth="2"/></svg>,
     voice:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>,
     status:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" opacity=".3"/><circle cx="12" cy="12" r="5"/></svg>,
-    boosts:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.2h7.6l-6 4.8 2.4 7.2-6-4.8-6 4.8 2.4-7.2-6-4.8h7.6z"/></svg>,
     activity: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>,
     joins:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" stroke="currentColor" strokeWidth="2"/><circle cx="8.5" cy="7" r="4" stroke="currentColor" strokeWidth="2"/><path d="M20 8v6M23 11h-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>,
     history:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
-    monitor:  () => <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
     preview:  () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
-    catAll:       () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>,
     catMsg:       () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
     catEdit:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4L18.5 2.5z"/></svg>,
     catDelete:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>,
     catTyping:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="18" x2="20" y2="18"/></svg>,
     catStatus:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>,
     catVoice:     () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>,
-    catAvatar:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>,
     catProfile:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
     catActivity:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
 
     location: () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>,
     clock:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
-    filter:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
-    stats:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>,
     download: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
     pin:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1"><path d="M16 3l5 5-5.5 5.5L17 17l-2 2-4.5-4.5L5 20l-1-1 5.5-5.5L5 9l2-2 3.5 3.5L16 3z"/></svg>,
     pinOutline: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 3l5 5-5.5 5.5L17 17l-2 2-4.5-4.5L5 20l-1-1 5.5-5.5L5 9l2-2 3.5 3.5L16 3z"/></svg>,
@@ -888,7 +959,7 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
 
     const doAdd = () => {
         if (lk.s !== "done") return
-        addUser(settings, cleanId, label.trim())
+        addUser(settings, cleanId, label.trim().slice(0, 50))
         setRawId(""); setLabel(""); setLk({ s: "idle" })
         onAdded()
     }
@@ -1255,7 +1326,6 @@ function previewNotification(uid: string, type: string) {
         joins:    { title: `${dn} joined a server`, body: "Server Name" },
         profile:  { title: `${dn} updated their profile`, body: "bio, display name" },
         avatar:   { title: `${dn} changed their avatar`, body: "click to see new pfp" },
-        boosts:   { title: `${dn} boosted a server`, body: "click to view" },
     }
 
     const p = previews[type] || { title: `${dn}: ${type}`, body: "preview notification" }
@@ -1456,10 +1526,10 @@ function matchesCategory(log: ActivityEntry, category: ActivityType): boolean {
     if (category === "delete") return log.type === "delete"
     if (category === "typing") return log.type === "typing"
     if (category === "status") {
-        return log.type === "online" || log.type === "offline" || log.type === "idle" || log.type === "dnd" || log.type === "status"
+        return log.type === "online" || log.type === "offline" || log.type === "idle" || log.type === "dnd" || log.type === "status" || log.type === "custom_status" || (log.type === "session" && log.metadata?.action === "status_session")
     }
     if (category === "voice") return log.type === "voice" || log.type === "vc_join" || log.type === "vc_leave" || log.type === "vc_move" || (log.type === "session" && (["voice_session", "stream_session", "camera_session"].includes(log.metadata?.action || "") || (log.metadata?.action || "").includes("voice")))
-    if (category === "profile") return log.type === "profile" || log.type === "avatar" || log.type === "banner" || log.type === "bio" || log.type === "username" || log.type === "displayname" || log.type === "pronouns" || log.type === "custom_status"
+    if (category === "profile") return log.type === "profile" || log.type === "avatar" || log.type === "banner" || log.type === "bio" || log.type === "username" || log.type === "displayname" || log.type === "pronouns"
     if (category === "activity") return log.type === "activity" || log.type === "game_start" || log.type === "game_stop" || log.type === "spotify" || log.type === "streaming" || (log.type === "session" && (log.metadata?.action || "").includes("activity"))
     return log.type === category
 }
@@ -2445,7 +2515,15 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
         }
         load()
         const unsub = onActivityUpdate((uid, entry) => {
-            if (uid === userId) setLogs(prev => [entry, ...prev])
+            if (uid !== userId) return
+            setLogs(prev => {
+                const existingIdx = prev.findIndex(l => l.id === entry.id)
+                if (existingIdx === -1) return [entry, ...prev]
+                // entry was updated (e.g. a voice/spotify session closing) — replace in place, don't duplicate
+                const next = [...prev]
+                next.splice(existingIdx, 1)
+                return [entry, ...next]
+            })
         })
         return unsub
     }, [userId])
@@ -2531,7 +2609,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
             }
         }
 
-        const statusChanges = todayLogs.filter(l => matchesCategory(l, "status") || l.type === "custom_status").length
+        const statusChanges = todayLogs.filter(l => matchesCategory(l, "status")).length
 
         return { msgCount, voiceMs, statusChanges, total: todayLogs.length }
     }, [logs])
@@ -2867,18 +2945,26 @@ function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: 
                     input.onchange = async (e: any) => {
                         const file = e.target.files[0]
                         if (!file) return
-                        const text = await file.text()
-                        const ok = await activityStore.importAll(text)
-                        if (ok) {
-                            onRefresh?.()
+                        try {
+                            const text = await file.text()
+                            const ok = await activityStore.importAll(text)
+                            if (ok) {
+                                onRefresh?.()
+                                Toasts.show({
+                                    message: `Imported activity log`,
+                                    id: Toasts.genId(),
+                                    type: Toasts.Type.SUCCESS,
+                                })
+                            } else {
+                                Toasts.show({
+                                    message: "Failed to import — invalid JSON file",
+                                    id: Toasts.genId(),
+                                    type: Toasts.Type.FAILURE,
+                                })
+                            }
+                        } catch (err: any) {
                             Toasts.show({
-                                message: `Imported activity log`,
-                                id: Toasts.genId(),
-                                type: Toasts.Type.SUCCESS,
-                            })
-                        } else {
-                            Toasts.show({
-                                message: "Failed to import — invalid JSON file",
+                                message: `Import failed: ${err?.message || "could not read file"}`,
                                 id: Toasts.genId(),
                                 type: Toasts.Type.FAILURE,
                             })
@@ -4017,15 +4103,21 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                                         const data = JSON.parse(text)
                                         if (!Array.isArray(data)) throw new Error("Invalid format")
                                         let added = 0
+                                        let skipped = 0
                                         for (const u of data) {
-                                            if (u.id && !isWatched(settings, u.id)) {
-                                                addUser(settings, u.id, u.nick || "")
-                                                added++
-                                            }
+                                            // must be a real discord snowflake (17-20 numeric digits), not any arbitrary string
+                                            const id = typeof u?.id === "string" ? u.id.trim() : ""
+                                            if (!/^\d{17,20}$/.test(id)) { skipped++; continue }
+                                            if (isWatched(settings, id)) continue
+                                            const nick = typeof u?.nick === "string" ? u.nick.trim().slice(0, 50) : ""
+                                            addUser(settings, id, nick)
+                                            added++
                                         }
                                         refresh()
                                         Toasts.show({
-                                            message: `Imported ${added} users to watchlist`,
+                                            message: skipped > 0
+                                                ? `Imported ${added} users, skipped ${skipped} invalid entries`
+                                                : `Imported ${added} users to watchlist`,
                                             id: Toasts.genId(),
                                             type: Toasts.Type.SUCCESS,
                                         })
@@ -4448,10 +4540,11 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
             statusSessionCache[uid]!.platforms.push({ platform: newClient, ts: Date.now() })
         }
         if (!statusSessionCache[uid] && isFeatureOn(uid, "status", "globalStatus")) {
-
+            const allClients = resolveAllClients((u as any).client_status ?? (u as any).clientStatus)
+            const clientLabel = allClients.length > 1 ? allClients.join(" + ") : newClient
             const emoji = CLIENT_EMOJI[newClient] || "📡"
             const oldEmoji = oldClient ? (CLIENT_EMOJI[oldClient] || "📡") : ""
-            logActivity(uid, "status", emoji, `${oldClient ? `${oldEmoji} ${oldClient} → ` : ""}${emoji} ${newClient}`)
+            logActivity(uid, "status", emoji, `${oldClient ? `${oldEmoji} ${oldClient} → ` : ""}${emoji} ${clientLabel}`)
         }
     } else if (newClient !== null) {
         clientCache[uid] = newClient
@@ -4460,8 +4553,8 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
     const realAct = (u.activities || []).find((a: any) => a.type !== 4) ?? null
     const newActKey = realAct
         ? realAct.type === 2
-            ? `2:${realAct.name}:${realAct.details || ""}:${realAct.state || ""}`
-            : `${realAct.type}:${realAct.name}`
+            ? `2\x00${realAct.name}\x00${realAct.details || ""}\x00${realAct.state || ""}`
+            : `${realAct.type}\x00${realAct.name}`
         : null
     const oldAct = activityCache[uid]
     activityCache[uid] = newActKey
@@ -4470,11 +4563,11 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         const actPlatform = clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined
 
 
-        const [oldTypeStr, ...oldNameParts] = (oldAct || "").split(":")
+        const [oldTypeStr, ...oldNameParts] = (oldAct || "").split("\x00")
         const oldType = oldAct ? parseInt(oldTypeStr) : -1
         const isOldListening = oldType === 2
-        const oldSongName   = isOldListening && oldNameParts.length >= 2 ? oldNameParts[1] : oldNameParts.join(":")
-        const oldArtistName = isOldListening && oldNameParts.length >= 3 ? oldNameParts[2].replace(/;.*/, "").trim() : ""
+        const oldSongName   = isOldListening ? (oldNameParts[1] || "") : oldNameParts.join("\x00")
+        const oldArtistName = isOldListening ? (oldNameParts[2] || "").trim() : ""
 
         const getSpotifyFields = (act: any) => {
             const li = act.assets?.large_image || ""
@@ -4683,6 +4776,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
             const holdKey = `cs-hold:${uid}`
             _logDebounce[holdKey] = Date.now()
             setTimeout(() => {
+                if (!pluginActive) return
                 if (customStatusCache[uid] !== oldCustomStatus) return // something else already changed it
                 if (Date.now() - (_logDebounce[holdKey] || 0) < 1900) return // a newer hold superseded this one
                 if (isOfflineStatus(statusCache[uid])) return // they're offline now, definitely a disconnect
@@ -4785,27 +4879,31 @@ export default definePlugin({
         const list = getWatchlist(settings)
         let i = 0
         const fetchNext = () => {
-            if (i >= list.length) return
+            if (!pluginActive || i >= list.length) return
             const wu = list[i++]
             RestAPI.get({
                 url: `/users/${wu.id}/profile`,
                 query: { with_mutual_guilds: true, with_mutual_friends_count: false },
             }).then((res: any) => {
+                if (!pluginActive) return
                 const data = camelize(res.body)
                 profileCache[wu.id] = data
                 if (Array.isArray(data.mutualGuilds)) {
                     guildCache[wu.id] = new Set(data.mutualGuilds.map((g: any) => g.id))
                 }
                 setTimeout(fetchNext, 800)
-            }).catch(() => setTimeout(fetchNext, 800))
+            }).catch(() => { if (pluginActive) setTimeout(fetchNext, 800) })
         }
         setTimeout(fetchNext, 500)  // let discord finish its own startup first
 
         pollTimer = setInterval(pollProfiles, 5 * 60 * 1000)
         pluginStartedAt = Date.now()
+        pluginActive = true
     },
 
     stop() {
+        pluginActive = false
+        activityStore.flushSave().catch(() => {})
         removeContextMenuPatch("user-context", userCtxPatch)
         removeContextMenuPatch("message", msgCtxPatch)
         stopToolbarObserver()
@@ -4821,10 +4919,11 @@ export default definePlugin({
         Object.keys(cameraCache).forEach(k => delete cameraCache[k])
         Object.keys(streamCache).forEach(k => delete streamCache[k])
         Object.keys(customStatusCache).forEach(k => delete customStatusCache[k])
+        Object.keys(_notifDebounce).forEach(k => delete _notifDebounce[k])
+        Object.keys(_logDebounce).forEach(k => delete _logDebounce[k])
         presenceDebounce.forEach(t => clearTimeout(t))
         presenceDebounce.clear()
         pluginStartedAt = 0
-        loggedMsgs = null
     },
 
 
@@ -4846,16 +4945,15 @@ export default definePlugin({
                     : ch?.recipients?.length
                         ? "Direct Message"
                         : `#${chName}`
-                if (settings.store.skipCurrentChannel) {
-                    const cur = getCurrentChannel()
-                    if (cur?.id === channelId) return
+                const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId
+                if (!skipNotify) {
+                    notify({
+                        title: `${dn} sent a message`,
+                        body: msgPreview(message.content, message.attachments?.[0]?.filename),
+                        icon: avatarUrl(uid, message.author?.avatar, 80),
+                        onClick: () => jumpTo(ch?.guild_id, channelId, message.id),
+                    })
                 }
-                notify({
-                    title: `${dn} sent a message`,
-                    body: msgPreview(message.content, message.attachments?.[0]?.filename),
-                    icon: avatarUrl(uid, message.author?.avatar, 80),
-                    onClick: () => jumpTo(ch?.guild_id, channelId, message.id),
-                })
                 logUserActivity(uid, "msg", "💬", `sent a message`, msgPreview(message.content, message.attachments?.[0]?.filename), {
                     guildId: ch?.guild_id,
                     channelId,
@@ -4892,10 +4990,11 @@ export default definePlugin({
                     ? "Direct Message"
                     : `#${chName}`
 
-            if (settings.store.skipCurrentChannel && getCurrentChannel()?.id === message.channel_id) return
+            const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === message.channel_id
 
             // try to get old content from cache for before → after preview
             // MessageStore still has the old version at the time MESSAGE_UPDATE fires
+            const cached = MessageStore.getMessage(message.channel_id, message.id)
             const beforeContent = cached?.content && cached.content !== message.content
                 ? cached.content
                 : null
@@ -4905,12 +5004,14 @@ export default definePlugin({
                 ? `"${trunc(beforeContent, 60)}" → "${trunc(afterContent || "", 60)}"`
                 : afterContent ? `"${trunc(afterContent, 60)}"` : "click to view"
 
-            notify({
-                title: `${dn} edited a message`,
-                body: notifyBody,
-                icon: avatarUrl(uid, message.author?.avatar, 80),
-                onClick: () => jumpTo(ch?.guild_id, message.channel_id, message.id),
-            })
+            if (!skipNotify) {
+                notify({
+                    title: `${dn} edited a message`,
+                    body: notifyBody,
+                    icon: avatarUrl(uid, message.author?.avatar, 80),
+                    onClick: () => jumpTo(ch?.guild_id, message.channel_id, message.id),
+                })
+            }
             logUserActivity(uid, "edit", "✏️", `edited a message`, location, {
                 guildId: ch?.guild_id,
                 channelId: message.channel_id,
@@ -4947,16 +5048,15 @@ export default definePlugin({
                     : ch?.recipients?.length
                         ? "Direct Message"
                         : `#${chName}`
-                if (settings.store.skipCurrentChannel) {
-                    const cur = getCurrentChannel()
-                    if (cur?.id === channelId) return
+                const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId
+                if (!skipNotify) {
+                    notify({
+                        title: `${dn} deleted a message`,
+                        body: msgPreview(msg.content, msg.attachments?.[0]?.filename),
+                        icon: avatarUrl(uid, msg.author?.avatar, 80),
+                        onClick: () => jumpTo(ch?.guild_id, channelId, msg.id),
+                    })
                 }
-                notify({
-                    title: `${dn} deleted a message`,
-                    body: msgPreview(msg.content, msg.attachments?.[0]?.filename),
-                    icon: avatarUrl(uid, msg.author?.avatar, 80),
-                    onClick: () => jumpTo(ch?.guild_id, channelId, msg.id),
-                })
                 logUserActivity(uid, "delete", "🗑️", `deleted a message in ${location}`, msgPreview(msg.content, msg.attachments?.[0]?.filename), {
                     guildId: ch?.guild_id,
                     channelId,
@@ -4985,17 +5085,16 @@ export default definePlugin({
                     : ch?.recipients?.length
                         ? "Direct Message"
                         : `#${chName}`
-                if (settings.store.skipCurrentChannel) {
-                    const cur = getCurrentChannel()
-                    if (cur?.id === channelId) return
-                }
+                const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId
                 // body format: "Server Name · #channel" or "Direct Message" for DMs
-                notify({
-                    title: `${dn} is typing…`,
-                    body: location + "",
-                    icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
-                    onClick: () => jumpTo(ch?.guild_id, channelId),
-                })
+                if (!skipNotify) {
+                    notify({
+                        title: `${dn} is typing…`,
+                        body: location + "",
+                        icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
+                        onClick: () => jumpTo(ch?.guild_id, channelId),
+                    })
+                }
                 logUserActivity(userId, "typing", "💭", `is typing in ${location}`, `${gName ? gName + " · " : ""}#${chName}`, {
                     guildId: ch?.guild_id,
                     channelId,
@@ -5048,7 +5147,7 @@ export default definePlugin({
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                         onClick: () => jumpTo(ch?.guild_id, now!),
                     })
-                    const vcMembers = (() => {
+                    const vcMembers = settings.store.logVcMembers ? (() => {
                         try {
                             const vsMod = findByProps("getVoiceStatesForChannel")
                             const raw = vsMod?.getVoiceStatesForChannel?.(now!)
@@ -5059,7 +5158,7 @@ export default definePlugin({
                                 .filter((s: any) => s?.userId && s.userId !== uid)
                                 .map((s: any) => { const m = UserStore.getUser(s.userId); return m ? (m.globalName || m.username) : s.userId })
                         } catch { return [] }
-                    })()
+                    })() : []
                     const joinPlatform = clientCache[uid] ? CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid] : undefined
                     const entry = await logUserActivity(uid, "voice", "🎙️", `joined #${chName}`, joinPlatform ? `on ${joinPlatform}` : "", {
                         guildId: ch?.guild_id,
