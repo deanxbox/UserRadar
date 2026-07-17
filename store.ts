@@ -44,7 +44,7 @@ export function addUser(s: any, uid: string, nick = "") {
         overrides: {
             msgs: null, edits: null, deletes: null, typing: null,
             profile: null, avatar: null, voice: null, status: null,
-            boosts: null, activity: null, joins: null,
+            activity: null, joins: null,
         },
     })
     saveWatchlist(s, list)
