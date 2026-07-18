@@ -693,6 +693,45 @@ const ico = {
 
 }
 
+// Icons shown on activity log cards — colored to match each event type, replacing the old emoji set.
+// Each returns { Icon, color } so the card can render a tinted circular badge instead of a raw emoji.
+const actIco = {
+    message:   { color: "#5865f2", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2 22V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6l-4 4z"/></svg> },
+    edit:      { color: "#f0b232", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> },
+    delete:    { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg> },
+    typing:    { color: "#949cf4", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="4" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="20" cy="12" r="2.2"/></svg> },
+
+    listening: { color: "#c586f5", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M9 18a3 3 0 1 1-3-3h1V5.5a1 1 0 0 1 .8-.98l9-2a1 1 0 0 1 1.2.98v9a3 3 0 1 1-2-2.83V6.7l-7 1.56V15a3 3 0 0 1-3 3v0z"/></svg> },
+    watching:  { color: "#9146ff", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="15" rx="2"/><path d="M8 21h8M12 19v2"/></svg> },
+    playing:   { color: "#f0b232", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 9h4v2H8v2H6v-2H4V9h2V7h2v2zm9.5 3a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM17 3H7a5 5 0 0 0-5 5v6a5 5 0 0 0 5 5h.5a3 3 0 0 0 2.4-1.2l1.4-1.87a2 2 0 0 1 3.4 0l1.4 1.87A3 3 0 0 0 16.5 19H17a5 5 0 0 0 5-5V8a5 5 0 0 0-5-5z"/></svg> },
+    streaming: { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><circle cx="12" cy="10" r="1.5" fill="currentColor" stroke="none"/></svg> },
+    camera:    { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg> },
+    screen:    { color: "#ff5e5e", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><polyline points="8 12 11 9 13 11 16 8"/></svg> },
+
+    voice:     { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg> },
+    vcMove:    { color: "#dbdee1", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg> },
+
+    online:    { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/></svg> },
+    idle:      { color: "#f0b232", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36A5.389 5.389 0 0 1 17.5 12c-3.03 0-5.5-2.47-5.5-5.5 0-1.33.47-2.55 1.26-3.5A9.04 9.04 0 0 0 12 3z"/></svg> },
+    dnd:       { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/><rect x="7.5" y="10.8" width="9" height="2.4" rx="1.2" fill="#1e1f22"/></svg> },
+    offline:   { color: "#80848e", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/></svg> },
+    status:    { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.35"/><circle cx="12" cy="12" r="4.5" fill="currentColor"/></svg> },
+    customStatus: { color: "#949cf4", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1" fill="currentColor" stroke="none"/></svg> },
+
+    profile:   { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> },
+    avatar:    { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="12" cy="10" r="3"/><path d="M7 21c0-2.76 2.24-5 5-5s5 2.24 5 5"/></svg> },
+    banner:    { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M2 10h20"/></svg> },
+    bio:       { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="7" y1="8" x2="17" y2="8"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="7" y1="16" x2="13" y2="16"/></svg> },
+    username:  { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2.5 12.5V2.5h10z"/><circle cx="6.5" cy="6.5" r="1.5" fill="currentColor" stroke="none"/></svg> },
+    pronouns:  { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="14" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/></svg> },
+
+    join:      { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg> },
+    leave:     { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="17" y1="8" x2="23" y2="14"/><line x1="23" y1="8" x2="17" y2="14"/></svg> },
+
+    session:   { color: "#949ba4", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
+} as const
+
+
 const CtxEyeIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: 18, height: 18 }}>
         <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
@@ -1332,67 +1371,67 @@ function previewNotification(uid: string, type: string) {
     Notifications.showNotification({ title: "[Preview] " + p.title, body: p.body, icon })
 }
 
-const ACTIVITY_ICONS: Record<ActivityType, string> = {
-    msg: "💬", edit: "✏️", delete: "🗑️", typing: "💭",
-    status: "⚪", activity: "🎮", voice: "🎙️",
-    join: "📥", leave: "📤", boost: "🚀",
-    profile: "👤", avatar: "🖼️", banner: "🏳️", bio: "📝",
-    username: "🏷️", displayname: "📛", pronouns: "🪪", custom_status: "💬",
-    online: "🟢",
-    offline: "⚫", idle: "🌙", dnd: "🔴",
-    game_start: "🎮", game_stop: "🛑", spotify: "🎵",
-    streaming: "📺", vc_join: "🔊", vc_leave: "🔇", vc_move: "↔️",
-    session: "⏱️",
-}
-
-function getActivityIcon(entry: ActivityEntry): string {
+function getActivityIconKey(entry: ActivityEntry): keyof typeof actIco {
     const type = entry.type
-    const body = entry.body?.toLowerCase() || ""
-    const title = entry.title?.toLowerCase() || ""
     const meta = entry.metadata || {}
 
-    if (type === "session") {
+    // exact type matches first — never let keyword sniffing override a known type.
+    // this is what fixes messages containing words like "spotify" or "youtube"
+    // getting mis-categorized as music/video activity instead of a plain message.
+    if (type === "msg") return "message"
+    if (type === "edit") return "edit"
+    if (type === "delete") return "delete"
+    if (type === "typing") return "typing"
+    if (type === "profile") return "profile"
+    if (type === "avatar") return "avatar"
+    if (type === "banner") return "banner"
+    if (type === "bio") return "bio"
+    if (type === "username" || type === "displayname") return "username"
+    if (type === "pronouns") return "pronouns"
+    if (type === "custom_status") return "customStatus"
+    if (type === "join") return "join"
+    if (type === "leave") return "leave"
+    if (type === "vc_move") return "vcMove"
+    if (type === "game_start" || type === "game_stop") return "playing"
+    if (type === "spotify") return "listening"
+    if (type === "streaming") return "watching"
+    if (type === "online") return "online"
+    if (type === "offline") return "offline"
+    if (type === "idle") return "idle"
+    if (type === "dnd") return "dnd"
+
+    // "voice" covers voice join/leave, but is also (incorrectly at creation time) used for the
+    // live camera-on / screen-share entries before their session closes — metadata still carries
+    // which one it actually is, so check that before assuming plain voice
+    if (type === "voice" || type === "vc_join" || type === "vc_leave") {
         const action = (meta.action || "").toLowerCase()
-        if (action.includes("listening") || meta.type === 2 || meta.trackId) return "🎵"
-        if (action.includes("voice") || body.includes("voice") || title.includes("voice")) return "🎙️"
-        if (action.includes("camera") || body.includes("camera") || title.includes("camera")) return "📷"
-        if (action.includes("stream") || action.includes("screen") || body.includes("screen") || title.includes("screen") || body.includes("stream")) return "🖥️"
-        if (action.includes("activity") || action.includes("game") || body.includes("game") || title.includes("game")) return "🎮"
-        return "⏱️"
+        if (action.includes("camera")) return "camera"
+        if (action.includes("stream") || action.includes("screen")) return "screen"
+        return "voice"
     }
 
-    const activityType = meta.type
-    const activityName = (meta.name || "").toLowerCase()
+    // "activity" / "session" are genuinely ambiguous types — the real kind only
+    // shows up in metadata (activity type number, action string, track id, etc)
+    if (type === "activity" || type === "session") {
+        const action = (meta.action || "").toLowerCase()
+        const activityType = meta.type
 
-    if (activityType === 2 || meta.trackId || body.includes("listening to") || activityName === "spotify") return "🎵"
-    if (body.includes("spotify") || title.includes("spotify")) return "🎵"
-    if (body.includes("apple music") || title.includes("apple music")) return "🎧"
-    if (body.includes("youtube music") || title.includes("youtube music")) return "🎶"
-    if (body.includes("soundcloud") || title.includes("soundcloud")) return "☁️"
+        if (action === "status_session") return "status"
+        if (action.includes("listening") || activityType === 2 || meta.trackId) return "listening"
+        if (action.includes("voice")) return "voice"
+        if (action.includes("camera")) return "camera"
+        if (action.includes("stream") || action.includes("screen")) return "screen"
+        if (action.includes("game") || activityType === 0) return "playing"
+        if (activityType === 1) return "watching"
 
-    if (type === "game_start" || type === "game_stop") return "🎮"
-    if (type === "activity" && activityType === 0) return "🎮"
-
-    if (activityType === 1 || body.includes("streaming")) return "📺"
-    if (body.includes("twitch") || title.includes("twitch")) return "📺"
-    if (body.includes("youtube") || title.includes("youtube")) return "▶️"
-
-    if (type === "status" || type === "online" || type === "offline" || type === "idle" || type === "dnd") {
-        if (body.includes("dnd") || title.includes("dnd") || title.includes("do not disturb")) return "🔴"
-        if (body.includes("online") || title.includes("online")) return "🟢"
-        if (body.includes("idle") || title.includes("idle")) return "🌙"
-        if (body.includes("offline") || title.includes("offline")) return "⚫"
-        if (entry.icon) return entry.icon
-        return "⚪"
+        return "session"
     }
 
-    if (body.includes("camera") || body.includes("video")) return "📷"
-    if (body.includes("screen") || body.includes("stream")) return "🖥️"
-    if (type === "vc_join" || type === "vc_leave" || type === "vc_move") return "🔊"
-    if (type === "voice") return "🎙️"
+    if (type === "status") return "status"
 
-    return ACTIVITY_ICONS[type] || "📌"
+    return "session"
 }
+
 
 function formatDuration(ms: number): string {
     if (!ms || ms < 0) return "0m"
@@ -1422,6 +1461,7 @@ function formatDuration(ms: number): string {
 }
 
 const _albumColorCache: Record<string, string> = {}
+const ALBUM_CACHE_MAX = 300  // small hex strings, but cap it so long sessions don't grow this forever
 
 function extractAlbumColor(imageUrl: string): Promise<string> {
     if (_albumColorCache[imageUrl]) return Promise.resolve(_albumColorCache[imageUrl])
@@ -1493,6 +1533,8 @@ function extractAlbumColor(imageUrl: string): Promise<string> {
                 }
 
                 _albumColorCache[imageUrl] = hex
+                const keys = Object.keys(_albumColorCache)
+                if (keys.length > ALBUM_CACHE_MAX) delete _albumColorCache[keys[0]]
                 resolve(hex)
             } catch {
                 resolve("#1ed760")
@@ -1571,20 +1613,21 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                     width: 42,
                     height: 42,
                     borderRadius: 12,
-                    background: C.bg1,
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    fontSize: 20,
                     flexShrink: 0,
-                    border: `1px solid ${C.border}`,
                     marginTop: 1,
+                    ...(() => {
+                        const key = getActivityIconKey(log)
+                        const { color } = actIco[key]
+                        return { background: `${color}1c`, border: `1px solid ${color}40`, color }
+                    })(),
                 }}>
                     {(() => {
-                        const ic = getActivityIcon(log)
-                        return typeof ic === "string" && (ic.startsWith("http") || ic.startsWith("/"))
-                            ? <img src={ic} style={{ width: 28, height: 28, borderRadius: 6, objectFit: "cover" }} onError={(e: any) => { e.target.style.display = "none" }} />
-                            : ic
+                        const key = getActivityIconKey(log)
+                        const { Icon } = actIco[key]
+                        return <Icon />
                     })()}
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -1808,7 +1851,13 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                         alignItems: "center",
                                         gap: 6,
                                     }}>
-                                        <span>{ACTIVITY_ICONS[log.type] || "👤"}</span>
+                                        <span style={{ display: "flex", alignItems: "center", transform: "scale(0.7)" }}>
+                                            {(() => {
+                                                const key = getActivityIconKey(log)
+                                                const { Icon } = actIco[key]
+                                                return <Icon />
+                                            })()}
+                                        </span>
                                         <span>{FIELD_NAME[log.metadata.field ?? ""] ?? log.type.replace("_", " ")} change</span>
                                     </div>
                                     {/* Avatar images row */}
@@ -4519,6 +4568,15 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
     const goingOffline = !wasOffline && isOffline
     const onlineStateChange = comingOnline || goingOffline
 
+    // Discord often fires a duplicate presence event right after the real transition.
+    // By then statusCache already reflects the new state, so the duplicate's own
+    // wasOffline/isOffline check looks like "no change" even though we just transitioned.
+    // Keep a short window open so anything arriving right after a transition is still
+    // treated as part of that same transition, not a fresh, unrelated status change.
+    const transitionKey = `transition:${uid}`
+    if (onlineStateChange) _logDebounce[transitionKey] = Date.now()
+    const recentlyTransitioned = onlineStateChange || (Date.now() - (_logDebounce[transitionKey] || 0) < 3000)
+
     if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup && !statusSessionCache[uid] && !sessionJustEnded && !onlineStateChange) {
 
         const platLog = platformSuffixLog(uid)
@@ -4534,7 +4592,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
 
     const newClient = resolveClient((u as any).client_status ?? (u as any).clientStatus)
     const oldClient = clientCache[uid]
-    if (oldClient !== undefined && newClient !== null && oldClient !== newClient && !isStartup && !comingOnline) {
+    if (oldClient !== undefined && newClient !== null && oldClient !== newClient && !isStartup && !recentlyTransitioned) {
         clientCache[uid] = newClient
         if (statusSessionCache[uid]) {
             statusSessionCache[uid]!.platforms.push({ platform: newClient, ts: Date.now() })
@@ -4768,8 +4826,9 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         const oldCustomStatus = customStatusCache[uid]
 
         // skip on connect/disconnect — discord clears activities before/after status flips,
-        // so a real disconnect can look identical to a manual "remove status"
-        if (onlineStateChange) {
+        // so a real disconnect can look identical to a manual "remove status". also covers
+        // duplicate presence events that fire right after the real transition.
+        if (recentlyTransitioned) {
             // don't touch the cache here — preserve old value so the next real change compares right
         } else if (oldCustomStatus !== undefined && oldCustomStatus !== newCustomStatus && newCustomStatus === null) {
             // status "removed" — hold off and confirm it's real, a disconnect blip fixes itself within ~2s
@@ -4863,7 +4922,11 @@ export default definePlugin({
                     if (status) statusCache[wu.id] = status
                     const acts: any[] = presMod?.getActivities?.(wu.id) ?? []
                     const realAct = acts.find((a: any) => a.type !== 4) ?? null
-                    activityCache[wu.id] = realAct ? `${realAct.type}:${realAct.name}` : null
+                    activityCache[wu.id] = realAct
+                        ? realAct.type === 2
+                            ? `2\x00${realAct.name}\x00${realAct.details || ""}\x00${realAct.state || ""}`
+                            : `${realAct.type}\x00${realAct.name}`
+                        : null
                     const customAct = acts.find((a: any) => a.type === 4) ?? null
                     customStatusCache[wu.id] = customAct
                         ? [customAct.emoji?.name, customAct.state].filter(Boolean).join(" ") || null
@@ -4923,6 +4986,7 @@ export default definePlugin({
         Object.keys(_logDebounce).forEach(k => delete _logDebounce[k])
         presenceDebounce.forEach(t => clearTimeout(t))
         presenceDebounce.clear()
+        Object.keys(_albumColorCache).forEach(k => delete _albumColorCache[k])
         pluginStartedAt = 0
     },
 
@@ -5042,12 +5106,6 @@ export default definePlugin({
                 const ch    = ChannelStore.getChannel(channelId)
                 const gName = guildName(ch?.guild_id)
                 const chName  = ch?.name || "dm"
-                // for DMs, ch.name is null — show recipient context instead
-                const location = gName
-                    ? `${gName} · #${chName}`
-                    : ch?.recipients?.length
-                        ? "Direct Message"
-                        : `#${chName}`
                 const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId
                 if (!skipNotify) {
                     notify({
@@ -5057,7 +5115,7 @@ export default definePlugin({
                         onClick: () => jumpTo(ch?.guild_id, channelId, msg.id),
                     })
                 }
-                logUserActivity(uid, "delete", "🗑️", `deleted a message in ${location}`, msgPreview(msg.content, msg.attachments?.[0]?.filename), {
+                logUserActivity(uid, "delete", "🗑️", `deleted a message`, msgPreview(msg.content, msg.attachments?.[0]?.filename), {
                     guildId: ch?.guild_id,
                     channelId,
                     msgId: msg.id,
@@ -5095,7 +5153,7 @@ export default definePlugin({
                         onClick: () => jumpTo(ch?.guild_id, channelId),
                     })
                 }
-                logUserActivity(userId, "typing", "💭", `is typing in ${location}`, `${gName ? gName + " · " : ""}#${chName}`, {
+                logUserActivity(userId, "typing", "💭", `is typing…`, "", {
                     guildId: ch?.guild_id,
                     channelId,
                     metadata: {
@@ -5186,7 +5244,7 @@ export default definePlugin({
                         await activityStore.updateLog(uid, session.logId, {
                             type: "session",
                             title: `In #${chName}`,
-                            body: `${guildNameVcLeftStr || "DM"} · #${chName}`,
+                            body: "",
                             metadata: {
                                 ...session.metadata,
                                 action: "voice_session",
@@ -5212,7 +5270,7 @@ export default definePlugin({
                             icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
                             onClick: () => openUserProfile(uid),
                         })
-                        logUserActivity(uid, "voice", "🎙️", `left #${chName}`, `${guildNameVcLeftStr ? guildNameVcLeftStr + " · " : ""}#${chName}`, {
+                        logUserActivity(uid, "voice", "🎙️", `left #${chName}`, "", {
                             guildId: ch?.guild_id || guildNameVcLeft?.guild_id,
                             channelId: old!,
                             metadata: {
@@ -5268,7 +5326,7 @@ export default definePlugin({
                                 onClick: () => jumpTo(currentGuildId, currentChId),
                             })
                             const camPlatform = clientCache[uid] ? CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid] : undefined
-                            logUserActivity(uid, "voice", "📷", `camera on in #${currentChName}`, `#${currentChName}`, {
+                            logUserActivity(uid, "voice", "📷", `camera on`, "", {
                                 guildId: currentGuildId,
                                 channelId: currentChId,
                                 metadata: {
@@ -5288,7 +5346,7 @@ export default definePlugin({
                                 activityStore.updateLog(uid, camSession.logId, {
                                     type: "session",
                                     title: camDur ? `Camera on · ${camDur}` : `Camera on`,
-                                    body: `${camSession.metadata?.server || "DM"} · #${camSession.metadata?.channel || currentChName}`,
+                                    body: "",
                                     metadata: {
                                         ...camSession.metadata,
                                         action: "camera_session",
@@ -5320,7 +5378,7 @@ export default definePlugin({
                                 onClick: () => jumpTo(currentGuildId, currentChId),
                             })
                             const streamPlatform = clientCache[uid] ? CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid] : undefined
-                            logUserActivity(uid, "voice", "🖥️", `screen sharing in #${currentChName}`, `#${currentChName}`, {
+                            logUserActivity(uid, "voice", "🖥️", `screen sharing`, "", {
                                 guildId: currentGuildId,
                                 channelId: currentChId,
                                 metadata: {
@@ -5340,7 +5398,7 @@ export default definePlugin({
                                 activityStore.updateLog(uid, streamSession.logId, {
                                     type: "session",
                                     title: streamDur ? `Screen sharing · ${streamDur}` : `Screen sharing`,
-                                    body: `${streamSession.metadata?.server || "DM"} · #${streamSession.metadata?.channel || currentChName}`,
+                                    body: "",
                                     metadata: {
                                         ...streamSession.metadata,
                                         action: "stream_session",
@@ -5397,7 +5455,12 @@ export default definePlugin({
             const hasProfileChange = relevant.some(f => user[f] !== undefined)
             if (!hasProfileChange) return
             const old = profileCache[user.id]
-            if (!old) return
+            if (!old) {
+                // cache not populated yet (e.g. still mid-startup fetch) — seed it from
+                // this event so it's not silently lost, next real change compares correctly
+                profileCache[user.id] = { user: camelize(user) }
+                return
+            }
             checkProfileChanged(user.id, { ...old, user: { ...old.user, ...camelize(user) } })
         },
 
