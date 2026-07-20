@@ -1,5 +1,5 @@
 // UserRadar — k1ng_op
-// tracks watched users: msgs, edits, deletes, typing, profile/pfp, voice, status, activity, boosts, joins
+// tracks msgs, edits, deletes, typing, profile/pfp, voice, status, activity, joins
 
 import { addContextMenuPatch, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu"
 import { DataStore, Notifications } from "@api/index"
@@ -83,7 +83,7 @@ class ActivityStore {
         } catch (e) { console.error("[UserRadar] Failed to save activity log", e) }
     }
 
-    // batches rapid-fire addLog calls into one write instead of hitting DataStore every time
+    // batches rapid writes into one save
     private saveTimer: ReturnType<typeof setTimeout> | null = null
     private pendingSave: { resolve: () => void }[] = []
     private scheduleSave(): Promise<void> {
@@ -99,8 +99,7 @@ class ActivityStore {
             }, 1500)
         })
     }
-    // forces any pending debounced save to happen immediately — used before the plugin
-    // stops, or for actions the user expects to persist right away (delete, clear, import)
+    // forces the pending debounced save through immediately
     async flushSave() {
         if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null }
         const waiters = this.pendingSave
@@ -174,7 +173,7 @@ class ActivityStore {
                 }
                 await this.load()
                 // merge by entry id instead of replacing the whole cache — otherwise a
-                // category-scoped export (messages only, etc.) would wipe every other category
+                // a category-only export would otherwise wipe everything else
                 for (const [uid, entries] of Object.entries(parsed as Record<string, ActivityEntry[]>)) {
                     if (!this.cache[uid]) this.cache[uid] = []
                     const existingIds = new Set(this.cache[uid].map(e => e.id))
@@ -352,6 +351,23 @@ function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
     if (channelId) findByProps("selectChannel")?.selectChannel({ guildId: guildId ?? "@me", channelId, messageId: msgId })
 }
 
+// wipes all per-user caches when someone is removed from the watchlist —
+// otherwise re-adding the same person later compares fresh data against a stale,
+// possibly very old cached baseline and can miss or misreport their first real change
+function purgeUserCaches(uid: string) {
+    delete profileCache[uid]
+    delete vcCache[uid]
+    delete statusCache[uid]
+    delete activityCache[uid]
+    delete guildCache[uid]
+    delete vcJoinTime[uid]
+    delete clientCache[uid]
+    delete cameraCache[uid]
+    delete streamCache[uid]
+    delete customStatusCache[uid]
+    delete statusSessionCache[uid]
+}
+
 function getPinned(): string[] {
     try { return JSON.parse(settings.store.pinnedUsers || "[]") } catch { return [] }
 }
@@ -387,10 +403,18 @@ function notify(opts: { title: string; body: string; icon?: string; onClick?: ()
     if (inQuietHours(settings)) return
     if (settings.store.globalPresetMode === "silent") return
 
-    const key = `${opts._uid ?? ""}\x00${opts.title}\x00${opts.body}`
+    // title already has the person's name baked in, so it's unique per-user on its own
+    const key = `${opts._uid ?? opts.title}\x00${opts.title}\x00${opts.body}`
     const now = Date.now()
     if (_notifDebounce[key] && now - _notifDebounce[key] < 1500) return
     _notifDebounce[key] = now
+
+    // sweep stale entries so this doesn't grow forever over a long session
+    if (Object.keys(_notifDebounce).length > 500) {
+        for (const k of Object.keys(_notifDebounce)) {
+            if (now - _notifDebounce[k] > 60000) delete _notifDebounce[k]
+        }
+    }
 
     if (settings.store.debugLog) log.info(`[notif] ${opts.title} — ${opts.body}`)
     Notifications.showNotification({ title: opts.title, body: opts.body, icon: opts.icon, onClick: opts.onClick })
@@ -451,13 +475,13 @@ function checkProfileChanged(uid: string, fresh: any) {
             const oldAvatarUrl = oldAvatar ? avatarUrl(uid, oldAvatar, 256) : null
             const newAvatarUrl = newAvatar ? avatarUrl(uid, newAvatar, 256) : null
             notify({
-                title: `${dn} changed their avatar`,
-                body: "click to see new pfp",
+                title: newAvatar ? `${dn} changed their avatar` : `${dn} removed their avatar`,
+                body: newAvatar ? "click to see new pfp" : "reset to default",
                 icon: newAvatarUrl ?? undefined,
                 onClick: () => openUserProfile(uid),
             })
             logUserActivity(uid, "avatar", "🖼️",
-                `changed their avatar`,
+                newAvatar ? `changed their avatar` : `removed their avatar`,
                 "",
                 { metadata: { oldAvatar: oldAvatarUrl, newAvatar: newAvatarUrl } }
             ).catch(() => {})
@@ -491,7 +515,6 @@ function checkProfileChanged(uid: string, fresh: any) {
             const notifyBody = newVal
                 ? (oldVal ? `${oldVal} → ${newVal}` : newVal)
                 : `removed ${fieldLabel}`
-            const bodyText = ""  // shown via diff card instead
 
             notify({
                 title: `${dn} changed their ${fieldLabel}`,
@@ -501,7 +524,7 @@ function checkProfileChanged(uid: string, fresh: any) {
             })
             logUserActivity(uid, actType, actIcon,
                 `changed their ${fieldLabel}`,
-                bodyText,
+                "",  // shown via diff card instead
                 { metadata: { field: f, before: oldVal, after: newVal } }
             ).catch(() => {})
         }
@@ -602,7 +625,7 @@ const CLIENT_EMOJI: Record<string, string> = {
 
 function resolveClient(cs?: Record<string, string> | null): string | null {
     if (!cs) return null
-    // priority order for the "primary" platform (used as the cache key / session tracking)
+    // priority order for the "primary" platform
     if (cs.mobile)   return "mobile"
     if (cs.desktop)  return "desktop"
     if (cs.web)      return "web"
@@ -612,9 +635,7 @@ function resolveClient(cs?: Record<string, string> | null): string | null {
     return first ?? null
 }
 
-// unlike resolveClient (which picks one "primary" platform for session tracking),
-// this returns every platform currently active — used only for display, so a user
-// on both desktop and mobile at once shows both instead of just one
+// returns every active platform, not just one — display only
 function resolveAllClients(cs?: Record<string, string> | null): string[] {
     if (!cs) return []
     return Object.keys(cs).filter(k => cs[k])
@@ -676,7 +697,7 @@ const ico = {
     catEdit:      () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4L18.5 2.5z"/></svg>,
     catDelete:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>,
     catTyping:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="18" x2="20" y2="18"/></svg>,
-    catStatus:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>,
+    catStatus:    () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.35"/><circle cx="12" cy="12" r="4" fill="currentColor"/></svg>,
     catVoice:     () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>,
     catProfile:   () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
     catActivity:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
@@ -693,8 +714,7 @@ const ico = {
 
 }
 
-// Icons shown on activity log cards — colored to match each event type, replacing the old emoji set.
-// Each returns { Icon, color } so the card can render a tinted circular badge instead of a raw emoji.
+// per-event icon + color for activity log cards
 const actIco = {
     message:   { color: "#5865f2", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2 22V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6l-4 4z"/></svg> },
     edit:      { color: "#f0b232", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> },
@@ -730,7 +750,6 @@ const actIco = {
 
     session:   { color: "#949ba4", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
 } as const
-
 
 const CtxEyeIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: 18, height: 18 }}>
@@ -1368,16 +1387,14 @@ function previewNotification(uid: string, type: string) {
     }
 
     const p = previews[type] || { title: `${dn}: ${type}`, body: "preview notification" }
-    Notifications.showNotification({ title: "[Preview] " + p.title, body: p.body, icon })
+    notify({ title: "[Preview] " + p.title, body: p.body, icon })
 }
 
 function getActivityIconKey(entry: ActivityEntry): keyof typeof actIco {
     const type = entry.type
     const meta = entry.metadata || {}
 
-    // exact type matches first — never let keyword sniffing override a known type.
-    // this is what fixes messages containing words like "spotify" or "youtube"
-    // getting mis-categorized as music/video activity instead of a plain message.
+    // exact type match first so a message containing "spotify" doesn't get mis-tagged
     if (type === "msg") return "message"
     if (type === "edit") return "edit"
     if (type === "delete") return "delete"
@@ -1400,9 +1417,7 @@ function getActivityIconKey(entry: ActivityEntry): keyof typeof actIco {
     if (type === "idle") return "idle"
     if (type === "dnd") return "dnd"
 
-    // "voice" covers voice join/leave, but is also (incorrectly at creation time) used for the
-    // live camera-on / screen-share entries before their session closes — metadata still carries
-    // which one it actually is, so check that before assuming plain voice
+    // camera/screenshare are logged as type "voice" while live — check metadata first
     if (type === "voice" || type === "vc_join" || type === "vc_leave") {
         const action = (meta.action || "").toLowerCase()
         if (action.includes("camera")) return "camera"
@@ -1410,8 +1425,7 @@ function getActivityIconKey(entry: ActivityEntry): keyof typeof actIco {
         return "voice"
     }
 
-    // "activity" / "session" are genuinely ambiguous types — the real kind only
-    // shows up in metadata (activity type number, action string, track id, etc)
+    // activity/session are generic — real kind lives in metadata
     if (type === "activity" || type === "session") {
         const action = (meta.action || "").toLowerCase()
         const activityType = meta.type
@@ -1431,7 +1445,6 @@ function getActivityIconKey(entry: ActivityEntry): keyof typeof actIco {
 
     return "session"
 }
-
 
 function formatDuration(ms: number): string {
     if (!ms || ms < 0) return "0m"
@@ -1666,7 +1679,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                     }}>
                         <span style={{ wordBreak: "break-word", flex: 1, minWidth: 0 }}>
                             {(() => {
-                                // While user is still in VC (session not closed yet), show "In #channel" instead of "joined #channel"
+                                // still in vc — show "In #channel" not "joined"
                                 const isLive = Object.values(activeSessions).some(s => s.logId === log.id)
                                 if (isLive && log.type === "voice" && log.metadata?.action === "joined") {
                                     return `In #${log.metadata.channel || "voice"}`
@@ -2117,7 +2130,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                 {(log.metadata.startTimestamp && log.metadata.endTimestamp) && (() => {
                                                     const total = log.metadata.endTimestamp - log.metadata.startTimestamp
                                                     const totalStr = formatDuration(total)
-                                                    // Calculate progress: if session ended, show full; if active, calculate from log time
+                                                    // progress: full if ended, live calc if still active
                                                     const isSession = log.type === "session"
                                                     const elapsed = isSession && log.metadata.endTime 
                                                         ? log.metadata.endTime - log.metadata.startTimestamp 
@@ -2568,7 +2581,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
             setLogs(prev => {
                 const existingIdx = prev.findIndex(l => l.id === entry.id)
                 if (existingIdx === -1) return [entry, ...prev]
-                // entry was updated (e.g. a voice/spotify session closing) — replace in place, don't duplicate
+                // replace in place so a closing session doesn't duplicate
                 const next = [...prev]
                 next.splice(existingIdx, 1)
                 return [entry, ...next]
@@ -2650,7 +2663,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 voiceMs += Math.max(0, l.metadata.endTime - start)
             }
         }
-        // add time from a session that's still ongoing (hasn't closed yet, so it has no log entry with endTime)
+        // include ongoing session time too
         for (const s of Object.values(activeSessions)) {
             if (s.logId && todayLogs.some(l => l.id === s.logId)) {
                 const start = Math.max(s.startTime, dayStartMs)
@@ -4028,7 +4041,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
         const sorted = sort === "az"
             ? [...list].sort((a, b) => (displayName(UserStore.getUser(a.id)) || a.id).localeCompare(displayName(UserStore.getUser(b.id)) || b.id))
             : [...list].sort((a, b) => b.addedAt - a.addedAt)
-        // pinned users always float to the top, keeping their relative sort order otherwise
+        // pinned users float to the top
         return [...sorted].sort((a, b) => {
             const ap = pinned.includes(a.id) ? 1 : 0
             const bp = pinned.includes(b.id) ? 1 : 0
@@ -4125,6 +4138,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                             setExpandedId={setExpandedId}
                             onRemove={() => {
                                 removeUser(settings, u.id)
+                                purgeUserCaches(u.id)
                                 if (settings.store.autoCleanupLogs) activityStore.clearLogs(u.id)
                                 if (getPinned().includes(u.id)) onTogglePin(u.id)
                                 refresh()
@@ -4154,7 +4168,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                                         let added = 0
                                         let skipped = 0
                                         for (const u of data) {
-                                            // must be a real discord snowflake (17-20 numeric digits), not any arbitrary string
+                                            // real snowflake only, not any string
                                             const id = typeof u?.id === "string" ? u.id.trim() : ""
                                             if (!/^\d{17,20}$/.test(id)) { skipped++; continue }
                                             if (isWatched(settings, id)) continue
@@ -4315,7 +4329,7 @@ const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
                 label={isW ? "Unwatch User" : "Watch User"}
                 icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
                 action={() => {
-                    if (isW) { removeUser(settings, user.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(user)} from watchlist`, id: Toasts.genId() }) }
+                    if (isW) { removeUser(settings, user.id); purgeUserCaches(user.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(user)} from watchlist`, id: Toasts.genId() }) }
                     else { addUser(settings, user.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(user)} to watchlist`, id: Toasts.genId() }) }
                 }}
 
@@ -4342,7 +4356,7 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
                 label={isW ? "remove author from watchlist" : "add author to watchlist"}
                 icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
                 action={() => {
-                    if (isW) { removeUser(settings, message.author.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(message.author)} from watchlist`, id: Toasts.genId() }) }
+                    if (isW) { removeUser(settings, message.author.id); purgeUserCaches(message.author.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(message.author)} from watchlist`, id: Toasts.genId() }) }
                     else { addUser(settings, message.author.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(message.author)} to watchlist`, id: Toasts.genId() }) }
                 }}
 
@@ -4568,11 +4582,8 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
     const goingOffline = !wasOffline && isOffline
     const onlineStateChange = comingOnline || goingOffline
 
-    // Discord often fires a duplicate presence event right after the real transition.
-    // By then statusCache already reflects the new state, so the duplicate's own
-    // wasOffline/isOffline check looks like "no change" even though we just transitioned.
-    // Keep a short window open so anything arriving right after a transition is still
-    // treated as part of that same transition, not a fresh, unrelated status change.
+    // keeps a short window open so a duplicate presence event right after a
+    // real transition doesn't get mistaken for a fresh, unrelated change
     const transitionKey = `transition:${uid}`
     if (onlineStateChange) _logDebounce[transitionKey] = Date.now()
     const recentlyTransitioned = onlineStateChange || (Date.now() - (_logDebounce[transitionKey] || 0) < 3000)
@@ -4619,7 +4630,6 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
 
     if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
         const actPlatform = clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined
-
 
         const [oldTypeStr, ...oldNameParts] = (oldAct || "").split("\x00")
         const oldType = oldAct ? parseInt(oldTypeStr) : -1
@@ -4825,13 +4835,11 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
             : null
         const oldCustomStatus = customStatusCache[uid]
 
-        // skip on connect/disconnect — discord clears activities before/after status flips,
-        // so a real disconnect can look identical to a manual "remove status". also covers
-        // duplicate presence events that fire right after the real transition.
+        // skip during connect/disconnect — looks identical to a manual removal
         if (recentlyTransitioned) {
-            // don't touch the cache here — preserve old value so the next real change compares right
+            // leave cache alone so the next real change compares right
         } else if (oldCustomStatus !== undefined && oldCustomStatus !== newCustomStatus && newCustomStatus === null) {
-            // status "removed" — hold off and confirm it's real, a disconnect blip fixes itself within ~2s
+            // hold off — a disconnect blip fixes itself in ~2s
             const holdKey = `cs-hold:${uid}`
             _logDebounce[holdKey] = Date.now()
             setTimeout(() => {
@@ -4857,7 +4865,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 ? (oldCustomStatus ? `${oldCustomStatus} → ${newCustomStatus}` : newCustomStatus)
                 : "removed custom status"
             // dedupe — discord fires this twice in a row sometimes
-            const _ldk = `cs:${uid}:${oldCustomStatus}:${newCustomStatus}`
+            const _ldk = `cs-change:${uid}`
             const _ldt = Date.now()
             if (!_logDebounce[_ldk] || _ldt - _logDebounce[_ldk] > 2000) {
                 _logDebounce[_ldk] = _ldt
@@ -4874,7 +4882,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 ).catch(() => {})
             }
         } else {
-            // first time seeing this user, or status genuinely unchanged — keep cache fresh
+            // unchanged or first-seen — just refresh the cache
             customStatusCache[uid] = newCustomStatus
         }
     }
@@ -4894,7 +4902,7 @@ export default definePlugin({
 
         activityStore.load().catch(() => {})
 
-        // pre-populate caches before flux events arrive, or first VOICE_STATE_UPDATES looks like a join
+        // pre-populate caches so the first event isn't mistaken for a join
         try {
             const vsMod    = findByProps("getVoiceStateForUser")
             const presMod  = findByProps("getStatus", "getActivities")
@@ -4933,12 +4941,12 @@ export default definePlugin({
                         : null
                 } catch { }
 
-                // isMember() is unreliable during startup — GUILD_MEMBER_ADD's cooldown handles it instead
+                // isMember() unreliable at startup, cooldown handles it
                 guildCache[wu.id] = new Set()
             }
         } catch (e) { log.warn("snapshot failed", e) }
 
-        // staggered fetch to avoid ratelimits — start() returns immediately, fetch keeps going in background
+        // staggered so we don't get ratelimited
         const list = getWatchlist(settings)
         let i = 0
         const fetchNext = () => {
@@ -4990,7 +4998,6 @@ export default definePlugin({
         pluginStartedAt = 0
     },
 
-
     flux: {
         MESSAGE_CREATE({ optimistic, type, message, channelId }: MsgCreateEvent) {
             if (optimistic || type !== "MESSAGE_CREATE") return
@@ -5036,8 +5043,7 @@ export default definePlugin({
             const uid = message?.author?.id
             if (!uid || !isWatched(settings, uid)) return
 
-            // edited_timestamp only exists on real user edits
-            // embed resolution / pin events / reaction updates also fire MESSAGE_UPDATE but don't have this
+            // edited_timestamp only exists on a real edit, not embed/pin/reaction updates
             if (!message.edited_timestamp) return
 
             if (!isFeatureOn(uid, "edits", "globalEdits")) return
@@ -5048,16 +5054,10 @@ export default definePlugin({
             const ch    = ChannelStore.getChannel(message.channel_id)
             const gName = guildName(ch?.guild_id)
             const chName = ch?.name || "dm"
-            const location = gName
-                ? `${gName} · #${chName}`
-                : ch?.recipients?.length
-                    ? "Direct Message"
-                    : `#${chName}`
 
             const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === message.channel_id
 
-            // try to get old content from cache for before → after preview
-            // MessageStore still has the old version at the time MESSAGE_UPDATE fires
+            // MessageStore still holds the pre-edit content at this point
             const cached = MessageStore.getMessage(message.channel_id, message.id)
             const beforeContent = cached?.content && cached.content !== message.content
                 ? cached.content
@@ -5076,7 +5076,7 @@ export default definePlugin({
                     onClick: () => jumpTo(ch?.guild_id, message.channel_id, message.id),
                 })
             }
-            logUserActivity(uid, "edit", "✏️", `edited a message`, location, {
+            logUserActivity(uid, "edit", "✏️", `edited a message`, "", {
                 guildId: ch?.guild_id,
                 channelId: message.channel_id,
                 msgId: message.id,
@@ -5229,6 +5229,16 @@ export default definePlugin({
                             members: vcMembers.length > 0 ? vcMembers : undefined,
                         }
                     })
+                    // an orphaned session could be sitting here — close it first
+                    const orphan = activeSessions[sk]
+                    if (orphan && orphan.logId !== undefined) {
+                        const orphanElapsed = Date.now() - orphan.startTime
+                        activityStore.updateLog(uid, orphan.logId, {
+                            title: orphan.metadata?.channel ? `Was in #${orphan.metadata.channel}` : "Session ended",
+                            body: "",
+                            metadata: { ...orphan.metadata, duration: formatDuration(orphanElapsed), startTime: orphan.startTime, endTime: Date.now() },
+                        }).catch(() => {})
+                    }
                     activeSessions[sk] = { logId: entry.id, startTime: Date.now(), channelId: now!, guildId: ch?.guild_id, metadata: { server: guildNameVc || "DM", channel: chName, platform: joinPlatform, members: vcMembers.length > 0 ? vcMembers : undefined } }
                 } else if (old && !now) {
                     const spent = vcJoinTime[uid] ? Date.now() - vcJoinTime[uid] : 0
@@ -5316,7 +5326,7 @@ export default definePlugin({
                     const oldCamera = cameraCache[uid] ?? false
                     if (oldCamera !== newCamera) {
                         cameraCache[uid] = newCamera
-                        const camSk = sessionKey(uid, "camera", currentChId)
+                        const camSk = sessionKey(uid, "camera")
                         if (newCamera) {
                             // Camera turned on - start session
                             notify({
@@ -5369,7 +5379,7 @@ export default definePlugin({
                     const oldStream = streamCache[uid] ?? false
                     if (oldStream !== newStream) {
                         streamCache[uid] = newStream
-                        const streamSk = sessionKey(uid, "stream", currentChId)
+                        const streamSk = sessionKey(uid, "stream")
                         if (newStream) {
                                 notify({
                                 title: `${dn} started screen sharing`,
@@ -5429,8 +5439,7 @@ export default definePlugin({
                 const uid = u.user?.id
                 if (!uid || !isWatched(settings, uid)) continue
 
-                // going offline or coming back online can't be debounced away — otherwise a
-                // quick offline blip gets cancelled and the plugin never sees the transition
+                // never debounce an offline/online flip, or a quick blip gets swallowed
                 const touchesOffline = isOfflineStatus(statusCache[uid]) || isOfflineStatus(u.status)
                 if (touchesOffline) {
                     const pending = presenceDebounce.get(uid)
@@ -5439,7 +5448,7 @@ export default definePlugin({
                     continue
                 }
 
-                // debounce per user — presence fires constantly even when nothing changed
+                // debounce — presence fires constantly for no reason
                 const pending = presenceDebounce.get(uid)
                 if (pending) clearTimeout(pending)
                 presenceDebounce.set(uid, setTimeout(() => {
@@ -5456,8 +5465,8 @@ export default definePlugin({
             if (!hasProfileChange) return
             const old = profileCache[user.id]
             if (!old) {
-                // cache not populated yet (e.g. still mid-startup fetch) — seed it from
-                // this event so it's not silently lost, next real change compares correctly
+                // cache empty (startup) — seed it
+                // seed cache from event so it's not lost
                 profileCache[user.id] = { user: camelize(user) }
                 return
             }
