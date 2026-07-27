@@ -172,8 +172,7 @@ class ActivityStore {
                     }
                 }
                 await this.load()
-                // merge by entry id instead of replacing the whole cache — otherwise a
-                // a category-only export would otherwise wipe everything else
+                // merge by entry id instead of replacing the whole cache — a category-only export would otherwise wipe everything else
                 for (const [uid, entries] of Object.entries(parsed as Record<string, ActivityEntry[]>)) {
                     if (!this.cache[uid]) this.cache[uid] = []
                     const existingIds = new Set(this.cache[uid].map(e => e.id))
@@ -424,7 +423,7 @@ function avatarUrl(id: string, hash?: string | null, size = 80): string {
     try {
         if (hash) return `https://cdn.discordapp.com/avatars/${id}/${hash}.${hash.startsWith("a_") ? "gif" : "webp"}?size=${size}`
         let i = 0
-        try { i = Number(BigInt(id) % BigInt(6)) } catch { i = parseInt(id.slice(-4), 10) % 6 || 0 }
+        try { i = Number((BigInt(id) >> 22n) % 6n) } catch { i = parseInt(id.slice(-4), 10) % 6 || 0 }
         return `https://cdn.discordapp.com/embed/avatars/${i}.png`
     } catch { return "https://cdn.discordapp.com/embed/avatars/0.png" }
 }
@@ -952,8 +951,9 @@ function AddLabelInput({ label, setLabel, doAdd }: {
     return (
         <input
             placeholder='e.g. "bestie", "the rat", "ex"'
+            maxLength={50}
             value={label}
-            onChange={(e) => setLabel(e.target.value)}
+            onChange={(e) => setLabel(e.target.value.slice(0, 50))}
             onKeyDown={(e) => { if (e.key === "Enter") doAdd() }}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
@@ -1280,8 +1280,9 @@ function LabelInput({ nick, setNick, saveNick }: { nick: string; setNick: (v: st
     return (
         <input
             placeholder="label"
+            maxLength={50}
             value={nick}
-            onChange={(e) => setNick(e.target.value)}
+            onChange={(e) => setNick(e.target.value.slice(0, 50))}
             onBlur={() => { setFocused(false); saveNick() }}
             onFocus={() => setFocused(true)}
             onKeyDown={(e) => { if (e.key === "Enter") { setFocused(false); saveNick() } }}
@@ -3225,7 +3226,7 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
     const name = displayName(du) || user.id
     const av   = du ? avatarUrl(du.id, (du as any).avatar, 64) : avatarUrl(user.id, null, 64)
 
-    const saveNick = () => { patchUser(settings, user.id, { nick: nick || "" }); refresh() }
+    const saveNick = () => { patchUser(settings, user.id, { nick: (nick || "").slice(0, 50) }); refresh() }
     const setOv = (key: keyof WatchedUser["overrides"], val: boolean | null) => {
         patchUser(settings, user.id, { overrides: { ...user.overrides, [key]: val } })
         refresh()
@@ -4634,7 +4635,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         const [oldTypeStr, ...oldNameParts] = (oldAct || "").split("\x00")
         const oldType = oldAct ? parseInt(oldTypeStr) : -1
         const isOldListening = oldType === 2
-        const oldSongName   = isOldListening ? (oldNameParts[1] || "") : oldNameParts.join("\x00")
+        const oldActName    = isOldListening ? (oldNameParts[1] || "") : oldNameParts.join("\x00")
         const oldArtistName = isOldListening ? (oldNameParts[2] || "").trim() : ""
 
         const getSpotifyFields = (act: any) => {
@@ -4796,12 +4797,12 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         }
         else if (!realAct && oldAct) {
             if (isOldListening) {
-                await closeListening(oldSongName, oldArtistName)
+                await closeListening(oldActName, oldArtistName)
             } else {
                 const sk = sessionKey(uid, "activity", oldAct)
-                await closeActivity(sk, oldSongName, oldType)
+                await closeActivity(sk, oldActName, oldType)
                 notify({
-                    title: `${dn} stopped ${ACT_VERB[oldType] ?? "playing"} ${oldSongName}`,
+                    title: `${dn} stopped ${ACT_VERB[oldType] ?? "playing"} ${oldActName}`,
                     body: "",
                     icon,
                     onClick: () => openUserProfile(uid),
@@ -4810,18 +4811,18 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         }
         else if (realAct && oldAct) {
             if (realAct.type === 2 && isOldListening) {
-                await closeListening(oldSongName, oldArtistName)
+                await closeListening(oldActName, oldArtistName)
                 await openListening(realAct)
             } else if (realAct.type === 2) {
                 const oldSk = sessionKey(uid, "activity", oldAct)
-                await closeActivity(oldSk, oldSongName, oldType)
+                await closeActivity(oldSk, oldActName, oldType)
                 await openListening(realAct)
             } else if (isOldListening) {
-                await closeListening(oldSongName, oldArtistName)
+                await closeListening(oldActName, oldArtistName)
                 await openActivity(realAct)
             } else {
                 const oldSk = sessionKey(uid, "activity", oldAct)
-                await closeActivity(oldSk, oldSongName, oldType)
+                await closeActivity(oldSk, oldActName, oldType)
                 await openActivity(realAct)
             }
         }
@@ -4890,7 +4891,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
 
 export default definePlugin({
     name: "UserRadar",
-    description: "track watched users and get notified on messages, edits, deletes, typing, profile/avatar changes, voice, status, activity, boosts, and server joins",
+    description: "track watched users and get notified on messages, edits, deletes, typing, profile/avatar changes, voice, status, activity, and server joins",
     authors: [{ name: "k1ng_op", id: 641266820187160576 }],
     settings,
 
@@ -5347,7 +5348,7 @@ export default definePlugin({
                                 }
                             }).then(camEntry => {
                                 activeSessions[camSk] = { logId: camEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: guildName(currentGuildId) || "DM", channel: currentChName, platform: camPlatform } }
-                            }).catch(() => {})
+                            }).catch(e => log.warn("camera log failed", e))
                         } else {
                                             const camSession = activeSessions[camSk]
                             const camSpent = camSession ? Date.now() - camSession.startTime : 0
@@ -5399,7 +5400,7 @@ export default definePlugin({
                                 }
                             }).then(streamEntry => {
                                 activeSessions[streamSk] = { logId: streamEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: guildName(currentGuildId) || "DM", channel: currentChName, platform: streamPlatform } }
-                            }).catch(() => {})
+                            }).catch(e => log.warn("stream log failed", e))
                         } else {
                                 const streamSession = activeSessions[streamSk]
                             const streamSpent = streamSession ? Date.now() - streamSession.startTime : 0
@@ -5465,8 +5466,7 @@ export default definePlugin({
             if (!hasProfileChange) return
             const old = profileCache[user.id]
             if (!old) {
-                // cache empty (startup) — seed it
-                // seed cache from event so it's not lost
+                // cache empty (startup) — seed it from the event so it's not lost
                 profileCache[user.id] = { user: camelize(user) }
                 return
             }
@@ -5493,7 +5493,7 @@ export default definePlugin({
             const dn    = label ? `${label} (${name})` : name
             notify({
                 title: `${dn} Joined a Server`,
-                body: gn || guildId,
+                body: gn || "a server",
                 icon: avatarUrl(user.id, user.avatar, 80),
                 onClick: () => jumpTo(guildId),
             })
@@ -5515,7 +5515,7 @@ export default definePlugin({
             const dn    = label ? `${label} (${name})` : name
             notify({
                 title: `${dn} Left a Server`,
-                body: gn || guildId,
+                body: gn || "a server",
                 icon: avatarUrl(user.id, user.avatar, 80),
                 onClick: () => jumpTo(guildId),
             })
