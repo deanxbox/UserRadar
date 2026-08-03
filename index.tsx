@@ -112,7 +112,7 @@ class ActivityStore {
         return this.cache[uid] || []
     }
 
-    // every mutation goes through this so addLog/removeLog/updateLog never interleave
+    // serializes writes so addLog/removeLog/updateLog never interleave
     private writeQueue: Promise<any> = Promise.resolve()
     private enqueue<T>(fn: () => Promise<T>): Promise<T> {
         const next = this.writeQueue.then(fn, fn)
@@ -172,7 +172,7 @@ class ActivityStore {
                     }
                 }
                 await this.load()
-                // merge by entry id instead of replacing the whole cache — a category-only export would otherwise wipe everything else
+                // merge by id, don't replace whole cache — category export would wipe everything
                 for (const [uid, entries] of Object.entries(parsed as Record<string, ActivityEntry[]>)) {
                     if (!this.cache[uid]) this.cache[uid] = []
                     const existingIds = new Set(this.cache[uid].map(e => e.id))
@@ -255,7 +255,7 @@ function logActivity(uid: string, type: string, icon: string, title: string, bod
 const profileCache:  Record<string, any>                          = {}
 const vcCache:       Record<string, string | null>                = {}
 const statusCache:   Record<string, string>                       = {}
-const activityCache: Record<string, string | null | undefined>    = {}
+const activityCache: Record<string, string[]>                     = {}
 const guildCache:    Record<string, Set<string>>                  = {}
 const vcJoinTime:    Record<string, number>                       = {}
 const clientCache:   Record<string, string | null>                = {}
@@ -263,14 +263,6 @@ const cameraCache:   Record<string, boolean>                      = {}
 const streamCache:   Record<string, boolean>                      = {}
 const customStatusCache: Record<string, string | null>            = {}  // text status (activity type 4)
 const statusSessionCache: Record<string, { startTime: number; startStatus: string; changes: { status: string; ts: number }[]; platforms: { platform: string; ts: number }[] } | null> = {}  // status session tracking
-
-// statusCache/clientCache are plain mutable objects (not React state) since they're written from
-// gateway event handlers outside React's tree. Any open modal row needs to know when a value it's
-// already displaying changes underneath it — this fires a DOM event so rows can subscribe per-uid
-// instead of the whole modal re-rendering on every presence tick.
-function notifyPresenceChange(uid: string) {
-    window.dispatchEvent(new CustomEvent("ur:presence", { detail: uid }))
-}
 
 const activeSessions: Record<string, { logId: string; startTime: number; channelId?: string; guildId?: string; metadata?: any }> = {}
 
@@ -359,8 +351,7 @@ function jumpTo(guildId?: string, channelId?: string, msgId?: string) {
 }
 
 // wipes all per-user caches when someone is removed from the watchlist —
-// otherwise re-adding the same person later compares fresh data against a stale,
-// possibly very old cached baseline and can miss or misreport their first real change
+// otherwise re-adding compares against a stale baseline
 function purgeUserCaches(uid: string) {
     delete profileCache[uid]
     delete vcCache[uid]
@@ -373,6 +364,13 @@ function purgeUserCaches(uid: string) {
     delete streamCache[uid]
     delete customStatusCache[uid]
     delete statusSessionCache[uid]
+    // sessionKey always prefixes with "uid_", safe to match on that
+    for (const k of Object.keys(activeSessions)) {
+        if (k === uid || k.startsWith(`${uid}_`)) delete activeSessions[k]
+    }
+    for (const k of Object.keys(_logDebounce)) {
+        if (k.includes(uid)) delete _logDebounce[k]
+    }
 }
 
 function getPinned(): string[] {
@@ -410,7 +408,7 @@ function notify(opts: { title: string; body: string; icon?: string; onClick?: ()
     if (inQuietHours(settings)) return
     if (settings.store.globalPresetMode === "silent") return
 
-    // title already has the person's name baked in, so it's unique per-user on its own
+    // title already has the name baked in, unique per user
     const key = `${opts._uid ?? opts.title}\x00${opts.title}\x00${opts.body}`
     const now = Date.now()
     if (_notifDebounce[key] && now - _notifDebounce[key] < 1500) return
@@ -571,104 +569,65 @@ function injectStyles() {
     s.textContent = `
         @keyframes ur-spin { to { transform:rotate(360deg) } }
         .ur-spin { display:inline-block;width:14px;height:14px;border-radius:50%;
-            border:2.5px solid #2b2d31;border-top-color:#dbdee1;
+            border:2.5px solid #3f4147;border-top-color:#dbdee1;
             animation:ur-spin .55s linear infinite;vertical-align:middle; }
-
-        @keyframes ur-fade-in { from { opacity:0;transform:translateY(-10px) scale(0.97) } to { opacity:1;transform:translateY(0) scale(1) } }
-        .ur-fade-in { animation:ur-fade-in .4s cubic-bezier(.16,1,.3,1) forwards; }
-
-        .ur-expand { display:grid;grid-template-rows:0fr;transition:grid-template-rows .4s cubic-bezier(.4,0,.2,1); }
+        @keyframes ur-fade-in { from { opacity:0;transform:translateY(-4px) } to { opacity:1;transform:translateY(0) } }
+        .ur-fade-in { animation:ur-fade-in .2s cubic-bezier(.4,0,.2,1) forwards; }
+        .ur-expand { display:grid;grid-template-rows:0fr;transition:grid-template-rows .3s cubic-bezier(.4,0,.2,1); }
         .ur-expand.open { grid-template-rows:1fr; }
         .ur-expand > div { overflow:hidden; }
+        .ur-row-hover:hover { background:rgba(255,255,255,0.06); }
 
-        /* Modern clean row */
-        @keyframes ur-row-in {
-            from { opacity:0; transform:translateY(16px) scale(0.98); }
-            to { opacity:1; transform:translateY(0) scale(1); }
-        }
-        .ur-row {
-            animation: ur-row-in .45s cubic-bezier(.16,1,.3,1) both;
-            transition: transform 200ms cubic-bezier(.2,.8,.2,1), box-shadow 300ms ease, border-color 200ms ease;
-            border-radius: 24px !important;
-            background: var(--background-secondary, #1a1b1e) !important;
-            border: 1px solid var(--background-modifier-accent);
-            box-shadow: 0 2px 12px rgba(0,0,0,0.2);
-        }
-        .ur-row:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.35);
-            border-color: rgba(255,255,255,0.1);
-        }
-        .ur-row:active { transform: translateY(0) scale(0.995); }
+        @keyframes ur-row-in { from { opacity:0; transform:translateY(6px) scale(.98); } to { opacity:1; transform:translateY(0) scale(1); } }
+        .ur-row { animation: ur-row-in .28s cubic-bezier(.2,.9,.3,1.2) both; transition: transform .2s cubic-bezier(.2,.8,.2,1.1), box-shadow .2s ease, background .2s ease, border-color .18s ease; }
+        .ur-row:hover { transform: translateY(-3px) scale(1.008); box-shadow: 0 14px 30px rgba(0,0,0,0.38); border-color: #3f4147; background: linear-gradient(135deg, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.1) 100%) !important; }
+        .ur-row:active { transform: translateY(-1px) scale(.995); }
+        .ur-row.open { box-shadow: 0 8px 22px rgba(0,0,0,0.3); }
 
-        .ur-row-avatar { transition: transform .25s cubic-bezier(.2,.8,.2,1.4); }
+        .ur-row-avatar { transition: transform .2s cubic-bezier(.2,.8,.2,1.4); }
         .ur-row:hover .ur-row-avatar { transform: scale(1.08); }
 
-        @keyframes ur-pin-pop { 0% { transform:scale(.5) rotate(-15deg); } 60% { transform:scale(1.2) rotate(5deg); } 100% { transform:scale(1) rotate(0); } }
-        .ur-pin-pop { animation: ur-pin-pop .4s cubic-bezier(.34,1.56,.64,1) both; }
+        .ur-row-pin { transition: opacity .12s ease, color .12s ease, transform .22s cubic-bezier(.34,1.56,.64,1); }
+        .ur-row:hover .ur-row-pin { transform: scale(1.12); }
+
+        .ur-row-chevron { display:flex; align-items:center; justify-content:center; color:#949ba4; flex-shrink:0; opacity:.55; transition: transform .28s cubic-bezier(.4,0,.2,1), opacity .18s ease, color .18s ease; }
+        .ur-row:hover .ur-row-chevron { opacity:1; transform: scale(1.15); }
+        .ur-row-chevron.open { transform: rotate(180deg); opacity:1; color:#949cf4; }
+        .ur-row:hover .ur-row-chevron.open { transform: rotate(180deg) scale(1.15); }
+
+        .ur-badge-in { animation: ur-badge-in .25s cubic-bezier(.34,1.56,.64,1) both; transition: transform .18s cubic-bezier(.2,.8,.2,1.3); }
+        .ur-row:hover .ur-badge-in { transform: scale(1.07); }
+
+        .ur-activity-btn { transition: transform .22s cubic-bezier(.34,1.56,.64,1), background .18s ease, border-color .18s ease, box-shadow .22s ease; backdrop-filter: blur(8px) saturate(160%); -webkit-backdrop-filter: blur(8px) saturate(160%); }
+        .ur-activity-btn:hover { transform: translateY(-2px) scale(1.06); background: rgba(88,101,242,0.18) !important; border-color: rgba(88,101,242,0.5) !important; box-shadow: 0 6px 16px rgba(88,101,242,0.28); }
+        .ur-activity-btn:active { transform: translateY(0) scale(.95); }
+
+        @keyframes ur-pin-pop { 0% { transform:scale(.6) rotate(-20deg); } 60% { transform:scale(1.25) rotate(6deg); } 100% { transform:scale(1) rotate(0); } }
+        .ur-pin-pop { animation: ur-pin-pop .38s cubic-bezier(.34,1.56,.64,1) both; }
 
         .ur-chip { transition: transform .12s cubic-bezier(.2,.8,.2,1), background .18s ease, color .18s ease; }
         .ur-chip:active { transform: scale(.94); }
 
-        @keyframes ur-badge-in { from { opacity:0; transform:scale(.4); } to { opacity:1; transform:scale(1); } }
-        .ur-badge-in { animation: ur-badge-in .3s cubic-bezier(.34,1.56,.64,1) both; }
+        @keyframes ur-badge-in { from { opacity:0; transform:scale(.5); } to { opacity:1; transform:scale(1); } }
+        .ur-badge-in { animation: ur-badge-in .25s cubic-bezier(.34,1.56,.64,1) both; }
 
-        .ur-icon-btn { transition: transform .15s cubic-bezier(.2,.8,.2,1.3), background .15s ease, color .15s ease; }
-        .ur-icon-btn:hover { transform: translateY(-1px) scale(1.1); }
+        .ur-icon-btn { transition: transform .14s cubic-bezier(.2,.8,.2,1.3), background .14s ease, color .14s ease; }
+        .ur-icon-btn:hover { transform: translateY(-1px) scale(1.08); }
         .ur-icon-btn:active { transform: scale(.9); }
 
-        @keyframes ur-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
-        .ur-float { animation: ur-float 4s ease-in-out infinite; }
+        @keyframes ur-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+        .ur-float { animation: ur-float 3s ease-in-out infinite; }
 
-        /* 3-in-1 Animated Segmented Control */
-        .ur-segmented {
-            display: flex;
-            position: relative;
-            background: rgba(0,0,0,0.35);
-            border-radius: 20px;
-            padding: 4px;
-            border: 1px solid var(--background-modifier-accent);
-        }
-        .ur-segmented-pill {
-            position: absolute;
-            top: 4px;
-            bottom: 4px;
-            border-radius: 16px;
-            background: linear-gradient(135deg, #5865f2 0%, #7b61ff 100%);
-            box-shadow: 0 4px 16px rgba(88,101,242,0.35), inset 0 1px 0 rgba(255,255,255,0.15);
-            transition: transform 350ms cubic-bezier(0.4, 0, 0.2, 1), width 350ms cubic-bezier(0.4, 0, 0.2, 1);
-            pointer-events: none;
-            z-index: 1;
-        }
-        .ur-segmented-btn {
-            flex: 1;
-            position: relative;
-            z-index: 2;
-            padding: 10px 8px;
-            border-radius: 16px;
-            cursor: pointer;
-            text-align: center;
-            font-size: 13px;
-            font-weight: 700;
-            color: var(--header-secondary);
-            transition: color 250ms ease;
-            user-select: none;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-        }
-        .ur-segmented-btn:hover { color: var(--text-normal); }
-        .ur-segmented-btn.active { color: #ffffff; }
+        /* Discord-style thin scrollbar - only visible on hover */
+        .ur-scrollbar::-webkit-scrollbar { width:4px; height:4px; }
+        .ur-scrollbar::-webkit-scrollbar-track { background:transparent; }
+        .ur-scrollbar::-webkit-scrollbar-thumb { background:transparent; border-radius:4px; }
+        .ur-scrollbar:hover::-webkit-scrollbar-thumb { background:#3f4147; }
+        .ur-scrollbar::-webkit-scrollbar-thumb:hover { background:#4a4a6e; }
 
-        /* Modern scrollbar */
-        .ur-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
-        .ur-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .ur-scrollbar::-webkit-scrollbar-thumb { background: transparent; border-radius: 12px; }
-        .ur-scrollbar:hover::-webkit-scrollbar-thumb { background: var(--background-tertiary, #2b2d31); }
-        .ur-scrollbar::-webkit-scrollbar-thumb:hover { background: #3f4147; }
+        /* Firefox scrollbar */
         .ur-scrollbar { scrollbar-width: thin; scrollbar-color: transparent transparent; }
-        .ur-scrollbar:hover { scrollbar-color: #2b2d31 transparent; }
+        .ur-scrollbar:hover { scrollbar-color: #3f4147 transparent; }
 
         .ur-typing-dot { animation: ur-typing 1.4s infinite ease-in-out both; }
         .ur-typing-dot:nth-child(1) { animation-delay: -0.32s; }
@@ -676,292 +635,81 @@ function injectStyles() {
         @keyframes ur-typing { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
         @keyframes ur-shake { 0%, 100% { transform: translateX(0); } 10%, 30%, 50%, 70%, 90% { transform: translateX(-4px); } 20%, 40%, 60%, 80% { transform: translateX(4px); } }
         .ur-shake { animation: ur-shake 0.5s cubic-bezier(.36,.07,.19,.97) both; }
-
-        /* Pulse glow fix */
-        @keyframes ur-pulse { 0% { box-shadow: 0 0 0 0 #5865f2; } 70% { box-shadow: 0 0 0 10px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
-        .ur-pulse { animation: ur-pulse 2.2s infinite; margin: 4px; }
-        .ur-pulse-container { overflow: visible !important; }
-
-        @keyframes ur-flash-green { 0% { background: #23a55a; } 100% { background: #5865f2; } }
+        @keyframes ur-pulse { 0% { box-shadow: 0 0 0 0 #5865f2; } 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+        .ur-pulse { animation: ur-pulse 2s infinite; }
+        @keyframes ur-flash-green { 0% { background: #248046; } 100% { background: #5865f2; } }
         .ur-flash-green { animation: ur-flash-green 0.5s ease; }
-        @keyframes ur-blink-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(0.8); } }
-        .ur-blink-dot { animation: ur-blink-dot 1.6s ease-in-out infinite; }
+        @keyframes ur-blink-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.25; transform: scale(0.7); } }
+        .ur-blink-dot { animation: ur-blink-dot 1.4s ease-in-out infinite; }
 
-        /* Modern surface cards */
-        .ur-surface {
-            background: var(--background-secondary, #1a1b1e) !important;
-            border: 1px solid var(--background-modifier-accent);
-            box-shadow: 0 2px 12px rgba(0,0,0,0.2);
-            border-radius: 24px;
-            transition: all 200ms cubic-bezier(.2,.8,.2,1);
-        }
-        .ur-surface-hover:hover {
-            background: var(--background-secondary-alt, #1e1f23) !important;
-            border-color: rgba(255,255,255,0.1);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-            transform: translateY(-2px);
-        }
-
-        .ur-compact [data-ur-card-body] { padding: 8px 12px !important; gap: 10px !important; margin-bottom: 4px !important; min-height: 0 !important; border-radius: 16px !important; }
-        .ur-compact [data-ur-card-icon] { width: 24px !important; height: 24px !important; border-radius: 12px !important; font-size: 12px !important; margin-top: 0 !important; }
+        .ur-compact [data-ur-card-body] { padding: 6px 10px !important; gap: 8px !important; margin-bottom: 3px !important; min-height: 0 !important; border-radius: 10px !important; }
+        .ur-compact [data-ur-card-icon] { width: 22px !important; height: 22px !important; border-radius: 6px !important; font-size: 12px !important; margin-top: 0 !important; }
         .ur-compact [data-ur-card-icon] img { width: 14px !important; height: 14px !important; }
         .ur-compact [data-ur-card-title] { font-size: 12px !important; margin-bottom: 0 !important; gap: 5px !important; }
         .ur-compact [data-ur-card-body-text="meta"] { display: none !important; }
         .ur-compact [data-ur-card-body-text="content"] { font-size: 11px !important; margin-top: 0 !important; -webkit-line-clamp: 1; display: -webkit-box !important; -webkit-box-orient: vertical; overflow: hidden; }
         .ur-compact [data-ur-card-location] { display: none !important; }
-        .ur-compact [data-ur-card-live] { padding: 2px 6px !important; font-size: 9px !important; margin-bottom: 0 !important; }
-        .ur-compact { gap: 6px !important; }
-        .ur-compact [data-ur-day-header] { margin-bottom: 4px !important; }
+        .ur-compact [data-ur-card-live] { padding: 1px 5px !important; font-size: 8px !important; margin-bottom: 0 !important; }
+        .ur-compact { gap: 4px !important; }
+        .ur-compact [data-ur-day-header] { margin-bottom: 3px !important; }
 
+        /* Activity log modal specific - prevent horizontal scroll */
         .ur-activity-modal { overflow-x: hidden !important; }
         .ur-activity-modal * { max-width: 100%; box-sizing: border-box; }
 
-        .ur-avatar-wrap { position: relative; display: inline-block; flex-shrink: 0; }
-        .ur-presence-badge {
-            position: absolute;
-            bottom: -2px;
-            right: -2px;
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            background: var(--background-primary, #111214);
-            padding: 2px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.5);
-            z-index: 5;
-        }
+        /* glassmorphism helpers */
+        .ur-glass { backdrop-filter: blur(14px) saturate(160%); -webkit-backdrop-filter: blur(14px) saturate(160%); }
+        .ur-badge-glass { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 
-        /* Activity log modern cards */
-        .ur-log-card {
-            background: var(--background-secondary, #1a1b1e);
-            border: 1px solid var(--background-modifier-accent);
-            border-radius: 20px;
-            transition: all 200ms cubic-bezier(.2,.8,.2,1);
-            overflow: hidden;
-        }
-        .ur-log-card:hover {
-            background: var(--background-secondary-alt, #1e1f23);
-            border-color: rgba(255,255,255,0.08);
-            transform: translateY(-2px);
-            box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-        }
+        .ur-tab-btn { transition: transform 160ms cubic-bezier(.34,1.56,.64,1), background 200ms ease, color 200ms ease, box-shadow 200ms ease; }
+        .ur-tab-btn:hover { transform: translateY(-1px) scale(1.03); }
+        .ur-tab-btn:active { transform: scale(.95); }
 
-        /* Modern diff card */
-        .ur-diff-card {
-            border-radius: 20px;
-            overflow: hidden;
-            border: 1px solid var(--background-modifier-accent);
-            background: var(--background-secondary-alt, #16171a);
-        }
+        .ur-preset-card { transition: transform 200ms cubic-bezier(.34,1.56,.64,1), background 220ms ease, border-color 220ms ease, box-shadow 220ms ease; }
+        .ur-preset-card:hover { transform: translateY(-2px) scale(1.015); }
+        .ur-preset-card:active { transform: translateY(0) scale(.985); }
 
-        /* Spotify card modern */
-        /* === NEW ACTIVITY LOG TIMELINE DESIGN === */
-        .ur-timeline-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            flex-shrink: 0;
-            position: relative;
-            z-index: 2;
-            transition: transform 200ms cubic-bezier(.2,.8,.2,1);
-        }
-        .ur-log-card:hover .ur-timeline-dot {
-            transform: scale(1.3);
-        }
-        .ur-log-card {
-            background: var(--background-secondary, #1a1b1e);
-            border: 1px solid var(--background-modifier-accent);
-            border-radius: 20px;
-            transition: all 200ms cubic-bezier(.2,.8,.2,1);
-            overflow: hidden;
-            position: relative;
-        }
-        .ur-log-card:hover {
-            background: var(--background-secondary-alt, #1e1f23);
-            border-color: rgba(255,255,255,0.08);
-            transform: translateY(-2px);
-            box-shadow: 0 12px 32px rgba(0,0,0,0.3);
-        }
-        .ur-log-card:hover [data-ur-delete-btn] {
-            opacity: 0.5 !important;
-        }
-        .ur-log-card [data-ur-delete-btn]:hover {
-            opacity: 1 !important;
-            background: rgba(218,55,60,0.15) !important;
-            color: #f23f43 !important;
-        }
-        .ur-day-header {
-            position: sticky;
-            top: 0;
-            z-index: 10;
-            background: var(--background-primary, #111214);
-            padding: 8px 0;
-            margin-bottom: 8px;
-        }
-        .ur-day-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 14px;
-            background: var(--background-secondary, #1a1b1e);
-            border: 1px solid var(--background-modifier-accent);
-            border-radius: 24px;
-            font-size: 11px;
-            font-weight: 800;
-            text-transform: uppercase;
-            letter-spacing: 0.6px;
-            color: var(--header-secondary);
-            box-shadow: 0 2px 12px rgba(0,0,0,0.2);
-        }
-        .ur-accent-bar {
-            position: absolute;
-            left: 0;
-            top: 18px;
-            bottom: 18px;
-            width: 3px;
-            border-radius: 3px;
-            opacity: 0;
-            transition: opacity 200ms ease;
-        }
-        .ur-log-card:hover .ur-accent-bar {
-            opacity: 0.5;
-        }
-        .ur-expand-content {
-            animation: ur-fade-in 0.35s cubic-bezier(.16,1,.3,1) forwards;
-        }
-        .ur-diff-block {
-            border-radius: 16px;
-            overflow: hidden;
-            border: 1px solid var(--background-modifier-accent);
-            background: var(--background-secondary-alt, #16171a);
-        }
-        .ur-diff-before {
-            background: rgba(218,55,60,0.06);
-            border-bottom: 1px solid rgba(255,255,255,0.04);
-        }
-        .ur-diff-after {
-            background: rgba(35,165,90,0.06);
-        }
-        .ur-session-node {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            position: relative;
-        }
-        .ur-session-node::before {
-            content: "";
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: currentColor;
-            flex-shrink: 0;
-            box-shadow: 0 0 0 4px rgba(0,0,0,0.5);
-        }
-        .ur-session-node::after {
-            content: "";
-            position: absolute;
-            left: 3px;
-            top: 16px;
-            width: 2px;
-            height: calc(100% - 8px);
-            background: rgba(255,255,255,0.06);
-            border-radius: 1px;
-        }
-        .ur-session-node:last-child::after {
-            display: none;
-        }
-        .ur-spotify-card {
-            border-radius: 20px;
-            overflow: hidden;
-            background: var(--background-secondary-alt);
-            border: 1px solid var(--background-modifier-accent);
-            transition: all 300ms ease;
-        }
+        @keyframes ur-modal-in { from { opacity:0; transform:scale(.97) translateY(8px); } to { opacity:1; transform:scale(1) translateY(0); } }
+        .ur-modal-in { animation: ur-modal-in .28s cubic-bezier(.2,.9,.3,1.1) both; }
 
-        /* ═══════════════════════════════════════════════
-           THEME SUPPORT: Light / Dark / Midnight / Onyx
-           ═══════════════════════════════════════════════ */
+        @keyframes ur-status-pop { from { opacity:0; transform:scale(.4); } to { opacity:1; transform:scale(1); } }
+        .ur-status-dot { animation: ur-status-pop .3s cubic-bezier(.34,1.56,.64,1) both; transition: background 200ms ease, box-shadow 200ms ease; }
 
-        .theme-light .ur-row {
-            background: var(--background-secondary) !important;
-            border-color: var(--background-modifier-accent) !important;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.06) !important;
-        }
-        .theme-light .ur-row:hover {
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1) !important;
-        }
-        .theme-light .ur-log-card {
-            background: var(--background-secondary) !important;
-            border-color: var(--background-modifier-accent) !important;
-        }
-        .theme-light .ur-log-card:hover {
-            background: var(--background-secondary-alt) !important;
-        }
-        .theme-light .ur-surface,
-        .theme-light .ur-day-header {
-            background: var(--background-primary) !important;
-        }
-        .theme-light .ur-day-pill {
-            background: var(--background-secondary) !important;
-            border-color: var(--background-modifier-accent) !important;
-        }
-        .theme-light .ur-diff-card {
-            background: var(--background-secondary-alt) !important;
-        }
+        .ur-card-hover { transition: transform 180ms cubic-bezier(.2,.8,.2,1), box-shadow 180ms ease, border-color 180ms ease, background 180ms ease; }
+        .ur-card-hover:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,0.3); }
 
-        .theme-midnight .ur-row,
-        .theme-midnight .ur-log-card {
-            border-color: rgba(255,255,255,0.04) !important;
-        }
+        @keyframes ur-log-in { from { opacity:0; transform:translateY(6px) scale(.98); } to { opacity:1; transform:translateY(0) scale(1); } }
+        .ur-log-card { animation: ur-log-in .26s cubic-bezier(.2,.9,.3,1.15) both; transition: transform .2s cubic-bezier(.2,.8,.2,1.1), box-shadow .2s ease, background .2s ease, border-color .18s ease; }
+        .ur-log-card:hover { transform: translateY(-3px) scale(1.008); box-shadow: 0 14px 30px rgba(0,0,0,0.38); border-color: #3f4147; background: linear-gradient(135deg, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.1) 100%) !important; }
+        .ur-log-card:active { transform: translateY(-1px) scale(.995); }
+        .ur-log-card.open { box-shadow: 0 8px 22px rgba(0,0,0,0.3); }
 
-        .theme-onyx .ur-row,
-        .theme-onyx .ur-log-card {
-            border-color: rgba(255,255,255,0.05) !important;
-        }
+        .ur-log-icon { transition: transform .22s cubic-bezier(.2,.8,.2,1.4), box-shadow .22s ease; }
+        .ur-log-card:hover .ur-log-icon { transform: scale(1.08) rotate(-4deg); }
 
-        /* ═══════════════════════════════════════════════
-           DISCORD MODAL OVERRIDE
-           Forces our theme colors inside Discord's modal
-           ═══════════════════════════════════════════════ */
+        .ur-log-chevron { display:flex; align-items:center; justify-content:center; color:#949ba4; flex-shrink:0; opacity:.55; transition: transform .28s cubic-bezier(.4,0,.2,1), opacity .18s ease, color .18s ease; }
+        .ur-log-card:hover .ur-log-chevron { opacity:1; }
+        .ur-log-chevron.open { transform: rotate(180deg); opacity:1; color:#949cf4; }
 
-        /* Modal content area - remove Discord's forced bg */
-        [class*="modal"] [class*="content"] {
-            background: transparent !important;
-        }
+        .ur-log-expand-in { animation: ur-fade-in .22s cubic-bezier(.4,0,.2,1) both; }
 
-        /* Modal header - transparent so our header shows */
-        [class*="modal"] [class*="header"] {
-            background: transparent !important;
-        }
-
-        /* Modal footer - transparent */
-        [class*="modal"] [class*="footer"] {
-            background: transparent !important;
-        }
-
-        /* The actual modal root - ensure it uses theme bg */
-        [class*="modal"] [class*="root"] {
-            background: var(--background-primary) !important;
-        }
-
-        /* Remove Discord's default modal padding that creates gaps */
-        [class*="modal"] [class*="content"] > div {
-            background: transparent !important;
-        }
-
-        /* Ensure our scrollbar works inside modal */
-        [class*="modal"] .ur-scrollbar::-webkit-scrollbar {
-            width: 8px;
-        }
-        [class*="modal"] .ur-scrollbar::-webkit-scrollbar-track {
-            background: transparent;
-        }
-
-        `
+        .ur-footer-btn { transition: transform .2s cubic-bezier(.34,1.56,.64,1), background .18s ease, border-color .18s ease, box-shadow .2s ease, color .18s ease; backdrop-filter: blur(10px) saturate(160%); -webkit-backdrop-filter: blur(10px) saturate(160%); }
+        .ur-footer-btn:hover { transform: translateY(-2px) scale(1.04); background: rgba(255,255,255,0.09) !important; border-color: #3f4147 !important; box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
+        .ur-footer-btn:active { transform: translateY(0) scale(.94); }
+        .ur-footer-btn-danger:hover { background: rgba(218,55,60,0.2) !important; border-color: #da373c !important; box-shadow: 0 6px 16px rgba(218,55,60,0.3); }
+        .ur-footer-btn-primary:hover { background: #5865f2 !important; border-color: #5865f2 !important; color: #fff !important; box-shadow: 0 6px 18px rgba(88,101,242,0.4); }
+    `
     document.head.appendChild(s)
 }
+
+const CLIENT_EMOJI: Record<string, string> = {
+    desktop:  "💻",
+    mobile:   "📱",
+    web:      "🌐",
+    embedded: "🎮",
+    vr:       "🥽",
+}
+
 function resolveClient(cs?: Record<string, string> | null): string | null {
     if (!cs) return null
     // priority order for the "primary" platform
@@ -981,7 +729,6 @@ function resolveAllClients(cs?: Record<string, string> | null): string[] {
 }
 
 const CLIENT_LABEL_MAP: Record<string, string> = { desktop: "Desktop", mobile: "Mobile", web: "Web", embedded: "Console", vr: "VR" }
-const CLIENT_EMOJI: Record<string, string> = { desktop: "🖥️", mobile: "📱", web: "🌐", embedded: "🎮", vr: "🥽" }
 function platformSuffixLog(uid: string): string {
     const c = clientCache[uid]
     if (!c) return ""
@@ -989,31 +736,24 @@ function platformSuffixLog(uid: string): string {
 }
 
 const C = {
-    bg1:         "var(--background-primary)",
-    bg2:         "var(--background-secondary)",
-    bg3:         "var(--background-secondary-alt)",
-    bgEl:        "var(--background-tertiary)",
-    border:      "var(--background-modifier-accent)",
-    borderHover: "var(--background-modifier-selected)",
-    hov:         "var(--background-modifier-hover)",
-    header:      "var(--header-primary)",
-    subheader:   "var(--header-secondary)",
-    text:        "var(--text-normal)",
-    muted:       "var(--text-muted)",
-    danger:      "var(--text-danger)",
-    brand:       "var(--brand-500)",
-    brandLight:  "var(--brand-400)",
-    brandGrad:   "linear-gradient(135deg, var(--brand-500) 0%, #7b61ff 100%)",
-    green:       "var(--green-360)",
-    red:         "var(--red-400)",
-    white:       "var(--white)",
-    expanded:    "var(--background-secondary)",  // same as cards for flat look
-    surface:     "var(--background-modifier-accent)",
-    surfaceHover:"var(--background-modifier-hover)",
-    glassBorder: "var(--background-modifier-accent)",
-    glassBorderHov:"var(--brand-500)",
-    glassShadow: "0 4px 20px rgba(0,0,0,0.25)",
-    glassShadowHov: "0 8px 30px rgba(88,101,242,0.12)",
+    bg1:         "#1e1f22",
+    bg2:         "#2b2d31",
+    bg3:         "#313338",
+    bgEl:        "#3f4147",
+    border:      "#3f4147",
+    hov:         "rgba(255,255,255,0.06)",
+    header:      "#f2f3f5",
+    subheader:   "#b5bac1",
+    text:        "#dbdee1",
+    muted:       "#949ba4",
+    danger:      "#fa777c",
+    brand:       "#5865f2",
+    brandLight:  "#949cf4",
+    brandGrad:   "linear-gradient(135deg, #5865f2 0%, #949cf4 100%)",
+    green:       "#248046",
+    red:         "#da373c",
+    white:       "#ffffff",
+    expanded:    "#232428",
 } as const
 
 const ico = {
@@ -1061,57 +801,29 @@ const ico = {
 
 }
 
-/* ── Presence Indicator (SVG badge, separate container) ── */
-function PresenceIndicator({ status, size = 16 }: { status?: string; size?: number }) {
-    const s = status || "offline"
-    const colorMap: Record<string, string> = {
-        online: C.green,
-        idle: "var(--yellow-300)",
-        dnd: "#da373c",
-        offline: "#80848e",
-        invisible: "#80848e",
-    }
-    const c = colorMap[s] || colorMap.offline
-
-    return (
-        <div className="ur-presence-badge" style={{ width: size + 4, height: size + 4 }}>
-            <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
-                <circle cx="8" cy="8" r="7" fill={c} stroke="var(--background-secondary-alt)" strokeWidth="2" />
-                {s === "idle" && (
-                    <circle cx="8" cy="8" r="3" fill="var(--background-secondary-alt)" />
-                )}
-                {s === "dnd" && (
-                    <rect x="4" y="7" width="8" height="2" rx="1" fill="var(--background-secondary-alt)" />
-                )}
-            </svg>
-        </div>
-    )
-}
-
-
 // per-event icon + color for activity log cards
 const actIco = {
     message:   { color: "#5865f2", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2 22V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6l-4 4z"/></svg> },
-    edit:      { color: "var(--yellow-300)", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> },
+    edit:      { color: "#f0b232", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> },
     delete:    { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg> },
-    typing:    { color: C.brandLight, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="4" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="20" cy="12" r="2.2"/></svg> },
+    typing:    { color: "#949cf4", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="4" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="20" cy="12" r="2.2"/></svg> },
 
     listening: { color: "#c586f5", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M9 18a3 3 0 1 1-3-3h1V5.5a1 1 0 0 1 .8-.98l9-2a1 1 0 0 1 1.2.98v9a3 3 0 1 1-2-2.83V6.7l-7 1.56V15a3 3 0 0 1-3 3v0z"/></svg> },
     watching:  { color: "#9146ff", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="15" rx="2"/><path d="M8 21h8M12 19v2"/></svg> },
-    playing:   { color: "var(--yellow-300)", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 9h4v2H8v2H6v-2H4V9h2V7h2v2zm9.5 3a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM17 3H7a5 5 0 0 0-5 5v6a5 5 0 0 0 5 5h.5a3 3 0 0 0 2.4-1.2l1.4-1.87a2 2 0 0 1 3.4 0l1.4 1.87A3 3 0 0 0 16.5 19H17a5 5 0 0 0 5-5V8a5 5 0 0 0-5-5z"/></svg> },
+    playing:   { color: "#f0b232", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 9h4v2H8v2H6v-2H4V9h2V7h2v2zm9.5 3a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM17 3H7a5 5 0 0 0-5 5v6a5 5 0 0 0 5 5h.5a3 3 0 0 0 2.4-1.2l1.4-1.87a2 2 0 0 1 3.4 0l1.4 1.87A3 3 0 0 0 16.5 19H17a5 5 0 0 0 5-5V8a5 5 0 0 0-5-5z"/></svg> },
     streaming: { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><circle cx="12" cy="10" r="1.5" fill="currentColor" stroke="none"/></svg> },
-    camera:    { color: C.green, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg> },
+    camera:    { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg> },
     screen:    { color: "#ff5e5e", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><polyline points="8 12 11 9 13 11 16 8"/></svg> },
 
-    voice:     { color: C.green, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg> },
-    vcMove:    { color: C.text, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg> },
+    voice:     { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg> },
+    vcMove:    { color: "#dbdee1", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg> },
 
-    online:    { color: C.green, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/></svg> },
-    idle:      { color: "var(--yellow-300)", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36A5.389 5.389 0 0 1 17.5 12c-3.03 0-5.5-2.47-5.5-5.5 0-1.33.47-2.55 1.26-3.5A9.04 9.04 0 0 0 12 3z"/></svg> },
-    dnd:       { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/><rect x="7.5" y="10.8" width="9" height="2.4" rx="1.2" fill="var(--background-secondary-alt)"/></svg> },
+    online:    { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/></svg> },
+    idle:      { color: "#f0b232", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36A5.389 5.389 0 0 1 17.5 12c-3.03 0-5.5-2.47-5.5-5.5 0-1.33.47-2.55 1.26-3.5A9.04 9.04 0 0 0 12 3z"/></svg> },
+    dnd:       { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/><rect x="7.5" y="10.8" width="9" height="2.4" rx="1.2" fill="#1e1f22"/></svg> },
     offline:   { color: "#80848e", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/></svg> },
-    status:    { color: C.green, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.35"/><circle cx="12" cy="12" r="4.5" fill="currentColor"/></svg> },
-    customStatus: { color: C.brandLight, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1" fill="currentColor" stroke="none"/></svg> },
+    status:    { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.35"/><circle cx="12" cy="12" r="4.5" fill="currentColor"/></svg> },
+    customStatus: { color: "#949cf4", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1" fill="currentColor" stroke="none"/></svg> },
 
     profile:   { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> },
     avatar:    { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="12" cy="10" r="3"/><path d="M7 21c0-2.76 2.24-5 5-5s5 2.24 5 5"/></svg> },
@@ -1120,10 +832,10 @@ const actIco = {
     username:  { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2.5 12.5V2.5h10z"/><circle cx="6.5" cy="6.5" r="1.5" fill="currentColor" stroke="none"/></svg> },
     pronouns:  { color: "#ff6b6b", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="14" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/></svg> },
 
-    join:      { color: C.green, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg> },
+    join:      { color: "#23a55a", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg> },
     leave:     { color: "#da373c", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="17" y1="8" x2="23" y2="14"/><line x1="23" y1="8" x2="17" y2="14"/></svg> },
 
-    session:   { color: C.subheader, Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
+    session:   { color: "#949ba4", Icon: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
 } as const
 
 const CtxEyeIcon = () => (
@@ -1151,8 +863,8 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
             role="switch" aria-checked={on}
             onClick={() => onChange(!on)}
             style={{
-                width: 36, height: 22, borderRadius: 12, flexShrink: 0,
-                background: on ? C.brand : C.bgEl,
+                width: 36, height: 22, borderRadius: 11, flexShrink: 0,
+                background: on ? "#5865f2" : "#3f4147",
                 cursor: "pointer", position: "relative",
                 transition: "background 150ms ease",
             }}
@@ -1242,11 +954,11 @@ function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
     }, [rawId, lk.s])
 
     const btnStyle: React.CSSProperties = {
-        borderRadius: 24,
+        borderRadius: 20,
         height: 40,
         boxSizing: "border-box",
         padding: "0 20px",
-        color: C.white,
+        color: "#ffffff",
         border: "none",
         fontSize: 14,
         fontWeight: 600,
@@ -1260,7 +972,7 @@ function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
     }
 
     const getBtnBg = () => {
-        if (btnState === "found") return C.green
+        if (btnState === "found") return "#248046"
         if (btnState === "notfound") return "#da373c"
         if (btnState === "searching") return "#4752c4"
         if (btnState === "valid") return "#5865f2"
@@ -1286,8 +998,8 @@ function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
                     onBlur={() => setFocused(false)}
                     autoFocus
                     style={{
-                        background: C.bg3,
-                        borderRadius: 24,
+                        background: "#1e1f22",
+                        borderRadius: 20,
                         border: `1px solid ${borderColor}`,
                         height: 40,
                         boxSizing: "border-box",
@@ -1295,7 +1007,7 @@ function AddUserInput({ rawId, setRawId, hasErr, lk, setLk, doLookup }: {
                         transition: "border-color 150ms ease, box-shadow 150ms ease",
                         width: "100%",
                         fontSize: 14,
-                        color: C.text,
+                        color: "#dbdee1",
                         outline: "none",
                         fontFamily: "inherit",
                         boxShadow: focused ? "inset 0 0 0 1px #5865f2" : "none",
@@ -1335,9 +1047,9 @@ function AddLabelInput({ label, setLabel, doAdd }: {
             onBlur={() => setFocused(false)}
             autoFocus
             style={{
-                background: C.bg3,
-                borderRadius: 24,
-                border: `1px solid ${focused ? C.brand : C.bgEl}`,
+                background: "#1e1f22",
+                borderRadius: 20,
+                border: `1px solid ${focused ? C.brand : "#3f4147"}`,
                 boxShadow: focused ? "0 0 0 3px rgba(88,101,242,0.18)" : "none",
                 height: 40,
                 boxSizing: "border-box",
@@ -1345,7 +1057,7 @@ function AddLabelInput({ label, setLabel, doAdd }: {
                 transition: "border-color 150ms ease, box-shadow 150ms ease",
                 width: "100%",
                 fontSize: 14,
-                color: C.text,
+                color: "#dbdee1",
                 outline: "none",
                 fontFamily: "inherit",
                 marginBottom: 14,
@@ -1401,7 +1113,7 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
 
     return (
         <div className="ur-fade-in">
-            <div style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.text, marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 12 }}>
                 add user
             </div>
 
@@ -1419,12 +1131,11 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
             {lk.s === "done" && (
                 <div className="ur-fade-in">
                     <div style={{
-                        background: C.bg2,
-                        borderRadius: 24,
-                        border: `1px solid ${C.glassBorder}`,
+                        background: C.bg1,
+                        borderRadius: 16,
+                        border: `1px solid ${C.border}`,
                         marginBottom: 14,
                         overflow: "hidden",
-                        boxShadow: "0 2px 12px rgba(0,0,0,0.2)",
                     }}>
                         <div style={{ padding: "12px 16px" }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
@@ -1476,10 +1187,10 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                         fontSize: 12,
                                         color: C.text,
                                         lineHeight: 1.5,
-                                        padding: "10px 12px",
-                                        background: C.expanded,
-                                        borderRadius: 12,
-                                        border: `1px solid ${C.glassBorder}`,
+                                        padding: "8px 10px",
+                                        background: C.bg2,
+                                        borderRadius: 8,
+                                        border: `1px solid ${C.border}`,
                                         whiteSpace: "pre-wrap",
                                         wordBreak: "break-word",
                                     }}>
@@ -1507,12 +1218,12 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                             style={{
                                                 padding: "8px 10px",
                                                 background: C.bg2,
-                                                borderRadius: 12,
-                                                border: `1px solid ${C.glassBorder}`,
+                                                borderRadius: 8,
+                                                border: `1px solid ${C.border}`,
                                                 cursor: "pointer",
-                                                transition: "all 200ms ease",
+                                                transition: "border-color 150ms ease, background 150ms ease",
                                             }}
-                                            onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = C.bg3 }}
+                                            onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = "#232428" }}
                                             onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg2 }}
                                             title="Click to copy ID"
                                         >
@@ -1525,7 +1236,7 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                             </div>
                                         </div>
 
-                                        <div style={{ padding: "8px 10px", background: C.bg2, borderRadius: 12, border: `1px solid ${C.glassBorder}`, /* modern clean */ }}>
+                                        <div style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}>
                                             <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Created</div>
                                             <div style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>
                                                 {sf.date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
@@ -1535,7 +1246,7 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                             </div>
                                         </div>
 
-                                        <div style={{ padding: "8px 10px", background: C.bg2, borderRadius: 12, border: `1px solid ${C.glassBorder}`, /* modern clean */ }}>
+                                        <div style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}>
                                             <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Account Age</div>
                                             <div style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>
                                                 {(() => {
@@ -1552,7 +1263,7 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
 
                                         <div
                                             title={`Worker ${sf.workerId} · Process ${sf.processId} · Increment ${sf.increment}`}
-                                            style={{ padding: "8px 10px", background: C.bg2, borderRadius: 12, border: `1px solid ${C.border}` }}
+                                            style={{ padding: "8px 10px", background: C.bg2, borderRadius: 8, border: `1px solid ${C.border}` }}
                                         >
                                             <div style={{ fontSize: 10, color: C.muted, marginBottom: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Snowflake</div>
                                             <div style={{ fontSize: 11, fontFamily: "monospace", color: C.brandLight, fontWeight: 600 }}>
@@ -1579,12 +1290,12 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                             onClick={doAdd}
                             style={{
                                 flex: 1,
-                                borderRadius: 24,
+                                borderRadius: 20,
                                 height: 40,
                                 boxSizing: "border-box",
                                 padding: "0 20px",
                                 background: C.green,
-                                color: C.white,
+                                color: "#ffffff",
                                 border: "none",
                                 fontSize: 14,
                                 fontWeight: 600,
@@ -1592,7 +1303,7 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                                 fontFamily: "inherit",
                                 transition: "background 150ms ease",
                             }}
-                            onMouseEnter={e => { e.currentTarget.style.background = C.green }}
+                            onMouseEnter={e => { e.currentTarget.style.background = "#2d9c5a" }}
                             onMouseLeave={e => { e.currentTarget.style.background = C.green }}
                         >
                             add to watchlist
@@ -1600,7 +1311,7 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
                         <button
                             onClick={() => { setLk({ s: "idle" }); setLabel("") }}
                             style={{
-                                borderRadius: 24,
+                                borderRadius: 20,
                                 height: 40,
                                 boxSizing: "border-box",
                                 padding: "0 18px",
@@ -1652,6 +1363,11 @@ const OV_GROUPS = {
 
 type OvTab = "messages" | "presence" | "profile"
 const OV_TAB_LABELS: Record<OvTab, string> = { messages: "Messages", presence: "Presence", profile: "Profile" }
+const OV_TAB_ICONS: Record<OvTab, () => JSX.Element> = {
+    messages: () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M2 22V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6l-4 4z"/></svg>,
+    presence: () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" opacity=".25"/><circle cx="12" cy="12" r="5"/></svg>,
+    profile:  () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
+}
 
 function LabelInput({ nick, setNick, saveNick }: { nick: string; setNick: (v: string) => void; saveNick: () => void }) {
     const [focused, setFocused] = React.useState(false)
@@ -1666,7 +1382,7 @@ function LabelInput({ nick, setNick, saveNick }: { nick: string; setNick: (v: st
             onKeyDown={(e) => { if (e.key === "Enter") { setFocused(false); saveNick() } }}
             style={{
                 background: C.bg1,
-                borderRadius: 24,
+                borderRadius: 20,
                 border: `1px solid ${focused ? C.brand : C.border}`,
                 boxShadow: focused ? "0 0 0 3px rgba(88,101,242,0.18)" : "none",
                 height: 26,
@@ -1697,16 +1413,16 @@ function SearchInput({ query, setQuery }: { query: string; setQuery: (v: string)
                 onBlur={() => setFocused(false)}
                 onFocus={() => setFocused(true)}
                 style={{
-                    background: C.bg3,
-                    borderRadius: 24,
-                    border: `1px solid ${focused ? C.brand : C.bgEl}`,
+                    background: "#1e1f22",
+                    borderRadius: 20,
+                    border: `1px solid ${focused ? C.brand : "#3f4147"}`,
                     boxShadow: focused ? "0 0 0 3px rgba(88,101,242,0.18)" : "none",
                     height: 28,
                     boxSizing: "border-box",
                     padding: "0 28px 0 12px",
                     width: "100%",
                     fontSize: 13,
-                    color: C.text,
+                    color: "#dbdee1",
                     outline: "none",
                     fontFamily: "inherit",
                     transition: "border-color 150ms ease, box-shadow 150ms ease",
@@ -1717,7 +1433,7 @@ function SearchInput({ query, setQuery }: { query: string; setQuery: (v: string)
                 right: 8,
                 top: "50%",
                 transform: "translateY(-50%)",
-                color: C.subheader,
+                color: "#949ba4",
                 display: query ? "none" : "flex",
                 alignItems: "center",
                 pointerEvents: "none",
@@ -1733,7 +1449,7 @@ function SearchInput({ query, setQuery }: { query: string; setQuery: (v: string)
                         right: 8,
                         top: "50%",
                         transform: "translateY(-50%)",
-                        color: C.subheader,
+                        color: "#949ba4",
                         cursor: "pointer",
                         display: "flex",
                         alignItems: "center",
@@ -1775,7 +1491,7 @@ function getActivityIconKey(entry: ActivityEntry): keyof typeof actIco {
     const type = entry.type
     const meta = entry.metadata || {}
 
-    // exact type match first so a message containing "spotify" doesn't get mis-tagged
+    // exact type first so a msg containing "spotify" isn't mis-tagged
     if (type === "msg") return "message"
     if (type === "edit") return "edit"
     if (type === "delete") return "delete"
@@ -1798,7 +1514,7 @@ function getActivityIconKey(entry: ActivityEntry): keyof typeof actIco {
     if (type === "idle") return "idle"
     if (type === "dnd") return "dnd"
 
-    // camera/screenshare are logged as type "voice" while live — check metadata first
+    // camera/screenshare log as type "voice" while live, check metadata
     if (type === "voice" || type === "vc_join" || type === "vc_leave") {
         const action = (meta.action || "").toLowerCase()
         if (action.includes("camera")) return "camera"
@@ -1947,13 +1663,13 @@ function hexToRgba(hex: string, alpha: number): string {
 
 const ACTIVITY_CATEGORIES = [
     { key: "msg" as ActivityType, label: "Messages", Icon: ico.catMsg, color: "#5865f2" },
-    { key: "edit" as ActivityType, label: "Edits", Icon: ico.catEdit, color: "var(--yellow-300)" },
+    { key: "edit" as ActivityType, label: "Edits", Icon: ico.catEdit, color: "#f0b232" },
     { key: "delete" as ActivityType, label: "Deletes", Icon: ico.catDelete, color: "#da373c" },
-    { key: "typing" as ActivityType, label: "Typing", Icon: ico.catTyping, color: C.brandLight },
-    { key: "status" as ActivityType, label: "Status", Icon: ico.catStatus, color: C.green },
-    { key: "voice" as ActivityType, label: "Voice", Icon: ico.catVoice, color: C.text },
+    { key: "typing" as ActivityType, label: "Typing", Icon: ico.catTyping, color: "#949cf4" },
+    { key: "status" as ActivityType, label: "Status", Icon: ico.catStatus, color: "#23a55a" },
+    { key: "voice" as ActivityType, label: "Voice", Icon: ico.catVoice, color: "#dbdee1" },
     { key: "profile" as ActivityType, label: "Profile", Icon: ico.catProfile, color: "#ff6b6b" },
-    { key: "activity" as ActivityType, label: "Activity", Icon: ico.catActivity, color: "var(--yellow-300)" },
+    { key: "activity" as ActivityType, label: "Activity", Icon: ico.catActivity, color: "#f0b232" },
 ] as const
 
 function matchesCategory(log: ActivityEntry, category: ActivityType): boolean {
@@ -1970,48 +1686,39 @@ function matchesCategory(log: ActivityEntry, category: ActivityType): boolean {
     return log.type === category
 }
 
-function LogCard({ log, expanded, onToggle, onDelete, userId }: {
+function LogCard({ log, expanded, onToggle, onDelete, userId, index }: {
     log: ActivityEntry
     expanded: boolean
     onToggle: () => void
     onDelete: (id: string) => void
     userId: string
+    index?: number
 }) {
     return (
             <div
                 key={log.id}
                 data-ur-card-body
+                className={`ur-log-card${expanded ? " open" : ""}`}
                 onClick={() => onToggle()}
-                className="ur-log-card"
                 style={{
                     display: "flex",
                     gap: 14,
-                    padding: "16px 18px",
-                    borderRadius: 20,
-                    background: C.bg2,
-                    border: `1px solid rgba(255,255,255,0.05)`,
-                    marginBottom: 8,
+                    padding: "14px 16px",
+                    borderRadius: 18,
+                    background: expanded
+                        ? "linear-gradient(135deg, rgba(255,255,255,0.065) 0%, rgba(255,255,255,0.03) 100%)"
+                        : "linear-gradient(135deg, rgba(255,255,255,0.045) 0%, rgba(255,255,255,0.02) 100%)",
+                    border: `1px solid ${expanded ? C.bgEl : C.border}`,
+                    marginBottom: 6,
                     cursor: "pointer",
-                    transition: "all 200ms cubic-bezier(.2,.8,.2,1)",
                     minHeight: 56,
-                }}
-                onMouseEnter={e => {
-                    e.currentTarget.style.background = C.bg2
-                    e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)"
-                    e.currentTarget.style.boxShadow = "0 8px 24px rgba(0,0,0,0.25)"
-                    e.currentTarget.style.transform = "translateY(-2px)"
-                }}
-                onMouseLeave={e => {
-                    e.currentTarget.style.background = C.bg2
-                    e.currentTarget.style.borderColor = "rgba(255,255,255,0.05)"
-                    e.currentTarget.style.boxShadow = "none"
-                    e.currentTarget.style.transform = "translateY(0)"
+                    animationDelay: `${Math.min(index ?? 0, 12) * 22}ms`,
                 }}
             >
-                <div data-ur-card-icon style={{
-                    width: 44,
-                    height: 44,
-                    borderRadius: 16,
+                <div data-ur-card-icon className="ur-log-icon" style={{
+                    width: 42,
+                    height: 42,
+                    borderRadius: 12,
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -2020,7 +1727,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                     ...(() => {
                         const key = getActivityIconKey(log)
                         const { color } = actIco[key]
-                        return { background: `${color}15`, border: `1px solid ${color}30`, color }
+                        return { background: `${color}1c`, border: `1px solid ${color}40`, color }
                     })(),
                 }}>
                     {(() => {
@@ -2042,14 +1749,14 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                 fontWeight: 800,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.6,
-                                color: C.green,
-                                background: "rgba(35,165,90,0.15)",
-                                border: "1px solid rgba(35,165,90,0.35)",
-                                borderRadius: 12,
-                                padding: "4px 10px",
+                                color: "#23a55a",
+                                background: "rgba(35,165,90,0.12)",
+                                border: "1px solid rgba(35,165,90,0.3)",
+                                borderRadius: 8,
+                                padding: "3px 8px",
                                 marginBottom: 5,
                             }}>
-                                <span className="ur-blink-dot" style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: C.green, flexShrink: 0 }} />
+                                <span className="ur-blink-dot" style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#23a55a", flexShrink: 0 }} />
                                 Live
                             </div>
                         ) : null
@@ -2077,10 +1784,10 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                             fontSize: 12,
                             color: C.subheader,
                             fontWeight: 700,
-                            background: C.expanded,
+                            background: C.bg1,
                             padding: "4px 10px",
-                            borderRadius: 12,
-                            border: `1px solid ${C.glassBorder}`,
+                            borderRadius: 8,
+                            border: `1px solid ${C.border}`,
                             flexShrink: 0,
                             whiteSpace: "nowrap",
                             display: "flex",
@@ -2091,6 +1798,9 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                             {new Date(log.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })}
                             <span style={{ color: C.muted, fontWeight: 500 }}>· {timeAgo(log.ts)}</span>
                         </span>
+                        <div className={`ur-log-chevron${expanded ? " open" : ""}`} title={expanded ? "Collapse" : "Expand"}>
+                            <ico.chevron />
+                        </div>
                         <div
                             role="button"
                             title="Delete this entry"
@@ -2176,24 +1886,22 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                     {log.type === "edit" && log.metadata?.before && (
                         <div style={{
                             marginTop: 10,
-                            borderRadius: 16,
+                            borderRadius: 14,
                             overflow: "hidden",
                             border: `1px solid rgba(240,178,50,0.25)`,
-                            background: C.expanded,
-                            boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
                         }}>
-                            <div style={{ padding: "8px 14px", background: "rgba(240,178,50,0.08)", fontSize: 10, fontWeight: 800, color: "var(--yellow-300)", textTransform: "uppercase", letterSpacing: 0.6, display: "flex", alignItems: "center", gap: 6 }}>
+                            <div style={{ padding: "8px 14px", background: "rgba(240,178,50,0.08)", fontSize: 10, fontWeight: 800, color: "#f0b232", textTransform: "uppercase", letterSpacing: 0.6, display: "flex", alignItems: "center", gap: 6 }}>
                                 <ico.edit />
                                 Message Edit
                             </div>
-                            <div style={{ padding: "10px 14px", borderBottom: log.metadata?.after ? `1px solid rgba(240,178,50,0.15)` : "none", background: "rgba(218,55,60,0.06)", borderRadius: "16px 16px 0 0" }}>
+                            <div style={{ padding: "10px 14px", borderBottom: log.metadata?.after ? `1px solid rgba(240,178,50,0.15)` : "none", background: "rgba(218,55,60,0.06)" }}>
                                 <div style={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>Before</div>
                                 <span style={{ fontSize: 12, textDecoration: "line-through", opacity: 0.7, wordBreak: "break-word", lineHeight: 1.5, color: C.text }}>
                                     {trunc(log.metadata.before, 300)}
                                 </span>
                             </div>
                             {log.metadata?.after && (
-                                <div style={{ padding: "10px 14px", background: "rgba(36,128,70,0.06)", borderRadius: "0 0 16px 16px" }}>
+                                <div style={{ padding: "10px 14px", background: "rgba(36,128,70,0.06)" }}>
                                     <div style={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>After</div>
                                     <span style={{ fontSize: 12, wordBreak: "break-word", lineHeight: 1.5, color: C.text }}>
                                         {trunc(log.metadata.after, 300)}
@@ -2202,32 +1910,30 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                             )}
                         </div>
                     )}
-                    {expanded && (
-                        <div>
+                    <div className={`ur-expand${expanded ? " open" : ""}`}>
+                        <div className={expanded ? "ur-log-expand-in" : ""}>
                             {(log.channelId || log.guildId) && (
                                 <div
                                     onClick={(e) => { e.stopPropagation(); jumpTo(log.guildId, log.channelId, log.msgId) }}
                                     style={{
                                         marginTop: 10,
                                         padding: "10px 16px",
-                                        background: "#5865f2",
-                                        borderRadius: 16,
+                                        background: C.brand,
+                                        borderRadius: 10,
                                         color: C.white,
                                         fontSize: 13,
                                         fontWeight: 700,
                                         cursor: "pointer",
                                         textAlign: "center",
                                         fontFamily: "inherit",
-                                        transition: "all 200ms ease",
+                                        transition: "background 150ms ease",
                                         display: "flex",
                                         alignItems: "center",
                                         justifyContent: "center",
                                         gap: 6,
-                                        boxShadow: `0 4px 16px ${C.brand}4d`,
-                                        border: "1px solid rgba(148,156,244,0.3)",
                                     }}
-                                    onMouseEnter={e => { e.currentTarget.style.background = C.brandLight; e.currentTarget.style.boxShadow = "0 6px 20px rgba(88,101,242,0.4)"; e.currentTarget.style.transform = "translateY(-1px)" }}
-                                    onMouseLeave={e => { e.currentTarget.style.background = "#5865f2"; e.currentTarget.style.boxShadow = "0 4px 16px rgba(88,101,242,0.3)"; e.currentTarget.style.transform = "translateY(0)" }}
+                                    onMouseEnter={e => { e.currentTarget.style.background = "#4752c4" }}
+                                    onMouseLeave={e => { e.currentTarget.style.background = C.brand }}
                                 >
                                     <ico.external />
                                     Jump to Discord
@@ -2237,21 +1943,19 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                             {(["username","displayname","bio","banner","pronouns","custom_status","avatar"] as ActivityType[]).includes(log.type) && log.metadata && (log.metadata.before !== undefined || log.metadata.after !== undefined || log.metadata.oldAvatar !== undefined || log.metadata.newAvatar !== undefined) && (
                                 <div style={{
                                     marginTop: 10,
-                                    borderRadius: 16,
+                                    borderRadius: 14,
                                     overflow: "hidden",
                                     border: `1px solid rgba(255,107,107,0.3)`,
-                                    background: C.expanded,
-                                    boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
                                 }}>
                                     {/* Header */}
                                     <div style={{
-                                        padding: "10px 16px",
-                                        background: "rgba(250,119,124,0.08)",
+                                        padding: "8px 14px",
+                                        background: "rgba(255,107,107,0.12)",
                                         fontSize: 10,
                                         fontWeight: 800,
                                         textTransform: "uppercase",
                                         letterSpacing: 0.6,
-                                        color: C.danger,
+                                        color: "#ff6b6b",
                                         display: "flex",
                                         alignItems: "center",
                                         gap: 6,
@@ -2271,9 +1975,8 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                             display: "flex",
                                             gap: 12,
                                             padding: "14px",
-                                            background: C.bg2,
+                                            background: C.bg1,
                                             alignItems: "center",
-                                            borderRadius: "0 0 14px 14px",
                                         }}>
                                             <div style={{ textAlign: "center" }}>
                                                 <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Before</div>
@@ -2294,7 +1997,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                     )}
                                     {/* Text before/after */}
                                     {log.type !== "avatar" && (
-                                        <div style={{ background: C.bg2, borderRadius: "0 0 14px 14px" }}>
+                                        <div style={{ background: C.bg1 }}>
                                             {log.metadata.before != null && (
                                                 <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}` }}>
                                                     <div style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, color: C.muted, marginBottom: 5 }}>Before</div>
@@ -2303,7 +2006,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                         color: C.text,
                                                         background: "rgba(218,55,60,0.08)",
                                                         border: "1px solid rgba(218,55,60,0.25)",
-                                                        borderRadius: 12,
+                                                        borderRadius: 8,
                                                         padding: "8px 10px",
                                                         whiteSpace: "pre-wrap",
                                                         wordBreak: "break-word",
@@ -2323,7 +2026,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                         color: C.text,
                                                         background: "rgba(36,128,70,0.08)",
                                                         border: "1px solid rgba(36,128,70,0.25)",
-                                                        borderRadius: 12,
+                                                        borderRadius: 8,
                                                         padding: "8px 10px",
                                                         whiteSpace: "pre-wrap",
                                                         wordBreak: "break-word",
@@ -2334,7 +2037,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                 </div>
                                             )}
                                             {log.metadata.after == null && log.metadata.before != null && (
-                                                <div style={{ padding: "10px 14px", borderRadius: "0 0 14px 14px" }}>
+                                                <div style={{ padding: "10px 14px" }}>
                                                     <div style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, color: C.muted, marginBottom: 5 }}>After</div>
                                                     <div style={{
                                                         fontSize: 12,
@@ -2354,13 +2057,12 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                 <div style={{
                                     marginTop: 10,
                                     padding: "12px 16px",
-                                    background: C.expanded,
-                                    borderRadius: 16,
+                                    background: C.bg1,
+                                    borderRadius: 12,
                                     fontSize: 12,
                                     color: C.muted,
                                     lineHeight: 1.6,
-                                    border: `1px solid ${C.glassBorder}`,
-                                    boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
+                                    border: `1px solid ${C.border}`,
                                 }}>
                                     {log.metadata.song && (
                                         <div
@@ -2368,14 +2070,14 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                 if (!el || !log.metadata.albumArtUrl) return
                                                 const cached = _albumColorCache[log.metadata.albumArtUrl]
                                                 if (cached) {
-                                                    el.style.background = hexToRgba(cached, 0.08)
-                                                    el.style.borderColor = hexToRgba(cached, 0.4)
+                                                    el.style.background = hexToRgba(cached, 0.06)
+                                                    el.style.borderColor = hexToRgba(cached, 0.35)
                                                     return
                                                 }
                                                 extractAlbumColor(log.metadata.albumArtUrl).then((hex: string) => {
                                                     if (el) {
-                                                        el.style.background = hexToRgba(hex, 0.08)
-                                                        el.style.borderColor = hexToRgba(hex, 0.4)
+                                                        el.style.background = hexToRgba(hex, 0.06)
+                                                        el.style.borderColor = hexToRgba(hex, 0.35)
                                                     }
                                                 })
                                             }}
@@ -2383,14 +2085,13 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                 display: "flex",
                                                 gap: 0,
                                                 marginBottom: 12,
-                                                borderRadius: 16,
-                                                border: "1px solid rgba(30,215,96,0.25)",
+                                                borderRadius: 10,
+                                                border: "1px solid rgba(30,215,96,0.2)",
                                                 overflow: "hidden",
-                                                background: C.expanded,
+                                                background: "rgba(30,215,96,0.06)",
                                                 transition: "background 300ms ease, border-color 300ms ease",
                                                 position: "relative",
                                                 minHeight: 160,
-                                                boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
                                             }}
                                         >
                                             {log.metadata.albumArtUrl && (
@@ -2399,7 +2100,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                     width: 160,
                                                     height: 160,
                                                     overflow: "hidden",
-                                                    borderRadius: 12,
+                                                    borderRadius: 10,
                                                     flexShrink: 0,
                                                     alignSelf: "center",
                                                 }}>
@@ -2413,7 +2114,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                             height: "100%",
                                                             objectFit: "cover",
                                                             display: "block",
-                                                            borderRadius: 12,
+                                                            borderRadius: 8,
                                                         }}
                                                         onError={(e: any) => { e.target.style.display = "none" }}
                                                     />
@@ -2503,7 +2204,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                             color: C.muted,
                                                             background: "rgba(0,0,0,0.25)",
                                                             padding: "2px 8px",
-                                                            borderRadius: 12,
+                                                            borderRadius: 10,
                                                             fontWeight: 600,
                                                         }} title={`All artists: ${log.metadata.allArtists.join(", ")}`}>
                                                             +{log.metadata.allArtists.length - 1} more
@@ -2515,7 +2216,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                             color: C.muted,
                                                             background: "rgba(0,0,0,0.25)",
                                                             padding: "2px 8px",
-                                                            borderRadius: 12,
+                                                            borderRadius: 10,
                                                             fontWeight: 600,
                                                         }} title={log.metadata.contextUri}>
                                                             {log.metadata.contextUri.includes("playlist") ? "🎶 Playlist" : log.metadata.contextUri.includes("album") ? "💿 Album" : "🎵 Context"}
@@ -2525,10 +2226,10 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                 {(log.metadata.startTimestamp && log.metadata.endTimestamp) && (() => {
                                                     const total = log.metadata.endTimestamp - log.metadata.startTimestamp
                                                     const totalStr = formatDuration(total)
-                                                    // progress: full if ended, live calc if still active
+                                                    // full bar if ended, live calc if still going
                                                     const isSession = log.type === "session"
-                                                    const elapsed = isSession && log.metadata.endTime
-                                                        ? log.metadata.endTime - log.metadata.startTimestamp
+                                                    const elapsed = isSession && log.metadata.endTime 
+                                                        ? log.metadata.endTime - log.metadata.startTimestamp 
                                                         : Date.now() - log.metadata.startTimestamp
                                                     const progress = Math.min(100, Math.max(0, (elapsed / total) * 100))
                                                     const currentStr = formatDuration(Math.min(elapsed, total))
@@ -2572,10 +2273,9 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                             gap: 12,
                                             marginBottom: 12,
                                             padding: "10px 12px",
-                                            background: C.expanded,
-                                            borderRadius: 16,
+                                            background: "rgba(88,101,242,0.08)",
+                                            borderRadius: 10,
                                             border: "1px solid rgba(88,101,242,0.2)",
-                                            boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
                                         }}>
                                             <img
                                                 src={log.metadata.gameIconUrl}
@@ -2632,10 +2332,9 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                         <div style={{
                                             marginBottom: 10,
                                             padding: "10px 14px",
-                                            background: C.expanded,
-                                            borderRadius: 16,
-                                            border: `1px solid ${C.glassBorder}`,
-                                            boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
+                                            background: C.bg1,
+                                            borderRadius: 10,
+                                            border: `1px solid ${C.border}`,
                                         }}>
                                             <div style={{
                                                 display: "flex",
@@ -2727,10 +2426,9 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                         <div style={{
                                             marginBottom: 10,
                                             padding: "12px 14px",
-                                            background: C.expanded,
-                                            borderRadius: 16,
-                                            border: `1px solid ${C.glassBorder}`,
-                                            boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
+                                            background: C.bg1,
+                                            borderRadius: 10,
+                                            border: `1px solid ${C.border}`,
                                         }}>
                                             <div style={{
                                                 fontSize: 10,
@@ -2751,7 +2449,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                                     <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
                                                         <div style={{
                                                             width: 10, height: 10, borderRadius: "50%",
-                                                            background: ch.status === "online" ? C.green : ch.status === "idle" ? "var(--yellow-300)" : ch.status === "dnd" ? "#da373c" : "#80848e",
+                                                            background: ch.status === "online" ? "#23a55a" : ch.status === "idle" ? "#f0b232" : ch.status === "dnd" ? "#da373c" : "#80848e",
                                                             flexShrink: 0,
                                                             boxShadow: `0 0 0 3px ${ch.status === "online" ? "#23a55a30" : ch.status === "idle" ? "#f0b23230" : ch.status === "dnd" ? "#da373c30" : "#80848e30"}`,
                                                         }} />
@@ -2891,8 +2589,8 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                             alignItems: "center",
                                             padding: "6px 10px",
                                             background: C.bg2,
-                                            borderRadius: 12,
-                                            border: `1px solid ${C.glassBorder}`,
+                                            borderRadius: 8,
+                                            border: `1px solid ${C.border}`,
                                         }}>
                                             <span style={{ color: C.brandLight, fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>Platform</span>
                                             <span style={{ color: C.text, fontSize: 12, fontWeight: 600 }}>
@@ -2914,8 +2612,8 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                             alignItems: "center",
                                             padding: "6px 10px",
                                             background: C.bg2,
-                                            borderRadius: 12,
-                                            border: `1px solid ${C.glassBorder}`,
+                                            borderRadius: 8,
+                                            border: `1px solid ${C.border}`,
                                         }}>
                                             <span style={{
                                                 color: C.brandLight,
@@ -2945,7 +2643,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId }: {
                                 </div>
                             )}
                         </div>
-                    )}
+                    </div>
                 </div>
 
             </div>
@@ -3056,7 +2754,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
         let voiceMs = 0
         for (const l of todayLogs) {
             if (l.type === "session" && typeof l.metadata?.startTime === "number" && typeof l.metadata?.endTime === "number") {
-                // clamp to today's boundary in case the session started yesterday
+                // clamp to today in case it started yesterday
                 const start = Math.max(l.metadata.startTime, dayStartMs)
                 voiceMs += Math.max(0, l.metadata.endTime - start)
             }
@@ -3084,7 +2782,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
     }
 
     return (
-        <div style={{ padding: "0 4px", overflowX: "hidden" }}>
+        <div style={{ padding: "0 4px" }}>
             {logs.length > 0 && (
                 <div style={{
                     display: "flex",
@@ -3092,55 +2790,19 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                     marginBottom: 12,
                     flexWrap: "wrap",
                 }}>
-                    <div style={{
-                        flex: "1 1 auto",
-                        minWidth: 70,
-                        background: C.bg2,
-                        border: `1px solid ${C.glassBorder}`,
-                        borderRadius: 16,
-                        padding: "10px 12px",
-                        boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-                        transition: "all 200ms ease",
-                    }}>
+                    <div className="ur-card-hover ur-glass" style={{ flex: "1 1 auto", minWidth: 70, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}`, borderRadius: 16, padding: "8px 10px" }}>
                         <div style={{ fontSize: 16, fontWeight: 800, color: C.header }}>{todayStats.msgCount}</div>
                         <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>messages today</div>
                     </div>
-                    <div style={{
-                        flex: "1 1 auto",
-                        minWidth: 70,
-                        background: C.bg2,
-                        border: `1px solid ${C.glassBorder}`,
-                        borderRadius: 16,
-                        padding: "10px 12px",
-                        boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-                        transition: "all 200ms ease",
-                    }}>
+                    <div className="ur-card-hover ur-glass" style={{ flex: "1 1 auto", minWidth: 70, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}`, borderRadius: 16, padding: "8px 10px" }}>
                         <div style={{ fontSize: 16, fontWeight: 800, color: C.header }}>{todayStats.voiceMs > 0 ? formatDuration(todayStats.voiceMs) : "0m"}</div>
                         <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>voice today</div>
                     </div>
-                    <div style={{
-                        flex: "1 1 auto",
-                        minWidth: 70,
-                        background: C.bg2,
-                        border: `1px solid ${C.glassBorder}`,
-                        borderRadius: 16,
-                        padding: "10px 12px",
-                        boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-                        transition: "all 200ms ease",
-                    }}>
+                    <div className="ur-card-hover ur-glass" style={{ flex: "1 1 auto", minWidth: 70, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}`, borderRadius: 16, padding: "8px 10px" }}>
                         <div style={{ fontSize: 16, fontWeight: 800, color: C.header }}>{todayStats.statusChanges}</div>
                         <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>status changes</div>
                     </div>
-                    <div style={{
-                        flex: "1 1 auto",
-                        minWidth: 70,
-                        background: C.bg2,
-                        border: `1px solid ${C.glassBorder}`,
-                        borderRadius: 16,
-                        padding: "10px 12px",
-                        boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-                        transition: "all 200ms ease",
-                    }}>
+                    <div className="ur-card-hover ur-glass" style={{ flex: "1 1 auto", minWidth: 70, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}`, borderRadius: 16, padding: "8px 10px" }}>
                         <div style={{ fontSize: 16, fontWeight: 800, color: C.header }}>{todayStats.total}</div>
                         <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>events today</div>
                     </div>
@@ -3148,15 +2810,15 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
             )}
 
             <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center" }}>
-                <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+                <div className="ur-glass" style={{ position: "relative", flex: 1, minWidth: 0, borderRadius: 20 }}>
                     <input
                         placeholder="Search activity..."
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         style={{
-                            background: C.expanded,
-                            borderRadius: 24,
-                            border: `1px solid ${C.glassBorder}`,
+                            background: "rgba(255,255,255,0.04)",
+                            borderRadius: 20,
+                            border: `1px solid ${C.border}`,
                             height: 32,
                             boxSizing: "border-box",
                             padding: "0 32px 0 12px",
@@ -3165,10 +2827,10 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                             color: C.text,
                             outline: "none",
                             fontFamily: "inherit",
-                            transition: "all 200ms ease",
+                            transition: "border-color 150ms ease, box-shadow 150ms ease",
                         }}
-                        onFocus={e => { e.currentTarget.style.borderColor = C.brand; e.currentTarget.style.boxShadow = `0 0 0 3px ${C.brand}25, 0 4px 12px rgba(88,101,242,0.15)` }}
-                        onBlur={e => { e.currentTarget.style.borderColor = C.glassBorder; e.currentTarget.style.boxShadow = "none" }}
+                        onFocus={e => { e.currentTarget.style.borderColor = C.brand; e.currentTarget.style.boxShadow = `0 0 0 1px ${C.brand}40` }}
+                        onBlur={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.boxShadow = "none" }}
                     />
                     <div style={{
                         position: "absolute",
@@ -3187,25 +2849,26 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 <div
                     role="button"
                     tabIndex={0}
+                    className="ur-chip ur-tab-btn ur-glass"
                     onClick={() => setSortMode(s => s === "newest" ? "oldest" : "newest")}
                     style={{
                         display: "flex", alignItems: "center", gap: 4,
                         padding: "0 10px",
-                        borderRadius: 24,
+                        borderRadius: 20,
                         cursor: "pointer",
-                        background: C.expanded,
-                        border: `1px solid ${C.glassBorder}`,
+                        background: "rgba(255,255,255,0.04)",
+                        border: `1px solid ${C.border}`,
                         color: C.muted,
                         fontSize: 11,
                         fontWeight: 600,
                         userSelect: "none",
                         height: 32,
                         boxSizing: "border-box",
-                        transition: "all 200ms ease",
+                        transition: "background 150ms ease, border-color 150ms ease, color 150ms ease",
                         flexShrink: 0,
                     }}
-                    onMouseEnter={e => { e.currentTarget.style.borderColor = C.glassBorderHov; e.currentTarget.style.color = C.text; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.15)" }}
-                    onMouseLeave={e => { e.currentTarget.style.borderColor = C.glassBorder; e.currentTarget.style.color = C.muted; e.currentTarget.style.boxShadow = "none" }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.color = C.text; e.currentTarget.style.background = "rgba(255,255,255,0.08)" }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "rgba(255,255,255,0.04)" }}
                 >
                     {sortMode === "newest" ? <ico.sortDate /> : <ico.sortAz />}
                     {sortMode === "newest" ? "Newest" : "Oldest"}
@@ -3214,23 +2877,24 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 <div
                     role="button"
                     tabIndex={0}
+                    className="ur-chip ur-tab-btn ur-glass"
                     title={compact ? "switch to normal view" : "switch to compact view"}
                     onClick={toggleCompact}
                     style={{
                         display: "flex", alignItems: "center", justifyContent: "center",
                         width: 32,
-                        borderRadius: 24,
+                        borderRadius: 20,
                         cursor: "pointer",
-                        background: compact ? `${C.brand}25` : C.bg2,
-                        border: `1px solid ${compact ? C.brand : C.glassBorder}`,
+                        background: compact ? `${C.brand}25` : "rgba(255,255,255,0.04)",
+                        border: `1px solid ${compact ? C.brand : C.border}`,
                         color: compact ? C.brandLight : C.muted,
                         height: 32,
                         boxSizing: "border-box",
-                        transition: "all 200ms ease",
+                        transition: "background 150ms ease, border-color 150ms ease, color 150ms ease",
                         flexShrink: 0,
                     }}
-                    onMouseEnter={e => { if (!compact) { e.currentTarget.style.borderColor = C.glassBorderHov; e.currentTarget.style.color = C.text; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.15)" } }}
-                    onMouseLeave={e => { if (!compact) { e.currentTarget.style.borderColor = C.glassBorder; e.currentTarget.style.color = C.muted; e.currentTarget.style.boxShadow = "none" } }}
+                    onMouseEnter={e => { if (!compact) { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.color = C.text; e.currentTarget.style.background = "rgba(255,255,255,0.08)" } }}
+                    onMouseLeave={e => { if (!compact) { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "rgba(255,255,255,0.04)" } }}
                 >
                     <ico.compact />
                 </div>
@@ -3243,11 +2907,12 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                     return (
                         <div
                             key={cat.key}
+                            className="ur-chip ur-tab-btn ur-glass"
                             onClick={() => toggleFilter(cat.key)}
                             style={{
                                 padding: "5px 10px",
                                 borderRadius: 16,
-                                background: isActive ? `${cat.color}15` : C.bg2,
+                                background: isActive ? `${cat.color}25` : "rgba(255,255,255,0.04)",
                                 color: isActive ? cat.color : C.muted,
                                 fontSize: 11,
                                 fontWeight: 700,
@@ -3255,25 +2920,22 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                 display: "flex",
                                 alignItems: "center",
                                 gap: 5,
-                                transition: "all 200ms ease",
+                                transition: "background 150ms ease, color 150ms ease, border-color 150ms ease",
                                 userSelect: "none",
-                                border: `1px solid ${isActive ? `${cat.color}60` : C.glassBorder}`,
+                                border: `1px solid ${isActive ? `${cat.color}60` : C.border}`,
                                 opacity: count === 0 ? 0.5 : 1,
                                 flexShrink: 0,
-                                boxShadow: isActive ? `0 2px 8px ${cat.color}20` : "0 1px 4px rgba(0,0,0,0.1)",
                             }}
                             onMouseEnter={e => {
                                 if (!isActive) {
-                                    e.currentTarget.style.background = "linear-gradient(180deg, rgba(50,52,58,0.7) 0%, rgba(35,36,40,0.8) 100%)"
+                                    e.currentTarget.style.background = "rgba(255,255,255,0.09)"
                                     e.currentTarget.style.color = C.text
-                                    e.currentTarget.style.borderColor = C.glassBorderHov
                                 }
                             }}
                             onMouseLeave={e => {
                                 if (!isActive) {
-                                    e.currentTarget.style.background = C.bg2
+                                    e.currentTarget.style.background = "rgba(255,255,255,0.04)"
                                     e.currentTarget.style.color = C.muted
-                                    e.currentTarget.style.borderColor = C.glassBorder
                                 }
                             }}
                         >
@@ -3338,11 +3000,10 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 display: "flex",
                 flexDirection: "column",
                 gap: 12,
-                overflowX: "hidden",
                 paddingRight: 4,
             }}>
                 {Object.entries(grouped).map(([date, dayLogs]) => (
-                    <div key={`${date}-${Array.from(activeFilters).join(",")}-${sortMode}`} style={{ overflowX: "hidden" }}>
+                    <div key={`${date}-${Array.from(activeFilters).join(",")}-${sortMode}`}>
                         <div data-ur-day-header style={{
                             fontSize: 10,
                             fontWeight: 800,
@@ -3361,7 +3022,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                             <span style={{ flex: 1, height: 1, background: C.border }} />
                             <span>{dayLogs.length} events</span>
                         </div>
-                        {dayLogs.map(log => (
+                        {dayLogs.map((log, i) => (
                             <LogCard
                                 key={log.id}
                                 log={log}
@@ -3369,6 +3030,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                                 onToggle={() => setExpandedId(expandedId === log.id ? null : log.id)}
                                 onDelete={(id) => setLogs(prev => prev.filter(l => l.id !== id))}
                                 userId={userId}
+                                index={i}
                             />
                         ))}
                     </div>
@@ -3376,41 +3038,29 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 {logs.length === 0 && (
                     <div style={{ textAlign: "center", padding: "40px 0", color: C.muted }}>
                         <div style={{
-                            width: 64,
-                            height: 64,
-                            borderRadius: 24,
-                            background: C.bg2,
+                            width: 56,
+                            height: 56,
+                            borderRadius: "50%",
+                            background: C.bg1,
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
                             margin: "0 auto 14px",
-                            border: `1px solid ${C.glassBorder}`,
-                            boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
+                            border: `1px solid ${C.border}`,
                         }}>
                             <ico.ghost />
                         </div>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: C.header }}>No activity tracked yet</div>
-                        <div style={{ fontSize: 12, marginTop: 6, color: C.muted }}>Events will appear here once this user does something</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: C.header }}>No activity tracked yet</div>
+                        <div style={{ fontSize: 12, marginTop: 4, color: C.muted }}>Events will appear here once this user does something</div>
                     </div>
                 )}
                 {logs.length > 0 && filtered.length === 0 && (
                     <div style={{ textAlign: "center", padding: "32px 0", color: C.muted }}>
-                        <div style={{
-                            display: "flex",
-                            justifyContent: "center",
-                            marginBottom: 10,
-                            opacity: 0.5,
-                            padding: "12px",
-                            background: C.bg2,
-                            borderRadius: 16,
-                            border: `1px solid ${C.glassBorder}`,
-                            width: "fit-content",
-                            margin: "0 auto 14px",
-                        }}>
+                        <div style={{ display: "flex", justifyContent: "center", marginBottom: 10, opacity: 0.5 }}>
                             <ico.search />
                         </div>
-                        <div style={{ fontSize: 14, fontWeight: 600 }}>No matching events</div>
-                        <div style={{ fontSize: 12, marginTop: 4 }}>Try adjusting your filters or search</div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>No matching events</div>
+                        <div style={{ fontSize: 11, marginTop: 3 }}>Try adjusting your filters or search</div>
                     </div>
                 )}
             </div>
@@ -3449,6 +3099,7 @@ function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: 
                 {count} total events logged
             </span>
             <button
+                className="ur-tab-btn ur-chip"
                 onClick={() => {
                     const input = document.createElement("input")
                     input.type = "file"
@@ -3485,35 +3136,35 @@ function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: 
                 }}
                 style={{
                     padding: "8px 16px",
-                    borderRadius: 24,
-                    background: C.bg2,
-                    border: `1px solid ${C.glassBorder}`,
+                    borderRadius: 20,
+                    background: C.bg1,
+                    border: `1px solid ${C.border}`,
                     color: C.text,
                     fontSize: 12,
                     fontWeight: 700,
                     cursor: "pointer",
                     fontFamily: "inherit",
-                    transition: "all 200ms ease",
+                    transition: "all 150ms ease",
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
                 }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = C.glassBorderHov; e.currentTarget.style.background = C.bgEl; e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)" }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = C.glassBorder; e.currentTarget.style.background = C.bg2; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.1)" }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = C.bg2 }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg1 }}
             >
                 <ico.download />
                 Import
             </button>
             <select
+                className="ur-tab-btn"
                 value={exportCat}
                 onChange={(e) => setExportCat(e.target.value as ActivityType | "all")}
                 style={{
                     padding: "0 10px",
                     height: 34,
-                    borderRadius: 24,
-                    background: C.bg2,
-                    border: `1px solid ${C.glassBorder}`,
+                    borderRadius: 20,
+                    background: C.bg1,
+                    border: `1px solid ${C.border}`,
                     color: C.text,
                     fontSize: 12,
                     fontWeight: 600,
@@ -3529,6 +3180,7 @@ function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: 
                 ))}
             </select>
             <button
+                className="ur-tab-btn ur-chip"
                 onClick={() => {
                     const userLogs = activityStore.getLogs(userId)
                     const scoped = exportCat === "all" ? userLogs : userLogs.filter(l => matchesCategory(l, exportCat))
@@ -3557,27 +3209,27 @@ function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: 
                 }}
                 style={{
                     padding: "8px 16px",
-                    borderRadius: 24,
-                    background: C.bg2,
-                    border: `1px solid ${C.glassBorder}`,
+                    borderRadius: 20,
+                    background: C.bg1,
+                    border: `1px solid ${C.border}`,
                     color: C.text,
                     fontSize: 12,
                     fontWeight: 700,
                     cursor: "pointer",
                     fontFamily: "inherit",
-                    transition: "all 200ms ease",
+                    transition: "all 150ms ease",
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
                 }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = C.glassBorderHov; e.currentTarget.style.background = C.bgEl; e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)" }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = C.glassBorder; e.currentTarget.style.background = C.bg2; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.1)" }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = C.bg2 }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg1 }}
             >
                 <ico.upload />
                 Export
             </button>
             <button
+                className="ur-tab-btn ur-chip"
                 onClick={async () => {
                     if (count === 0) {
                         Toasts.show({
@@ -3594,22 +3246,21 @@ function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: 
                 }}
                 style={{
                     padding: "8px 16px",
-                    borderRadius: 24,
-                    background: "rgba(218,55,60,0.12)",
+                    borderRadius: 20,
+                    background: "rgba(218,55,60,0.08)",
                     border: `1px solid ${C.red}`,
                     color: C.red,
                     fontSize: 12,
                     fontWeight: 700,
                     cursor: "pointer",
                     fontFamily: "inherit",
-                    transition: "all 200ms ease",
+                    transition: "all 150ms ease",
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    boxShadow: "0 2px 8px rgba(218,55,60,0.1)",
                 }}
-                onMouseEnter={e => { e.currentTarget.style.background = "linear-gradient(180deg, rgba(218,55,60,0.2) 0%, rgba(218,55,60,0.1) 100%)"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(218,55,60,0.15)"; e.currentTarget.style.transform = "translateY(-1px)" }}
-                onMouseLeave={e => { e.currentTarget.style.background = "rgba(218,55,60,0.12)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(218,55,60,0.1)"; e.currentTarget.style.transform = "translateY(0)" }}
+                onMouseEnter={e => { e.currentTarget.style.background = "rgba(218,55,60,0.15)" }}
+                onMouseLeave={e => { e.currentTarget.style.background = "rgba(218,55,60,0.08)" }}
             >
                 <ico.clear />
                 Clear
@@ -3673,16 +3324,19 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
     const setExp = (v: boolean) => setExpandedId(v ? user.id : null)
     const [copied,   setCopy] = React.useState(false)
     const [ovTab,    setOvTab] = React.useState<OvTab>("messages")
+    const [liveStatus, setLiveStatus] = React.useState<string>(() => statusCache[user.id] || "offline")
 
-    // statusCache is a plain mutable object updated from gateway events outside React, so this row
-    // won't otherwise know when this user's live status changes while the modal stays open
-    const [, forcePresenceTick] = React.useReducer((x: number) => x + 1, 0)
     React.useEffect(() => {
-        const onPresence = (e: Event) => {
-            if ((e as CustomEvent).detail === user.id) forcePresenceTick()
+        const presMod = findByProps("getStatus", "getActivities")
+        const tick = () => {
+            try {
+                const s = presMod?.getStatus?.(user.id)
+                if (s) setLiveStatus(s)
+            } catch { }
         }
-        window.addEventListener("ur:presence", onPresence)
-        return () => window.removeEventListener("ur:presence", onPresence)
+        tick()
+        const iv = setInterval(tick, 4000)
+        return () => clearInterval(iv)
     }, [user.id])
 
     const du   = UserStore.getUser(user.id)
@@ -3844,23 +3498,28 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
     const activePreset = detectPreset()
 
     return (
-        <div className="ur-row" style={{
-            background: C.bg2,
-            borderRadius: 24,
-            marginBottom: 10,
-            border: `1px solid ${isPinned ? C.brandLight + "60" : C.glassBorder}`,
+        <div className={`ur-row${expanded ? " open" : ""}`} style={{
+            borderRadius: 18,
+            marginBottom: 8,
             animationDelay: `${Math.min(index ?? 0, 10) * 28}ms`,
-            boxShadow: "0 2px 12px rgba(0,0,0,0.2)",
         }}>
+            <div className="ur-row-surface" style={{
+                background: expanded
+                    ? "linear-gradient(135deg, rgba(255,255,255,0.065) 0%, rgba(255,255,255,0.03) 100%)"
+                    : "linear-gradient(135deg, rgba(255,255,255,0.045) 0%, rgba(255,255,255,0.02) 100%)",
+                border: `1px solid ${isPinned ? C.brandLight + "60" : expanded ? C.bgEl : C.border}`,
+                borderRadius: 18,
+                overflow: "hidden",
+            }}>
             <div className="ur-row-hover" onClick={() => setExp(!expanded)} style={{
                 display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer",
-                borderRadius: expanded ? "14px 14px 0 0" : 14, transition: "background 100ms",
+                borderRadius: expanded ? "18px 18px 0 0" : 18, transition: "background 100ms",
             }}>
                 <div
                     role="button"
                     title={isPinned ? "unpin" : "pin to top"}
                     onClick={(e: any) => { e.stopPropagation(); onTogglePin?.() }}
-                    className={isPinned ? "ur-pin-pop" : ""}
+                    className={`ur-row-pin${isPinned ? " ur-pin-pop" : ""}`}
                     key={isPinned ? "pinned" : "unpinned"}
                     style={{
                         display: "flex", alignItems: "center", justifyContent: "center",
@@ -3875,28 +3534,38 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
                 >
                     {isPinned ? <ico.pin /> : <ico.pinOutline />}
                 </div>
-                <div className="ur-avatar-wrap">
-                    <img className="ur-row-avatar" src={av} style={{ width: 44, height: 44, borderRadius: "50%", flexShrink: 0, border: "2px solid rgba(255,255,255,0.1)" }}
+                <div style={{ position: "relative", flexShrink: 0, width: 44, height: 44 }}>
+                    <img className="ur-row-avatar" src={av} style={{ width: 44, height: 44, borderRadius: "50%", display: "block" }}
                         onError={(e: any) => { e.target.src = FALLBACK_AV }} />
-                    <PresenceIndicator status={statusCache[user.id]} size={14} />
+                    <span className="ur-status-dot" style={{
+                        position: "absolute",
+                        bottom: -1,
+                        right: -1,
+                        width: 12,
+                        height: 12,
+                        borderRadius: "50%",
+                        border: `2.5px solid ${C.bg2}`,
+                        background: liveStatus === "online" ? "#23a55a" : liveStatus === "idle" ? "#f0b232" : liveStatus === "dnd" ? "#da373c" : "#80848e",
+                        boxShadow: liveStatus === "online" ? "0 0 6px #23a55a80" : liveStatus === "idle" ? "0 0 6px #f0b23280" : liveStatus === "dnd" ? "0 0 6px #da373c80" : "none",
+                    }} />
                 </div>
 
                 <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 15, fontWeight: 700, color: C.header }}>{name}</span>
                         {user.nick && (
-                            <span className="ur-badge-in" style={{ background: C.brandGrad, color: C.white, fontSize: 10, fontWeight: 800, padding: "2px 7px", borderRadius: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                            <span className="ur-badge-in ur-badge-glass" style={{ background: `${C.brand}30`, color: C.white, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 20, textTransform: "uppercase", letterSpacing: 0.5, border: `1px solid ${C.brandLight}50`, boxShadow: `0 0 10px ${C.brand}30` }}>
                                 {user.nick}
                             </span>
                         )}
                         {settings.store.globalPresetMode === "custom" && activePreset !== "custom" && (
-                            <span style={{
+                            <span className="ur-badge-glass" style={{
                                 background: activePreset === "stalker" ? `${C.danger}25` : activePreset === "lite" ? `${C.brandLight}25` : `${C.muted}25`,
                                 color: activePreset === "stalker" ? C.danger : activePreset === "lite" ? C.brandLight : C.muted,
                                 fontSize: 9,
                                 fontWeight: 800,
-                                padding: "2px 7px",
-                                borderRadius: 6,
+                                padding: "3px 8px",
+                                borderRadius: 20,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.5,
                                 border: `1px solid ${activePreset === "stalker" ? `${C.danger}60` : activePreset === "lite" ? `${C.brandLight}60` : `${C.muted}60`}`,
@@ -3923,15 +3592,12 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
                         const name = displayName(u) || user.id;
                         const av = u ? avatarUrl(u.id, (u as any).avatar, 64) : avatarUrl(user.id, null, 64);
                         openModal(p => (
-                            <ModalRoot {...p} size={ModalSize.LARGE}>
+                            <ModalRoot {...p} size={ModalSize.LARGE} className="ur-modal-in">
                                 <ModalHeader separator={false}>
-                                    <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 14 }}>
-                                        <div className="ur-avatar-wrap">
-                                            <img src={av} style={{ width: 40, height: 40, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.1)" }} />
-                                            <PresenceIndicator status={statusCache[user.id]} size={14} />
-                                        </div>
+                                    <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 12 }}>
+                                        <img src={av} style={{ width: 36, height: 36, borderRadius: "50%" }} />
                                         <div>
-                                            <div style={{ fontSize: 17, fontWeight: 700, color: C.header }}>{name}</div>
+                                            <div style={{ fontSize: 16, fontWeight: 700, color: C.header }}>{name}</div>
                                             <div style={{ fontSize: 12, color: C.muted }}>Activity Log</div>
                                         </div>
                                     </div>
@@ -3949,37 +3615,24 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
                         ));
                     }}
                     title="Full Activity History"
+                    className="ur-activity-btn"
                     style={{
-                        padding: "6px 14px",
-                        borderRadius: 16,
+                        padding: "5px 12px",
+                        borderRadius: 12,
                         fontSize: 12,
                         fontWeight: 700,
                         cursor: "pointer",
-                        background: C.bg2,
+                        background: "rgba(255,255,255,0.05)",
                         color: C.text,
-                        border: `1px solid ${C.glassBorder}`,
-                        transition: "all 200ms cubic-bezier(0.4,0,0.2,1)",
+                        border: `1px solid ${C.border}`,
                         userSelect: "none",
                         letterSpacing: 0.3,
                         flexShrink: 0,
                         display: "flex",
                         alignItems: "center",
                         gap: 6,
-                        height: 30,
+                        height: 28,
                         boxSizing: "border-box",
-                        boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-                    }}
-                    onMouseEnter={e => {
-                        e.currentTarget.style.background = C.bgEl;
-                        e.currentTarget.style.borderColor = C.glassBorderHov;
-                        e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)";
-                        e.currentTarget.style.transform = "translateY(-1px)";
-                    }}
-                    onMouseLeave={e => {
-                        e.currentTarget.style.background = C.bg2;
-                        e.currentTarget.style.borderColor = C.glassBorder;
-                        e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.1)";
-                        e.currentTarget.style.transform = "translateY(0)";
                     }}
                 >
                     <span style={{ display: "flex", alignItems: "center", opacity: 0.9 }}>
@@ -3988,7 +3641,7 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
                     <span>Activity</span>
                     <ActivityBadge userId={user.id} />
                 </div>
-<div style={{ color: C.muted, display: "flex", alignItems: "center", transform: expanded ? "rotate(180deg)" : "none", transition: "transform 200ms cubic-bezier(.4,0,.2,1)" }}>
+                <div className={`ur-row-chevron${expanded ? " open" : ""}`}>
                     <ico.chevron />
                 </div>
 
@@ -4014,112 +3667,107 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
 
             <div className={`ur-expand${expanded ? " open" : ""}`}>
                 <div>
-                    <div style={{
-                        padding: "16px",
-                        borderTop: `1px solid ${C.border}`,
-                        background: C.bg1,
-                        borderRadius: "0 0 20px 20px",
-                    }}>
-
-                        <div style={{ marginBottom: 16 }}>
-                            <div className="ur-segmented">
-                                <div className="ur-segmented-pill" style={{
-                                    width: `calc((100% - 8px) / 3)`,
-                                    transform: `translateX(${(ovTab === "messages" ? 0 : ovTab === "presence" ? 1 : 2) * 100}%)`,
-                                }} />
-                                {(["messages", "presence", "profile"] as OvTab[]).map(tab => {
-                                    const active = ovTab === tab
-                                    const TabIcon = tab === "messages" ? ico.msg : tab === "presence" ? ico.status : ico.profile
+                    <div style={{ padding: "20px 16px 24px", borderTop: "1px solid rgba(255,255,255,0.04)", background: "linear-gradient(180deg, rgba(0,0,0,0.28) 0%, rgba(0,0,0,0.14) 100%)" }}>
+                        <div className="ur-glass" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, marginBottom: 18, background: "rgba(0,0,0,0.35)", padding: 4, borderRadius: 24, border: "1px solid rgba(255,255,255,0.06)", width: "fit-content", minWidth: 300, position: "relative" }}>
+                            <div style={{
+                                position: "absolute",
+                                top: 4,
+                                bottom: 4,
+                                left: 4,
+                                width: "calc((100% - 8px) / 3)",
+                                transform: `translateX(${["messages", "presence", "profile"].indexOf(ovTab) * 100}%)`,
+                                background: "linear-gradient(135deg, #5865f2 0%, #7289da 100%)",
+                                borderRadius: 20,
+                                boxShadow: "0 2px 12px rgba(88,101,242,0.5), inset 0 1px 0 rgba(255,255,255,0.15)",
+                                border: "1px solid rgba(255,255,255,0.15)",
+                                transition: "transform 300ms cubic-bezier(0.34,1.2,0.4,1)",
+                                pointerEvents: "none",
+                                boxSizing: "border-box",
+                                zIndex: 1,
+                            }} />
+                            {(["messages", "presence", "profile"] as OvTab[]).map(tab => {
+                                const TabIcon = OV_TAB_ICONS[tab]
+                                const active = ovTab === tab
+                                return (
+                                    <div key={tab} className="ur-tab-btn" onClick={() => setOvTab(tab)} style={{
+                                        display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                                        padding: "6px 14px", borderRadius: 20,
+                                        fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                        color: active ? "#fff" : C.muted,
+                                        position: "relative", zIndex: 2,
+                                        userSelect: "none",
+                                    }}
+                                        onMouseEnter={e => { if (!active) { e.currentTarget.style.color = C.text; e.currentTarget.style.background = "rgba(255,255,255,0.07)" } }}
+                                        onMouseLeave={e => { if (!active) { e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "transparent" } }}
+                                    >
+                                        <span style={{ opacity: active ? 1 : 0.6, display: "flex", transition: "opacity 200ms ease" }}><TabIcon /></span>
+                                        {OV_TAB_LABELS[tab]}
+                                    </div>
+                                )
+                            })}
+                        </div>
+                        <div style={{ marginBottom: 18 }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "rgba(255,255,255,0.25)", marginBottom: 10 }}>Quick presets</div>
+                            <div style={{ display: "flex", gap: 8 }}>
+                                {([
+                                    { key: "stalker" as const, label: "Stalker", desc: "Every event", color: "#f04747", glow: "#f0474740" },
+                                    { key: "lite" as const,    label: "Lite",    desc: "Essentials only", color: C.brand, glow: "#5865f240" },
+                                    { key: "silent" as const,  label: "Silent",  desc: "No pings", color: "#949ba4", glow: "#949ba420" },
+                                ]).map(preset => {
+                                    const isActive = activePreset === preset.key
                                     return (
-                                        <div
-                                            key={tab}
-                                            role="button"
-                                            tabIndex={0}
-                                            onClick={() => setOvTab(tab)}
-                                            className={`ur-segmented-btn${active ? " active" : ""}`}
+                                        <div key={preset.key} className="ur-preset-card ur-glass" onClick={() => applyPreset(preset.key)} style={{
+                                            flex: 1, cursor: "pointer", padding: "12px 14px", borderRadius: 18,
+                                            background: isActive ? `linear-gradient(145deg, ${preset.color}22 0%, ${preset.color}0d 100%)` : "rgba(255,255,255,0.03)",
+                                            border: `1px solid ${isActive ? preset.color + "70" : "rgba(255,255,255,0.06)"}`,
+                                            boxShadow: isActive ? `0 0 20px ${preset.glow}, inset 0 1px 0 rgba(255,255,255,0.08)` : "inset 0 1px 0 rgba(255,255,255,0.04)",
+                                            transition: "all 220ms cubic-bezier(0.4,0,0.2,1)",
+                                            backdropFilter: "blur(8px)",
+                                        }}
+                                            onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)" } }}
+                                            onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.03)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.06)" } }}
                                         >
-                                            <span style={{ display: "flex", opacity: active ? 1 : 0.7 }}><TabIcon /></span>
-                                            {OV_TAB_LABELS[tab]}
+                                            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 5 }}>
+                                                <span style={{ width: 7, height: 7, borderRadius: "50%", background: preset.color, boxShadow: isActive ? `0 0 8px ${preset.color}` : "none", flexShrink: 0, transition: "box-shadow 220ms" }} />
+                                                <span style={{ fontSize: 12, fontWeight: 700, color: isActive ? preset.color : C.text, transition: "color 220ms" }}>{preset.label}</span>
+                                            </div>
+                                            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", lineHeight: 1.4 }}>{preset.desc}</div>
                                         </div>
                                     )
                                 })}
                             </div>
                         </div>
-
-                        <div style={{ marginTop: 0 }}>
-                                <div style={{ marginBottom: 16 }}>
-                                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8, color: C.muted, marginBottom: 8 }}>Quick Presets</div>
-                                    <div style={{ display: "flex", gap: 8 }}>
-                                        {([
-                                            { key: "stalker" as const, label: "Stalker", desc: "Maximum tracking — every event", color: "#f04747" },
-                                            { key: "lite" as const, label: "Lite", desc: "Messages, deletes, typing, avatar, voice, status", color: C.brand },
-                                            { key: "silent" as const, label: "Silent", desc: "Log everything silently — no pings", color: C.muted },
-                                        ]).map(preset => {
-                                            const isActive = activePreset === preset.key
-                                            return (
-                                                <div
-                                                    key={preset.key}
-                                                    onClick={() => applyPreset(preset.key)}
-                                                    style={{
-                                                        cursor: "pointer",
-                                                        padding: "12px 14px",
-                                                        borderRadius: 16,
-                                                        flex: 1,
-                                                        background: isActive ? `${preset.color}12` : C.bg2,
-                                                        border: `1px solid ${isActive ? preset.color : C.glassBorder}`,
-                                                        transition: "all 150ms ease",
-                                                        boxShadow: isActive ? `0 4px 16px ${preset.color}30` : "0 2px 8px rgba(0,0,0,0.1)",
-                                                    }}
-                                                    onMouseEnter={e => { if (!isActive) { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = "rgba(255,255,255,0.04)" } }}
-                                                    onMouseLeave={e => { if (!isActive) { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg1 } }}
-                                                >
-                                                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                                                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: isActive ? preset.color : C.border, display: "inline-block", flexShrink: 0, transition: "background 150ms" }} />
-                                                        <span style={{ fontSize: 12, fontWeight: 700, color: isActive ? preset.color : C.header }}>{preset.label}</span>
-                                                    </div>
-                                                    <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.4 }}>{preset.desc}</div>
-                                                </div>
-                                            )
-                                        })}
-                                    </div>
-                                </div>
-                                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10 }}>
-                                    <div style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 0.8 }}>Overrides</div>
-                                    <div style={{ flex: 1 }} />
-                                    <div onClick={enableAll} style={{ fontSize: 11, color: C.brandLight, cursor: "pointer", fontWeight: 600 }}
-                                        onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
-                                        onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}
-                                    >Enable All</div>
-                                    <div onClick={disableAll} style={{ fontSize: 11, color: C.muted, cursor: "pointer", fontWeight: 600 }}
-                                        onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
-                                        onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}
-                                    >Disable All</div>
-                                </div>
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                                    {OV_GROUPS[ovTab].map(row => {
-                                        const isOn = isFeatureOn(user.id, row.key as any, row.gk)
-                                        const isOv = (user.overrides as any)[row.key] !== null && (user.overrides as any)[row.key] !== undefined
-                                        return (
-                                            <div key={row.key}
-                                                onClick={() => setOv(row.key as any, !isOn)}
-                                                style={{
-                                                    background: isOn ? "rgba(88,101,242,0.08)" : C.bg2,
-                                                    borderRadius: 16,
-                                                    border: `1px solid ${isOn && isOv ? C.brand + "80" : C.glassBorder}`,
-                                                    padding: "10px 12px",
-                                                    cursor: "pointer",
-                                                    transition: "all 200ms cubic-bezier(.2,.8,.2,1)",
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    gap: 8,
-                                                    position: "relative",
-                                                    overflow: "hidden",
-                                                    boxShadow: isOn ? "0 4px 16px rgba(88,101,242,0.15)" : "0 2px 8px rgba(0,0,0,0.1)",
-                                                }}
-                                                onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.04)" }}
-                                                onMouseLeave={e => { e.currentTarget.style.background = C.bg1 }}
-                                            >
-                                                {isOn && <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: C.brand, borderRadius: "8px 0 0 8px" }} />}
+                        <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "rgba(255,255,255,0.25)" }}>Overrides</span>
+                            <div style={{ flex: 1 }} />
+                            <span onClick={enableAll} style={{ fontSize: 11, color: C.brandLight, cursor: "pointer", fontWeight: 600, marginRight: 12 }}
+                                onMouseEnter={e => { e.currentTarget.style.opacity = "0.7" }} onMouseLeave={e => { e.currentTarget.style.opacity = "1" }}>Enable All</span>
+                            <span onClick={disableAll} style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", cursor: "pointer", fontWeight: 600 }}
+                                onMouseEnter={e => { e.currentTarget.style.opacity = "0.7" }} onMouseLeave={e => { e.currentTarget.style.opacity = "1" }}>Disable All</span>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                            {OV_GROUPS[ovTab].map(row => {
+                                const isOn = isFeatureOn(user.id, row.key as any, row.gk)
+                                const isOv = (user.overrides as any)[row.key] !== null && (user.overrides as any)[row.key] !== undefined
+                                return (
+                                    <div key={row.key}
+                                        onClick={() => setOv(row.key as any, !isOn)}
+                                        style={{
+                                            background: isOn ? "linear-gradient(135deg, rgba(88,101,242,0.14) 0%, rgba(88,101,242,0.06) 100%)" : "rgba(255,255,255,0.025)",
+                                            borderRadius: 16,
+                                            border: `1px solid ${isOn && isOv ? "rgba(88,101,242,0.5)" : "rgba(255,255,255,0.06)"}`,
+                                            boxShadow: isOn && isOv ? "0 0 16px rgba(88,101,242,0.18), inset 0 1px 0 rgba(255,255,255,0.08)" : "inset 0 1px 0 rgba(255,255,255,0.04)",
+                                            padding: "10px 12px",
+                                            cursor: "pointer",
+                                            transition: "all 220ms cubic-bezier(0.4,0,0.2,1)",
+                                            display: "flex", alignItems: "center", gap: 8,
+                                            position: "relative", overflow: "hidden",
+                                            backdropFilter: "blur(4px)",
+                                        }}
+                                        onMouseEnter={e => { e.currentTarget.style.background = isOn ? "linear-gradient(135deg, rgba(88,101,242,0.2) 0%, rgba(88,101,242,0.1) 100%)" : "rgba(255,255,255,0.05)"; e.currentTarget.style.borderColor = isOn ? "rgba(88,101,242,0.6)" : "rgba(255,255,255,0.1)" }}
+                                        onMouseLeave={e => { e.currentTarget.style.background = isOn ? "linear-gradient(135deg, rgba(88,101,242,0.14) 0%, rgba(88,101,242,0.06) 100%)" : "rgba(255,255,255,0.025)"; e.currentTarget.style.borderColor = isOn && isOv ? "rgba(88,101,242,0.5)" : "rgba(255,255,255,0.06)" }}
+                                    >
+                                        {isOn && <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 2, background: "linear-gradient(180deg, #5865f2 0%, #7289da 100%)", borderRadius: "16px 0 0 16px", boxShadow: "0 0 10px #5865f2" }} />}
                                                 <div style={{ color: isOn ? C.brand : C.muted, display: "flex", alignItems: "center", flexShrink: 0, position: "relative" }}>
                                                     {isOn && (
                                                         <span className="ur-pulse" style={{
@@ -4164,7 +3812,7 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
                                                             cursor: "pointer",
                                                             width: 26,
                                                             height: 26,
-                                                            borderRadius: 24,
+                                                            borderRadius: 20,
                                                             display: "flex",
                                                             alignItems: "center",
                                                             justifyContent: "center",
@@ -4194,7 +3842,7 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
                                                             onClick={(e: any) => { e.stopPropagation(); setOv(row.key as any, null) }}
                                                             onKeyDown={(e: any) => { if (e.key === "Enter") { e.stopPropagation(); setOv(row.key as any, null) } }}
                                                             style={{ color: C.muted, cursor: "pointer", fontSize: 10, padding: "2px 3px", borderRadius: 4, userSelect: "none" }}
-                                                            onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.04)")}
+                                                            onMouseEnter={e => (e.currentTarget.style.background = C.hov)}
                                                             onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
                                                         >
                                                             ↩
@@ -4215,17 +3863,17 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
                                             fontWeight: 500,
                                             transition: "color 150ms ease",
                                         }}
-                                        onMouseEnter={e => e.currentTarget.style.color = C.danger}
-                                        onMouseLeave={e => e.currentTarget.style.color = C.muted}
+                                        onMouseEnter={e => { e.currentTarget.style.color = C.danger }}
+                                        onMouseLeave={e => { e.currentTarget.style.color = C.muted }}
                                     >
                                         Reset to Default ↩
                                     </span>
                                 </div>
                             </div>
                     </div>
+                    </div>
                 </div>
             </div>
-        </div>
     )
 }
 
@@ -4239,10 +3887,10 @@ function createToolbarButton() {
     btn.setAttribute("aria-label", "UserRadar Watchlist")
     btn.title = "UserRadar Watchlist"
     btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`
-    btn.style.cssText = "display:flex;align-items:center;justify-content:center;width:32px;height:32px;cursor:pointer;color:#b5bac1;margin:0 2px;border-radius:10px;transition:color 150ms ease,background 150ms ease,box-shadow 150ms ease;"
+    btn.style.cssText = "display:flex;align-items:center;justify-content:center;width:32px;height:32px;cursor:pointer;color:#b5bac1;margin:0 2px;border-radius:4px;transition:color 150ms ease,background 150ms ease;"
     btn.onclick = () => openModal(p => <WatchlistModal modalProps={p} />)
-    btn.onmouseenter = () => { btn.style.color = C.white; btn.style.background = "rgba(88,101,242,0.15)"; btn.style.boxShadow = "0 0 0 1px rgba(88,101,242,0.3)"; }
-    btn.onmouseleave = () => { btn.style.color = C.muted; btn.style.background = "transparent"; btn.style.boxShadow = "none"; }
+    btn.onmouseenter = () => { btn.style.color = "#ffffff"; btn.style.background = "rgba(255,255,255,0.1)" }
+    btn.onmouseleave = () => { btn.style.color = "#b5bac1"; btn.style.background = "transparent" }
     return btn
 }
 
@@ -4274,13 +3922,8 @@ function startToolbarObserver() {
     }
     tryInject()
     __urToolbarTimer = setInterval(tryInject, 500)
-    let debounceHandle: ReturnType<typeof setTimeout> | null = null
     const observer = new MutationObserver(() => {
-        if (debounceHandle) return
-        debounceHandle = setTimeout(() => {
-            debounceHandle = null
-            if (!document.getElementById("ur-toolbar-btn")) injectToolbarButton()
-        }, 200)
+        if (!document.getElementById("ur-toolbar-btn")) injectToolbarButton()
     })
     observer.observe(document.body, { childList: true, subtree: true })
     ;(window as any).__urToolbarObserver = observer
@@ -4306,29 +3949,22 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
         { key: "custom",  label: "Custom",  desc: "Per-user control",         color: C.brand },
         { key: "stalker", label: "Stalker", desc: "Everything tracked",       color: C.danger },
         { key: "lite",    label: "Lite",    desc: "Essential tracking only",  color: C.brandLight },
-        { key: "silent",  label: "Silent",  desc: "Log everything silently",    color: C.subheader }, // lighter gray for better active contrast
+        { key: "silent",  label: "Silent",  desc: "Log everything silently",    color: "#b5bac1" }, // lighter gray for better active contrast
     ]
     const activeIndex = presets.findIndex(p => p.key === mode)
 
     return (
-        <div style={{
-            marginBottom: 20,
-            padding: "16px",
-            background: C.bg2,
-            borderRadius: 24,
-            border: `1px solid ${C.glassBorder}`,
-            boxShadow: "0 2px 12px rgba(0,0,0,0.2)",
-        }}>
-            <div style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.text, marginBottom: 10 }}>
+        <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader, marginBottom: 10 }}>
                 Global Preset Mode
             </div>
 
-            <div style={{
+            <div className="ur-glass" style={{
                 display: "grid",
                 gridTemplateColumns: `repeat(${presets.length}, 1fr)`,
-                background: "rgba(0,0,0,0.2)",
-                borderRadius: 24,
-                border: `1px solid ${C.glassBorder}`,
+                background: "rgba(0,0,0,0.35)",
+                borderRadius: 22,
+                border: `1px solid ${C.border}`,
                 padding: 4,
                 position: "relative",
             }}>
@@ -4339,14 +3975,14 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
                     left: 4,
                     width: `calc((100% - 8px) / ${presets.length})`,
                     transform: `translateX(${activeIndex * 100}%)`,
-                    background: `linear-gradient(135deg, ${presets[activeIndex].color}25 0%, ${presets[activeIndex].color}10 100%)`,
-                    border: `1.5px solid ${presets[activeIndex].color}60`,
-                    borderRadius: 16,
-                    transition: "transform 300ms cubic-bezier(0.4, 0, 0.2, 1), background 200ms ease, border-color 200ms ease",
+                    background: `linear-gradient(145deg, ${presets[activeIndex].color}2a 0%, ${presets[activeIndex].color}10 100%)`,
+                    border: `1.5px solid ${presets[activeIndex].color}70`,
+                    borderRadius: 18,
+                    boxShadow: `0 0 20px ${presets[activeIndex].color}30, inset 0 1px 0 rgba(255,255,255,0.08)`,
+                    transition: "transform 320ms cubic-bezier(0.34,1.2,0.4,1), background 220ms ease, border-color 220ms ease, box-shadow 220ms ease",
                     pointerEvents: "none",
                     boxSizing: "border-box",
                     zIndex: 1,
-                    boxShadow: `0 4px 16px ${presets[activeIndex].color}20, inset 0 1px 0 rgba(255,255,255,0.08)`,
                 }} />
 
                 {presets.map(p => {
@@ -4354,44 +3990,38 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
                     return (
                         <div
                             key={p.key}
+                            className="ur-tab-btn"
                             onClick={() => { settings.store.globalPresetMode = p.key; refresh() }}
                             style={{
-                                padding: "12px 6px",
-                                borderRadius: 16,
+                                padding: "12px 10px",
+                                borderRadius: 18,
                                 cursor: "pointer",
-                                textAlign: "center",
+                                textAlign: "left",
                                 position: "relative",
                                 zIndex: 2,
-                                transition: "background 150ms ease",
                                 userSelect: "none",
                             }}
                             onMouseEnter={e => {
-                                if (!isActive) e.currentTarget.style.background = "rgba(255,255,255,0.04)"
+                                if (!isActive) e.currentTarget.style.background = "rgba(255,255,255,0.05)"
                             }}
                             onMouseLeave={e => {
                                 e.currentTarget.style.background = "transparent"
                             }}
                         >
-                            <div style={{
-                                fontSize: 13,
-                                fontWeight: 700,
-                                color: isActive ? p.color : C.subheader,
-                                marginBottom: 4,
-                                transition: "color 200ms ease",
-                                whiteSpace: "nowrap",
-                            }}>
-                                {p.label}
+                            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4 }}>
+                                <span style={{ width: 7, height: 7, borderRadius: "50%", background: p.color, boxShadow: isActive ? `0 0 8px ${p.color}` : "none", flexShrink: 0, transition: "box-shadow 220ms" }} />
+                                <span style={{ fontSize: 13, fontWeight: 700, color: isActive ? p.color : C.subheader, transition: "color 200ms ease", whiteSpace: "nowrap" }}>
+                                    {p.label}
+                                </span>
                             </div>
                             <div style={{
                                 fontSize: 10,
-                                color: isActive ? C.text : C.subheader,
-                                opacity: isActive ? 1 : 0.6,
+                                color: isActive ? C.text : C.muted,
                                 lineHeight: 1.3,
-                                transition: "color 200ms ease, opacity 200ms ease",
+                                transition: "color 200ms ease",
                                 whiteSpace: "nowrap",
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
-                                padding: "0 2px",
                             }}>
                                 {p.desc}
                             </div>
@@ -4405,7 +4035,7 @@ function GlobalPresetControl({ refresh }: { refresh: () => void }) {
                     marginTop: 10,
                     padding: "10px 14px",
                     background: C.bg1,
-                    borderRadius: 16,
+                    borderRadius: 14,
                     border: `1px solid ${C.border}`,
                     fontSize: 12,
                     color: C.muted,
@@ -4464,40 +4094,32 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
     }, [users, query, sort, pinned])
 
     return (
-        <ModalRoot {...modalProps} size={ModalSize.LARGE}>
+        <ModalRoot {...modalProps} size={ModalSize.LARGE} className="ur-modal-in">
             <ModalHeader separator={false}>
-                <div className="ur-fade-in" style={{ flex: 1, display: "flex", alignItems: "center", gap: 14 }}>
-                    <div className="ur-pulse-container">
-                        <div className="ur-pulse" style={{
-                            width: 42,
-                            height: 42,
-                            borderRadius: 16,
-                            background: "linear-gradient(135deg, rgba(88,101,242,0.2) 0%, rgba(148,156,244,0.15) 100%)",
-                            border: "1px solid rgba(148,156,244,0.3)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                            boxShadow: "0 4px 16px rgba(88,101,242,0.15), inset 0 1px 0 rgba(255,255,255,0.1)",
-                        }}>
-                            <ico.eye />
-                        </div>
+                <div className="ur-fade-in" style={{ flex: 1, display: "flex", alignItems: "center", gap: 12 }}>
+                    <div className="ur-pulse" style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 12,
+                        background: C.bg2,
+                        border: `1px solid ${C.border}`,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                    }}>
+                        <ico.eye />
                     </div>
                     <div>
-                        <div style={{ fontSize: 22, fontWeight: 800, color: C.header, lineHeight: 1.2, letterSpacing: "-0.3px" }}>UserRadar</div>
-                        <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>watchlist manager</div>
+                        <div style={{ fontSize: 20, fontWeight: 800, color: C.header, lineHeight: 1.2 }}>UserRadar</div>
+                        <div style={{ fontSize: 12, color: C.muted }}>watchlist manager</div>
                     </div>
                 </div>
                 <ModalCloseButton onClick={modalProps.onClose} />
             </ModalHeader>
 
-            <ModalContent style={{ padding: 0 }}>
-                <div className="ur-scrollbar" style={{
-                    padding: "16px 16px 20px",
-                    maxHeight: "60vh",
-                    overflowY: "auto",
-                    background: C.bg1,
-                }}>
+            <ModalContent>
+                <div className="ur-scrollbar" style={{ padding: "0 16px", maxHeight: "60vh", overflowY: "auto" }}>
                     <AddUserSection onAdded={refresh} />
 
                     <div style={{ height: 1, background: C.border, margin: "18px 0" }} />
@@ -4505,7 +4127,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                     <GlobalPresetControl refresh={refresh} />
 
                     <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-                        <div style={{ flex: 1, fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.text }}>
+                        <div style={{ flex: 1, fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.6, color: C.subheader }}>
                             watchlist <span style={{ fontWeight: 500, color: C.muted }}>({users.length})</span>
                         </div>
 
@@ -4516,7 +4138,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                             style={{
                                 display: "flex", alignItems: "center", gap: 4,
                                 padding: "0 9px",
-                                borderRadius: 24,
+                                borderRadius: 20,
                                 cursor: "pointer",
                                 background: C.bg2,
                                 border: `1px solid ${C.border}`,
@@ -4540,21 +4162,9 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
 
                     {users.length === 0 && (
                         <div className="ur-fade-in" style={{ textAlign: "center", padding: "48px 0" }}>
-                            <div className="ur-float" style={{
-                                display: "flex",
-                                justifyContent: "center",
-                                marginBottom: 14,
-                                color: C.muted,
-                                padding: "16px",
-                                background: C.expanded,
-                                borderRadius: 24,
-                                border: `1px solid ${C.glassBorder}`,
-                                width: "fit-content",
-                                margin: "0 auto 18px",
-                                boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
-                            }}><ico.ghost /></div>
-                            <div style={{ fontSize: 17, fontWeight: 700, color: C.header }}>nobody here yet</div>
-                            <div style={{ fontSize: 13, color: C.muted, marginTop: 8 }}>add someone above to start tracking them</div>
+                            <div className="ur-float" style={{ display: "flex", justifyContent: "center", marginBottom: 14, color: C.muted }}><ico.ghost /></div>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: C.header }}>nobody here yet</div>
+                            <div style={{ fontSize: 13, color: C.muted, marginTop: 6 }}>add someone above to start tracking them</div>
                         </div>
                     )}
 
@@ -4585,6 +4195,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                     ))}
                 </div>
             </ModalContent>
+
             <ModalFooter>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 8 }}>
                     <div style={{ display: "flex", gap: 8 }}>
@@ -4603,6 +4214,7 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                                         let added = 0
                                         let skipped = 0
                                         for (const u of data) {
+                                            // must be a real snowflake
                                             const id = typeof u?.id === "string" ? u.id.trim() : ""
                                             if (!/^\d{17,20}$/.test(id)) { skipped++; continue }
                                             if (isWatched(settings, id)) continue
@@ -4630,22 +4242,19 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                             }}
                             style={{
                                 padding: "8px 16px",
-                                borderRadius: 24,
-                                background: C.bg2,
-                                border: `1px solid ${C.glassBorder}`,
+                                borderRadius: 20,
+                                background: "rgba(255,255,255,0.045)",
+                                border: `1px solid ${C.border}`,
                                 color: C.text,
                                 fontSize: 12,
                                 fontWeight: 700,
                                 cursor: "pointer",
                                 fontFamily: "inherit",
-                                transition: "all 200ms ease",
                                 display: "flex",
                                 alignItems: "center",
                                 gap: 6,
-                                boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
                             }}
-                            onMouseEnter={e => { e.currentTarget.style.borderColor = C.glassBorderHov; e.currentTarget.style.background = C.bgEl; e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)" }}
-                            onMouseLeave={e => { e.currentTarget.style.borderColor = C.glassBorder; e.currentTarget.style.background = C.bg2; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.1)" }}
+                            className="ur-footer-btn"
                         >
                             <ico.download />
                             Import
@@ -4677,22 +4286,19 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                             }}
                             style={{
                                 padding: "8px 16px",
-                                borderRadius: 24,
-                                background: C.bg2,
-                                border: `1px solid ${C.glassBorder}`,
+                                borderRadius: 20,
+                                background: "rgba(255,255,255,0.045)",
+                                border: `1px solid ${C.border}`,
                                 color: C.text,
                                 fontSize: 12,
                                 fontWeight: 700,
                                 cursor: "pointer",
                                 fontFamily: "inherit",
-                                transition: "all 200ms ease",
                                 display: "flex",
                                 alignItems: "center",
                                 gap: 6,
-                                boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
                             }}
-                            onMouseEnter={e => { e.currentTarget.style.borderColor = C.glassBorderHov; e.currentTarget.style.background = C.bgEl; e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)" }}
-                            onMouseLeave={e => { e.currentTarget.style.borderColor = C.glassBorder; e.currentTarget.style.background = C.bg2; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.1)" }}
+                            className="ur-footer-btn"
                         >
                             <ico.upload />
                             Export
@@ -4711,22 +4317,19 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
                             }}
                             style={{
                                 padding: "8px 16px",
-                                borderRadius: 24,
-                                background: "rgba(218,55,60,0.12)",
+                                borderRadius: 20,
+                                background: "rgba(218,55,60,0.08)",
                                 border: `1px solid ${C.red}`,
                                 color: C.red,
                                 fontSize: 12,
                                 fontWeight: 700,
                                 cursor: "pointer",
                                 fontFamily: "inherit",
-                                transition: "all 200ms ease",
                                 display: "flex",
                                 alignItems: "center",
                                 gap: 6,
-                                boxShadow: "0 2px 8px rgba(218,55,60,0.1)",
                             }}
-                            onMouseEnter={e => { e.currentTarget.style.background = "linear-gradient(180deg, rgba(218,55,60,0.2) 0%, rgba(218,55,60,0.1) 100%)"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(218,55,60,0.15)"; e.currentTarget.style.transform = "translateY(-1px)" }}
-                            onMouseLeave={e => { e.currentTarget.style.background = "rgba(218,55,60,0.12)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(218,55,60,0.1)"; e.currentTarget.style.transform = "translateY(0)" }}
+                            className="ur-footer-btn ur-footer-btn-danger"
                         >
                             <ico.clear />
                             Clear All Logs
@@ -4735,20 +4338,13 @@ function WatchlistModal({ modalProps }: { modalProps: any }) {
 
                     <button
                         onClick={modalProps.onClose}
+                        className="ur-footer-btn ur-footer-btn-primary"
                         style={{
-                            borderRadius: 24, height: 34, padding: "0 20px",
-                            background: "#5865f2",
-                            color: C.white,
-                            border: "1px solid rgba(148,156,244,0.3)",
-                            fontSize: 13,
-                            fontWeight: 600,
-                            cursor: "pointer",
-                            fontFamily: "inherit",
-                            transition: "all 200ms ease",
-                            boxShadow: `0 4px 16px ${C.brand}4d`,
+                            borderRadius: 20, height: 32, padding: "0 18px",
+                            background: "rgba(255,255,255,0.045)", color: C.text,
+                            border: `1px solid ${C.border}`, fontSize: 13,
+                            fontWeight: 500, cursor: "pointer", fontFamily: "inherit",
                         }}
-                        onMouseEnter={e => { e.currentTarget.style.background = C.brandLight; e.currentTarget.style.boxShadow = "0 6px 20px rgba(88,101,242,0.4)"; e.currentTarget.style.transform = "translateY(-1px)" }}
-                        onMouseLeave={e => { e.currentTarget.style.background = "#5865f2"; e.currentTarget.style.boxShadow = "0 4px 16px rgba(88,101,242,0.3)"; e.currentTarget.style.transform = "translateY(0)" }}
                     >
                         close
                     </button>
@@ -4872,9 +4468,9 @@ function injectDMActivityButton() {
     btn.setAttribute('aria-label', 'Track User History')
     btn.title = 'Track User History'
     btn.innerHTML = HISTORY_SVG
-    btn.style.cssText = 'display:flex;align-items:center;justify-content:center;width:32px;height:32px;cursor:pointer;color:#b5bac1;border-radius:10px;transition:color 150ms ease,background 150ms ease,box-shadow 150ms ease;flex-shrink:0;'
-    btn.onmouseenter = () => { btn.style.color = C.white; btn.style.background = 'rgba(88,101,242,0.15)'; btn.style.boxShadow = '0 0 0 1px rgba(88,101,242,0.3)'; }
-    btn.onmouseleave = () => { btn.style.color = C.muted; btn.style.background = 'transparent'; btn.style.boxShadow = 'none'; }
+    btn.style.cssText = 'display:flex;align-items:center;justify-content:center;width:32px;height:32px;cursor:pointer;color:#b5bac1;border-radius:4px;transition:color 150ms ease,background 150ms ease;flex-shrink:0;'
+    btn.onmouseenter = () => { btn.style.color = '#ffffff'; btn.style.background = 'rgba(255,255,255,0.1)' }
+    btn.onmouseleave = () => { btn.style.color = '#b5bac1'; btn.style.background = 'transparent' }
     btn.onclick = (e) => {
         e.stopPropagation()
         e.preventDefault()
@@ -4882,10 +4478,10 @@ function injectDMActivityButton() {
         const name = displayName(u) || recipientId
         const av = u ? avatarUrl(u.id, (u as any).avatar, 64) : avatarUrl(recipientId, null, 64)
         openModal(p => (
-            <ModalRoot {...p} size={ModalSize.LARGE}>
+            <ModalRoot {...p} size={ModalSize.LARGE} className="ur-modal-in">
                 <ModalHeader separator={false}>
                     <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 12 }}>
-                        <img src={av} style={{ width: 36, height: 36, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.06)" }} />
+                        <img src={av} style={{ width: 36, height: 36, borderRadius: "50%" }} />
                         <div>
                             <div style={{ fontSize: 16, fontWeight: 700, color: C.header }}>{name}</div>
                             <div style={{ fontSize: 12, color: C.muted }}>Activity Log</div>
@@ -4911,14 +4507,7 @@ function injectDMActivityButton() {
 
 function startDMObserver() {
     injectDMActivityButton()
-    let debounceHandle: ReturnType<typeof setTimeout> | null = null
-    const observer = new MutationObserver(() => {
-        if (debounceHandle) return
-        debounceHandle = setTimeout(() => {
-            debounceHandle = null
-            injectDMActivityButton()
-        }, 200)
-    })
+    const observer = new MutationObserver(() => injectDMActivityButton())
     observer.observe(document.body, { childList: true, subtree: true })
     ;(window as any).__urDmObserver = observer
 }
@@ -4945,6 +4534,15 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
 
     let sessionJustEnded = false
 
+    // keeps a short window open so a duplicate presence event right after a
+    // real transition doesn't get mistaken for a fresh, unrelated change
+    const comingOnline = wasOffline && !isOffline
+    const goingOffline = !wasOffline && isOffline
+    const onlineStateChange = comingOnline || goingOffline
+    const transitionKey = `transition:${uid}`
+    if (onlineStateChange) _logDebounce[transitionKey] = Date.now()
+    const recentlyTransitioned = onlineStateChange || (Date.now() - (_logDebounce[transitionKey] || 0) < 3000)
+
     if (!isOffline && !isStartup) {
         if (!statusSessionCache[uid]) {
             statusSessionCache[uid] = {
@@ -4956,7 +4554,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         }
     }
 
-    if (!isOffline && statusSessionCache[uid] && oldStatus !== newStatus && !isStartup) {
+    if (!isOffline && statusSessionCache[uid] && oldStatus !== undefined && oldStatus !== newStatus && !isStartup && !recentlyTransitioned) {
         statusSessionCache[uid]!.changes.push({ status: newStatus, ts: Date.now() })
         if (isFeatureOn(uid, "status", "globalStatus")) {
 
@@ -5027,17 +4625,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         sessionJustEnded = true
     }
 
-    const comingOnline = wasOffline && !isOffline
-    const goingOffline = !wasOffline && isOffline
-    const onlineStateChange = comingOnline || goingOffline
-
-    // keeps a short window open so a duplicate presence event right after a
-    // real transition doesn't get mistaken for a fresh, unrelated change
-    const transitionKey = `transition:${uid}`
-    if (onlineStateChange) _logDebounce[transitionKey] = Date.now()
-    const recentlyTransitioned = onlineStateChange || (Date.now() - (_logDebounce[transitionKey] || 0) < 3000)
-
-    if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup && !statusSessionCache[uid] && !sessionJustEnded && !onlineStateChange) {
+    if (oldStatus !== undefined && oldStatus !== newStatus && isFeatureOn(uid, "status", "globalStatus") && !isStartup && !statusSessionCache[uid] && !sessionJustEnded && !recentlyTransitioned) {
 
         const platLog = platformSuffixLog(uid)
         notify({
@@ -5049,7 +4637,6 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         logActivity(uid, "status", STATUS_EMOJI_LOCAL[newStatus] || "⚫", `${STATUS_LABEL[oldStatus] || oldStatus} → ${STATUS_LABEL[newStatus] || newStatus}${platLog}`)
     }
     statusCache[uid] = newStatus
-    notifyPresenceChange(uid)
 
     const newClient = resolveClient((u as any).client_status ?? (u as any).clientStatus)
     const oldClient = clientCache[uid]
@@ -5069,23 +4656,16 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         clientCache[uid] = newClient
     }
 
-    const realAct = (u.activities || []).find((a: any) => a.type !== 4) ?? null
-    const newActKey = realAct
-        ? realAct.type === 2
-            ? `2\x00${realAct.name}\x00${realAct.details || ""}\x00${realAct.state || ""}`
-            : `${realAct.type}\x00${realAct.name}`
-        : null
-    const oldAct = activityCache[uid]
-    activityCache[uid] = newActKey
+    const actKeyOf = (a: any) => a.type === 2
+        ? `2\x00${a.name}\x00${a.details || ""}\x00${a.state || ""}`
+        : `${a.type}\x00${a.name}`
+    const rawActs = (u.activities || []).filter((a: any) => a.type !== 4)
+    const newActKeys = rawActs.map(actKeyOf)
+    const oldActKeys: string[] = activityCache[uid] || []
+    activityCache[uid] = newActKeys
 
-    if (oldAct !== undefined && oldAct !== newActKey && isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
+    if (isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
         const actPlatform = clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined
-
-        const [oldTypeStr, ...oldNameParts] = (oldAct || "").split("\x00")
-        const oldType = oldAct ? parseInt(oldTypeStr) : -1
-        const isOldListening = oldType === 2
-        const oldActName    = isOldListening ? (oldNameParts[1] || "") : oldNameParts.join("\x00")
-        const oldArtistName = isOldListening ? (oldNameParts[2] || "").trim() : ""
 
         const getSpotifyFields = (act: any) => {
             const li = act.assets?.large_image || ""
@@ -5121,13 +4701,13 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 type: "session",
                 title: dur ? `${songName} · ${dur}` : songName,
                 body: `${songName} by ${artistName}`,
-                metadata: {
-                    ...sess.metadata,
+                metadata: { 
+                    ...sess.metadata, 
                     type: 2,
                     appName: sess.metadata?.appName || "Spotify",
-                    action: "listening_session",
-                    endTime: Date.now(),
-                    duration: dur || "< 1m"
+                    action: "listening_session", 
+                    endTime: Date.now(), 
+                    duration: dur || "< 1m" 
                 }
             })
             delete activeSessions[sk]
@@ -5142,12 +4722,12 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 type: "session",
                 title: dur ? `${actName} · ${dur}` : actName,
                 body: `${ACT_VERB[type] ?? "playing"} ${actName}`,
-                metadata: {
-                    ...sess.metadata,
+                metadata: { 
+                    ...sess.metadata, 
                     appName: sess.metadata?.appName || actName,
-                    action: "activity_session",
-                    endTime: Date.now(),
-                    duration: dur || "< 1m"
+                    action: "activity_session", 
+                    endTime: Date.now(), 
+                    duration: dur || "< 1m" 
                 }
             })
             delete activeSessions[sk]
@@ -5165,40 +4745,40 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 onClick: () => openUserProfile(uid),
             })
             const entry = await logUserActivity(uid, "activity", "🎵", title, body, {
-                metadata: {
-                    type: 2,
+                metadata: { 
+                    type: 2, 
                     appName: act.name || "Spotify",
-                    song,
-                    artist,
-                    album,
-                    albumArtUrl,
-                    platform: actPlatform,
+                    song, 
+                    artist, 
+                    album, 
+                    albumArtUrl, 
+                    platform: actPlatform, 
                     startTimestamp: act.timestamps?.start,
                     endTimestamp: act.timestamps?.end,
-                    action: "listening_start"
+                    action: "listening_start" 
                 }
             })
-            activeSessions[sk] = {
-                logId: entry.id,
-                startTime: Date.now(),
-                metadata: {
+            activeSessions[sk] = { 
+                logId: entry.id, 
+                startTime: Date.now(), 
+                metadata: { 
                     type: 2,
                     appName: act.name || "Spotify",
-                    song,
-                    artist,
-                    album,
-                    albumArtUrl,
+                    song, 
+                    artist, 
+                    album, 
+                    albumArtUrl, 
                     platform: actPlatform,
                     startTimestamp: act.timestamps?.start,
                     endTimestamp: act.timestamps?.end
-                }
+                } 
             }
         }
 
         const openActivity = async (act: any) => {
             const verb = ACT_VERB[act.type] ?? "playing"
             const icon = act.type === 1 ? "📺" : act.type === 3 ? "🎬" : act.type === 5 ? "🏆" : "🎮"
-            const sk = sessionKey(uid, "activity", `${act.type}:${act.name}`)
+            const sk = sessionKey(uid, "activity", actKeyOf(act))
             let desc = act.name || ""
             let body = `${verb} ${act.name}`
             if (act.type === 1 && act.details) { desc = `${act.name}: ${act.details}`; body = `streaming ${act.details}` }
@@ -5212,68 +4792,56 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 onClick: () => openUserProfile(uid),
             })
             const entry = await logUserActivity(uid, "activity", icon, title, body, {
-                metadata: {
+                metadata: { 
                     type: act.type,
                     appName: act.name,
-                    name: act.name,
-                    details: act.details,
-                    state: act.state,
-                    platform: actPlatform,
+                    name: act.name, 
+                    details: act.details, 
+                    state: act.state, 
+                    platform: actPlatform, 
                     gameIconUrl: iconUrl,
                     startTimestamp: act.timestamps?.start,
                     endTimestamp: act.timestamps?.end,
-                    action: "activity_start"
+                    action: "activity_start" 
                 }
             })
-            activeSessions[sk] = {
-                logId: entry.id,
-                startTime: Date.now(),
-                metadata: {
+            activeSessions[sk] = { 
+                logId: entry.id, 
+                startTime: Date.now(), 
+                metadata: { 
                     type: act.type,
                     appName: act.name,
-                    name: act.name,
-                    platform: actPlatform,
+                    name: act.name, 
+                    platform: actPlatform, 
                     gameIconUrl: iconUrl,
                     startTimestamp: act.timestamps?.start,
                     endTimestamp: act.timestamps?.end
-                }
+                } 
             }
         }
 
-        if (realAct && !oldAct) {
-            if (realAct.type === 2) await openListening(realAct)
-            else await openActivity(realAct)
-        }
-        else if (!realAct && oldAct) {
-            if (isOldListening) {
-                await closeListening(oldActName, oldArtistName)
+        for (const k of oldActKeys) {
+            if (newActKeys.includes(k)) continue
+            const [typeStr, ...parts] = k.split("\x00")
+            const type = parseInt(typeStr)
+            if (type === 2) {
+                await closeListening(parts[1] || "", (parts[2] || "").trim())
             } else {
-                const sk = sessionKey(uid, "activity", oldAct)
-                await closeActivity(sk, oldActName, oldType)
+                const actName = parts.join("\x00")
+                await closeActivity(sessionKey(uid, "activity", k), actName, type)
                 notify({
-                    title: `${dn} stopped ${ACT_VERB[oldType] ?? "playing"} ${oldActName}`,
+                    title: `${dn} stopped ${ACT_VERB[type] ?? "playing"} ${actName}`,
                     body: "",
                     icon,
                     onClick: () => openUserProfile(uid),
                 })
             }
         }
-        else if (realAct && oldAct) {
-            if (realAct.type === 2 && isOldListening) {
-                await closeListening(oldActName, oldArtistName)
-                await openListening(realAct)
-            } else if (realAct.type === 2) {
-                const oldSk = sessionKey(uid, "activity", oldAct)
-                await closeActivity(oldSk, oldActName, oldType)
-                await openListening(realAct)
-            } else if (isOldListening) {
-                await closeListening(oldActName, oldArtistName)
-                await openActivity(realAct)
-            } else {
-                const oldSk = sessionKey(uid, "activity", oldAct)
-                await closeActivity(oldSk, oldActName, oldType)
-                await openActivity(realAct)
-            }
+        for (let idx = 0; idx < rawActs.length; idx++) {
+            if (oldActKeys.includes(newActKeys[idx])) continue
+            const act = rawActs[idx]
+            if (act.type === 2) await openListening(act)
+            else await openActivity(act)
         }
     }
 
@@ -5285,8 +4853,11 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
             : null
         const oldCustomStatus = customStatusCache[uid]
 
-        // skip during connect/disconnect — looks identical to a manual removal
-        if (recentlyTransitioned) {
+        // skip whenever either side of this tick is offline/invisible — multi-tick
+        // reconnect sequences can outlast a fixed timer, so check live state instead
+        const statusUnstable = isOffline || wasOffline || recentlyTransitioned
+
+        if (statusUnstable) {
             // leave cache alone so the next real change compares right
         } else if (oldCustomStatus !== undefined && oldCustomStatus !== newCustomStatus && newCustomStatus === null) {
             // hold off — a disconnect blip fixes itself in ~2s
@@ -5377,14 +4948,13 @@ export default definePlugin({
                 // status + activity + custom status
                 try {
                     const status = presMod?.getStatus?.(wu.id)
-                    if (status) { statusCache[wu.id] = status; notifyPresenceChange(wu.id) }
+                    if (status) statusCache[wu.id] = status
                     const acts: any[] = presMod?.getActivities?.(wu.id) ?? []
-                    const realAct = acts.find((a: any) => a.type !== 4) ?? null
-                    activityCache[wu.id] = realAct
-                        ? realAct.type === 2
-                            ? `2\x00${realAct.name}\x00${realAct.details || ""}\x00${realAct.state || ""}`
-                            : `${realAct.type}\x00${realAct.name}`
-                        : null
+                    activityCache[wu.id] = acts
+                        .filter((a: any) => a.type !== 4)
+                        .map((a: any) => a.type === 2
+                            ? `2\x00${a.name}\x00${a.details || ""}\x00${a.state || ""}`
+                            : `${a.type}\x00${a.name}`)
                     const customAct = acts.find((a: any) => a.type === 4) ?? null
                     customStatusCache[wu.id] = customAct
                         ? [customAct.emoji?.name, customAct.state].filter(Boolean).join(" ") || null
@@ -5440,6 +5010,8 @@ export default definePlugin({
         Object.keys(cameraCache).forEach(k => delete cameraCache[k])
         Object.keys(streamCache).forEach(k => delete streamCache[k])
         Object.keys(customStatusCache).forEach(k => delete customStatusCache[k])
+        Object.keys(statusSessionCache).forEach(k => delete statusSessionCache[k])
+        Object.keys(activeSessions).forEach(k => delete activeSessions[k])
         Object.keys(_notifDebounce).forEach(k => delete _notifDebounce[k])
         Object.keys(_logDebounce).forEach(k => delete _logDebounce[k])
         presenceDebounce.forEach(t => clearTimeout(t))
@@ -5493,7 +5065,7 @@ export default definePlugin({
             const uid = message?.author?.id
             if (!uid || !isWatched(settings, uid)) return
 
-            // edited_timestamp only exists on a real edit, not embed/pin/reaction updates
+            // edited_timestamp = real edit, not embed/pin/reaction
             if (!message.edited_timestamp) return
 
             if (!isFeatureOn(uid, "edits", "globalEdits")) return
@@ -5542,7 +5114,7 @@ export default definePlugin({
 
         MESSAGE_DELETE({ id, channelId }: MsgDeleteEvent) {
             const store = tryLoadLoggedMsgs()
-            // discord cache first, then try message logger in both key formats it uses
+            // try discord cache, then message logger (both key formats)
             const msg = MessageStore.getMessage(channelId, id)
                 ?? store?.[id]
                 ?? (store as any)?.[channelId]?.[id]
@@ -5679,7 +5251,7 @@ export default definePlugin({
                             members: vcMembers.length > 0 ? vcMembers : undefined,
                         }
                     })
-                    // an orphaned session could be sitting here — close it first
+                    // close any orphaned session sitting here first
                     const orphan = activeSessions[sk]
                     if (orphan && orphan.logId !== undefined) {
                         const orphanElapsed = Date.now() - orphan.startTime
@@ -5799,7 +5371,7 @@ export default definePlugin({
                                 activeSessions[camSk] = { logId: camEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: guildName(currentGuildId) || "DM", channel: currentChName, platform: camPlatform } }
                             }).catch(e => log.warn("camera log failed", e))
                         } else {
-                                            const camSession = activeSessions[camSk]
+                            const camSession = activeSessions[camSk]
                             const camSpent = camSession ? Date.now() - camSession.startTime : 0
                             const camDur = camSpent > 60000 ? formatDuration(camSpent) : ""
                             if (camSession) {
@@ -5831,7 +5403,7 @@ export default definePlugin({
                         streamCache[uid] = newStream
                         const streamSk = sessionKey(uid, "stream")
                         if (newStream) {
-                                notify({
+                            notify({
                                 title: `${dn} started screen sharing`,
                                 body: `in #${currentChName}`,
                                 icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5889,7 +5461,7 @@ export default definePlugin({
                 const uid = u.user?.id
                 if (!uid || !isWatched(settings, uid)) continue
 
-                // never debounce an offline/online flip, or a quick blip gets swallowed
+                // don't debounce offline/online flips or a quick blip gets swallowed
                 const touchesOffline = isOfflineStatus(statusCache[uid]) || isOfflineStatus(u.status)
                 if (touchesOffline) {
                     const pending = presenceDebounce.get(uid)
@@ -5915,7 +5487,7 @@ export default definePlugin({
             if (!hasProfileChange) return
             const old = profileCache[user.id]
             if (!old) {
-                // cache empty (startup) — seed it from the event so it's not lost
+                // empty at startup, seed from event
                 profileCache[user.id] = { user: camelize(user) }
                 return
             }
