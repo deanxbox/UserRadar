@@ -14,6 +14,12 @@ A Vencord plugin for keeping tabs on specific people on Discord. Add someone to 
 - **Pin/favorite users** — pinned people always float to the top of the list regardless of sort order
 - Each person can have their own tracking settings, independent of everyone else
 - Auto-cleanup — logs for a person can be deleted automatically the moment you remove them from the watchlist (on by default, toggle in plugin settings)
+  <p>
+  <img src="https://github.com/k1ng0p/UserRadar/blob/main/Previews/Screenshot%202026-08-04%20005223.png?raw=true" width="550" />
+  &nbsp;&nbsp;
+  <img src="https://github.com/k1ng0p/UserRadar/blob/main/Previews/Screenshot%202026-08-04%20012249.png?raw=true" width="400" />
+  </p>
+
 
 ### 📝 Message Tracking
 
@@ -22,6 +28,9 @@ A Vencord plugin for keeping tabs on specific people on Discord. Add someone to 
 - Logs deletions (requires a message logger plugin to recover deleted content)
 - Shows typing indicators if enabled
 - Click any message log to jump straight to it in Discord
+  <p>
+  <img src="https://github.com/k1ng0p/UserRadar/blob/main/Previews/Screenshot%202026-08-04%20005444.png?raw=true" width="600" />
+  </p>
 
 ### 🎙️ Voice Tracking
 
@@ -36,6 +45,9 @@ A Vencord plugin for keeping tabs on specific people on Discord. Add someone to 
 - Tracks games being played and streaming sessions
 - Session duration and start/end times saved automatically
 - A green **Live** badge appears on anything currently active
+  <p>
+  <img src="https://github.com/k1ng0p/UserRadar/blob/main/Previews/Screenshot%202026-08-04%20013303.png?raw=true" width="600" />
+  </p>
 
 ### 🟢 Status Tracking
 
@@ -43,6 +55,9 @@ A Vencord plugin for keeping tabs on specific people on Discord. Add someone to 
 - Which platform they're using
 - Custom status (the emoji + text people set manually) with before/after
 - Smart enough to tell a real status change apart from someone briefly reconnecting — won't spam you every time their internet blips
+ <p>
+  <img src="https://github.com/k1ng0p/UserRadar/blob/main/Previews/Screenshot%202026-08-04%20012606.png?raw=true" width="600" />
+ </p>
 
 ### 🪪 Profile Tracking
 
@@ -74,6 +89,10 @@ Get a desktop notification the instant something happens. Fully customizable per
 - Export your log to a file — export everything, or just one category (messages only, voice only, etc.)
 - Import a log back in
 - Clear all logs whenever you want a fresh start
+  <p>
+  <img src="https://github.com/k1ng0p/UserRadar/blob/main/Previews/Screenshot%202026-08-04%20011725.png?raw=true" width="600" />
+  </p>
+
 
 ### ⚙️ Global Presets
 
@@ -82,6 +101,9 @@ Switch tracking behavior instantly with built-in modes:
 - **Stalker** — track absolutely everything
 - **Lite** — track only the essentials (messages, deletes, typing, avatar, voice, status)
 - **Silent** — pause all notifications without losing any logged data
+  <p>
+  <img src="https://github.com/k1ng0p/UserRadar/blob/main/Previews/Screenshot%202026-08-04%20014003.png?raw=true" width="600" />
+  </p>
 
 ---
 
