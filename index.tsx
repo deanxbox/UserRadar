@@ -480,6 +480,7 @@ function checkProfileChanged(uid: string, fresh: any) {
             const oldAvatarUrl = oldAvatar ? avatarUrl(uid, oldAvatar, 256) : null
             const newAvatarUrl = newAvatar ? avatarUrl(uid, newAvatar, 256) : null
             notify({
+                _uid: uid,
                 title: newAvatar ? `${dn} changed their avatar` : `${dn} removed their avatar`,
                 body: newAvatar ? "click to see new pfp" : "reset to default",
                 icon: newAvatarUrl ?? undefined,
@@ -522,6 +523,7 @@ function checkProfileChanged(uid: string, fresh: any) {
                 : `removed ${fieldLabel}`
 
             notify({
+                _uid: uid,
                 title: `${dn} changed their ${fieldLabel}`,
                 body: notifyBody,
                 icon,
@@ -2658,6 +2660,10 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
     const [searchQuery, setSearchQuery] = React.useState("")
     const [sortMode, setSortMode] = React.useState<"newest" | "oldest">("newest")
     const [compact, setCompact] = React.useState(() => !!settings.store.compactLogView)
+    // only mount this many cards at first — rest load in on demand so opening
+    // the log with hundreds of entries doesn't freeze on a big DOM dump
+    const [visibleCount, setVisibleCount] = React.useState(60)
+    React.useEffect(() => { setVisibleCount(60) }, [activeFilters, searchQuery, sortMode])
 
     const toggleCompact = () => {
         const next = !compact
@@ -2725,14 +2731,16 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
         return sorted
     }, [logs, activeFilters, searchQuery, sortMode])
 
+    const visibleFiltered = React.useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount])
+
     const grouped = React.useMemo(() => {
-        return filtered.reduce((acc, log) => {
+        return visibleFiltered.reduce((acc, log) => {
             const date = new Date(log.ts).toLocaleDateString()
             if (!acc[date]) acc[date] = []
             acc[date].push(log)
             return acc
         }, {} as Record<string, ActivityEntry[]>)
-    }, [filtered])
+    }, [visibleFiltered])
 
     const categoryCounts = React.useMemo(() => {
         const counts: Record<string, number> = {}
@@ -3003,7 +3011,7 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 paddingRight: 4,
             }}>
                 {Object.entries(grouped).map(([date, dayLogs]) => (
-                    <div key={`${date}-${Array.from(activeFilters).join(",")}-${sortMode}`}>
+                    <div key={date}>
                         <div data-ur-day-header style={{
                             fontSize: 10,
                             fontWeight: 800,
@@ -3035,6 +3043,34 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                         ))}
                     </div>
                 ))}
+                {filtered.length > visibleCount && (
+                    <button
+                        className="ur-tab-btn ur-chip"
+                        onClick={() => setVisibleCount(v => v + 60)}
+                        style={{
+                            alignSelf: "center",
+                            marginTop: 4,
+                            padding: "8px 16px",
+                            borderRadius: 20,
+                            background: C.bg1,
+                            border: `1px solid ${C.border}`,
+                            color: C.text,
+                            fontSize: 12,
+                            fontWeight: 700,
+                            cursor: "pointer",
+                            fontFamily: "inherit",
+                            transition: "all 150ms ease",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = C.bgEl; e.currentTarget.style.background = C.bg2 }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.bg1 }}
+                    >
+                        <ico.download />
+                        Load more · {filtered.length - visibleCount} left
+                    </button>
+                )}
                 {logs.length === 0 && (
                     <div style={{ textAlign: "center", padding: "40px 0", color: C.muted }}>
                         <div style={{
@@ -4559,6 +4595,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
         if (isFeatureOn(uid, "status", "globalStatus")) {
 
             notify({
+                _uid: uid,
                 title: `${dn} is now ${newStatus}`,
                 body: `was: ${STATUS_LABEL[oldStatus] || oldStatus}`,
                 icon,
@@ -4599,6 +4636,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
 
         if (isFeatureOn(uid, "status", "globalStatus")) {
             notify({
+                _uid: uid,
                 title: `${dn} went offline`,
                 body: durStr ? `Online for ${durStr}` : "",
                 icon,
@@ -4629,6 +4667,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
 
         const platLog = platformSuffixLog(uid)
         notify({
+            _uid: uid,
             title: `${dn} is now ${newStatus}`,
             body: `was: ${STATUS_LABEL[oldStatus] || oldStatus}`,
             icon,
@@ -4739,6 +4778,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
             const title = song && artist ? `${song} — ${artist}` : song || act.name
             const body  = song && artist ? `${song} by ${artist}${album ? ` · ${album}` : ""}` : song || act.name
             notify({
+                _uid: uid,
                 title: `${dn} is listening to ${song || act.name}`,
                 body,
                 icon,
@@ -4786,6 +4826,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
             const title = act.details ? `${verb} ${act.name} — ${act.details}` : `${verb} ${act.name}`
             const iconUrl = getGameIcon(act)
             notify({
+                _uid: uid,
                 title: `${dn} is ${verb} ${act.name}`,
                 body: desc,
                 icon,
@@ -4830,6 +4871,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 const actName = parts.join("\x00")
                 await closeActivity(sessionKey(uid, "activity", k), actName, type)
                 notify({
+                    _uid: uid,
                     title: `${dn} stopped ${ACT_VERB[type] ?? "playing"} ${actName}`,
                     body: "",
                     icon,
@@ -4870,6 +4912,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 if (isOfflineStatus(statusCache[uid])) return // they're offline now, definitely a disconnect
                 customStatusCache[uid] = null
                 notify({
+                    _uid: uid,
                     title: `${dn} changed their status`,
                     body: "removed custom status",
                     icon,
@@ -4891,6 +4934,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
             if (!_logDebounce[_ldk] || _ldt - _logDebounce[_ldk] > 2000) {
                 _logDebounce[_ldk] = _ldt
                 notify({
+                    _uid: uid,
                     title: `${dn} changed their status`,
                     body: bodyText,
                     icon,
@@ -5041,6 +5085,7 @@ export default definePlugin({
                 const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId
                 if (!skipNotify) {
                     notify({
+                        _uid: uid,
                         title: `${dn} sent a message`,
                         body: msgPreview(message.content, message.attachments?.[0]?.filename),
                         icon: avatarUrl(uid, message.author?.avatar, 80),
@@ -5092,6 +5137,7 @@ export default definePlugin({
 
             if (!skipNotify) {
                 notify({
+                    _uid: uid,
                     title: `${dn} edited a message`,
                     body: notifyBody,
                     icon: avatarUrl(uid, message.author?.avatar, 80),
@@ -5131,6 +5177,7 @@ export default definePlugin({
                 const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId
                 if (!skipNotify) {
                     notify({
+                        _uid: uid,
                         title: `${dn} deleted a message`,
                         body: msgPreview(msg.content, msg.attachments?.[0]?.filename),
                         icon: avatarUrl(uid, msg.author?.avatar, 80),
@@ -5169,6 +5216,7 @@ export default definePlugin({
                 // body format: "Server Name · #channel" or "Direct Message" for DMs
                 if (!skipNotify) {
                     notify({
+                        _uid: userId,
                         title: `${dn} is typing…`,
                         body: location + "",
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5222,6 +5270,7 @@ export default definePlugin({
                     const guildNameVc = guildName(ch?.guild_id)
                     const sk = sessionKey(uid, "voice", now!)
                     notify({
+                        _uid: uid,
                         title: `${dn} Joined Voice`,
                         body: (guildNameVc ? `${guildNameVc} · #${chName}` : `#${chName}`) + "",
                         icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5289,6 +5338,7 @@ export default definePlugin({
                         })
                         delete activeSessions[sk]
                         notify({
+                            _uid: uid,
                             title: `${dn} Left Voice`,
                             body: guildNameVcLeftStr ? `${guildNameVcLeftStr} · #${chName}${dur ? " · " + dur : ""}` : `#${chName}${dur ? " · " + dur : ""}`,
                             icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5297,6 +5347,7 @@ export default definePlugin({
                     } else {
                         // No session found, log as separate leave event
                         notify({
+                            _uid: uid,
                             title: `${dn} Left Voice`,
                             body: guildNameVcLeftStr ? `${guildNameVcLeftStr} · #${chName}` : `#${chName}`,
                             icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5316,6 +5367,7 @@ export default definePlugin({
                     const oldCh = ChannelStore.getChannel(old)
                     const guildNameVcMove = guildName(ch?.guild_id)
                     notify({
+                        _uid: uid,
                         title: `${dn} Moved Voice Channels`,
                         body: guildNameVcMove
                             ? `${guildNameVcMove}: #${oldCh?.name || "?"} → #${chName}`
@@ -5352,6 +5404,7 @@ export default definePlugin({
                         if (newCamera) {
                             // Camera turned on - start session
                             notify({
+                                _uid: uid,
                                 title: `${dn} turned on camera`,
                                 body: `in #${currentChName}`,
                                 icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5389,6 +5442,7 @@ export default definePlugin({
                                 }).then(() => { delete activeSessions[camSk] }).catch(() => { delete activeSessions[camSk] })
                             }
                             notify({
+                                _uid: uid,
                                 title: `${dn} turned off camera`,
                                 body: `in #${currentChName}${camDur ? " · " + camDur : ""}`,
                                 icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5404,6 +5458,7 @@ export default definePlugin({
                         const streamSk = sessionKey(uid, "stream")
                         if (newStream) {
                             notify({
+                                _uid: uid,
                                 title: `${dn} started screen sharing`,
                                 body: `in #${currentChName}`,
                                 icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5441,6 +5496,7 @@ export default definePlugin({
                                 }).then(() => { delete activeSessions[streamSk] }).catch(() => { delete activeSessions[streamSk] })
                             }
                             notify({
+                                _uid: uid,
                                 title: `${dn} stopped screen sharing`,
                                 body: `in #${currentChName}${streamDur ? " · " + streamDur : ""}`,
                                 icon: u ? avatarUrl(u.id, (u as any).avatar, 80) : undefined,
@@ -5513,6 +5569,7 @@ export default definePlugin({
             const name  = displayName(user)
             const dn    = label ? `${label} (${name})` : name
             notify({
+                _uid: user.id,
                 title: `${dn} Joined a Server`,
                 body: gn || "a server",
                 icon: avatarUrl(user.id, user.avatar, 80),
@@ -5535,6 +5592,7 @@ export default definePlugin({
             const name  = displayName(user)
             const dn    = label ? `${label} (${name})` : name
             notify({
+                _uid: user.id,
                 title: `${dn} Left a Server`,
                 body: gn || "a server",
                 icon: avatarUrl(user.id, user.avatar, 80),
