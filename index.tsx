@@ -8,7 +8,7 @@ import { getCurrentChannel, openUserProfile } from "@utils/discord"
 import { openModal, ModalRoot, ModalHeader, ModalContent, ModalFooter, ModalCloseButton, ModalSize } from "@utils/modal"
 import definePlugin, { OptionType } from "@utils/types"
 import { findByProps } from "@webpack"
-import { Button, ChannelStore, Menu, MessageStore, React, RestAPI, Text, TextInput, Toasts, UserStore } from "@webpack/common"
+import { ChannelStore, Menu, MessageStore, React, RestAPI, Toasts, UserStore } from "@webpack/common"
 
 import {
     addUser, camelize, displayName, featureOn,
@@ -18,7 +18,7 @@ import {
 
 import {
     GuildMemberEvent, MsgCreateEvent, MsgDeleteEvent, MsgUpdateEvent,
-    PresenceEvent, ProfileFetchEvent,
+    PresenceEvent,
     TypingEvent, VoiceStateEvent, WatchedUser
 } from "./types"
 
@@ -210,7 +210,23 @@ class ActivityStore {
             if (!logs) return false
             this.cache[uid] = logs.filter(l => l.id !== logId)
             await this.save()
+            emitActivityRemove(uid, logId)
             return true
+        })
+    }
+
+    // bulk delete — e.g. "remove all typing cards" / "remove all status cards" for a user
+    async removeLogsWhere(uid: string, predicate: (log: ActivityEntry) => boolean): Promise<number> {
+        return this.enqueue(async () => {
+            await this.load()
+            const logs = this.cache[uid]
+            if (!logs) return 0
+            const toRemove = logs.filter(predicate)
+            if (toRemove.length === 0) return 0
+            this.cache[uid] = logs.filter(l => !predicate(l))
+            await this.save()
+            toRemove.forEach(l => emitActivityRemove(uid, l.id))
+            return toRemove.length
         })
     }
 }
@@ -226,6 +242,17 @@ export function onActivityUpdate(cb: (uid: string, entry: ActivityEntry) => void
 
 function emitActivityUpdate(uid: string, entry: ActivityEntry) {
     activityListeners.forEach(cb => cb(uid, entry))
+}
+
+const activityRemoveListeners = new Set<(uid: string, logId: string) => void>()
+
+export function onActivityRemove(cb: (uid: string, logId: string) => void) {
+    activityRemoveListeners.add(cb)
+    return () => activityRemoveListeners.delete(cb)
+}
+
+function emitActivityRemove(uid: string, logId: string) {
+    activityRemoveListeners.forEach(cb => cb(uid, logId))
 }
 
 export async function logUserActivity(
@@ -266,13 +293,42 @@ const statusSessionCache: Record<string, { startTime: number; startStatus: strin
 
 const activeSessions: Record<string, { logId: string; startTime: number; channelId?: string; guildId?: string; metadata?: any }> = {}
 
+// pending "is typing" log per user+channel — MESSAGE_CREATE deletes it if they actually send.
+// stays if they don't.
+const pendingTypingLog: Record<string, { logId: string; ts: number }> = {}
+const TYPING_LOG_TTL_MS = 3 * 60 * 1000
+
+// persisted so a discord restart doesn't orphan whatever was mid-session
+const ACTIVE_SESSIONS_KEY = "UserRadar_ActiveSessions_v1"
+
+async function saveActiveSessions() {
+    try { await DataStore.set(ACTIVE_SESSIONS_KEY, JSON.stringify(activeSessions)) }
+    catch (e) { log.warn("[UserRadar] failed to save active sessions", e) }
+}
+
+async function loadActiveSessions(): Promise<Record<string, { logId: string; startTime: number; channelId?: string; guildId?: string; metadata?: any }>> {
+    try {
+        const data = await DataStore.get(ACTIVE_SESSIONS_KEY)
+        return data ? JSON.parse(data) : {}
+    } catch { return {} }
+}
+
+let _sessSaveTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleSessionSave() {
+    if (_sessSaveTimer) return
+    _sessSaveTimer = setTimeout(() => { _sessSaveTimer = null; saveActiveSessions() }, 1000)
+}
+let _sessSaveInterval: ReturnType<typeof setInterval> | null = null
+
 const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000  // 24h — a session stuck this long means the close event never arrived (client crash, force quit, etc)
 
 async function sweepStaleSessions() {
     const now = Date.now()
+    let touched = false
     for (const [sk, sess] of Object.entries(activeSessions)) {
         if (now - sess.startTime < MAX_SESSION_AGE_MS) continue
         delete activeSessions[sk]
+        touched = true
         try {
             await activityStore.updateLog(sk.split("_")[0], sess.logId, {
                 title: sess.metadata?.channel ? `Was in #${sess.metadata.channel}` : "Session ended",
@@ -281,6 +337,7 @@ async function sweepStaleSessions() {
             })
         } catch { }
     }
+    if (touched) scheduleSessionSave()
 }
 
 let pluginStartedAt = 0
@@ -368,6 +425,7 @@ function purgeUserCaches(uid: string) {
     for (const k of Object.keys(activeSessions)) {
         if (k === uid || k.startsWith(`${uid}_`)) delete activeSessions[k]
     }
+    scheduleSessionSave()
     for (const k of Object.keys(_logDebounce)) {
         if (k.includes(uid)) delete _logDebounce[k]
     }
@@ -541,6 +599,41 @@ function checkProfileChanged(uid: string, fresh: any) {
 }
 
 let _pollRunning = false
+// fetches profile/status/activity right away for one freshly-added user instead
+// of waiting for the next 5-minute poll cycle to reach them
+async function fetchNewUserBaseline(uid: string) {
+    if (!pluginActive) return
+    try {
+        const presMod = findByProps("getStatus", "getActivities")
+        const status = presMod?.getStatus?.(uid)
+        if (status) statusCache[uid] = status
+        const acts: any[] = presMod?.getActivities?.(uid) ?? []
+        // must match actKeyOf()'s shape exactly (array of keys) — PRESENCE_UPDATES does
+        // `oldActKeys.includes(k)` and `for (const k of oldActKeys)` on this cache. a bare
+        // string here gets iterated char-by-char and substring-matched instead of key-matched,
+        // which fires garbage "stopped playing" notifs on the very next real presence tick.
+        const realActs = acts.filter((a: any) => a.type !== 4)
+        activityCache[uid] = realActs.map((a: any) => a.type === 2
+            ? `2\x00${a.name}\x00${a.details || ""}\x00${a.state || ""}`
+            : `${a.type}\x00${a.name}`)
+        const customAct = acts.find((a: any) => a.type === 4) ?? null
+        customStatusCache[uid] = customAct
+            ? [customAct.emoji?.name, customAct.state].filter(Boolean).join(" ") || null
+            : null
+        guildCache[uid] = new Set()
+
+        const { body } = await RestAPI.get({
+            url: `/users/${uid}/profile`,
+            query: { with_mutual_guilds: true, with_mutual_friends_count: false },
+        })
+        const data = camelize(body)
+        profileCache[uid] = data
+        if (Array.isArray(data.mutualGuilds)) {
+            guildCache[uid] = new Set(data.mutualGuilds.map((g: any) => g.id))
+        }
+    } catch { }
+}
+
 async function pollProfiles() {
     if (_pollRunning || !pluginActive) return
     _pollRunning = true
@@ -1109,6 +1202,7 @@ function AddUserSection({ onAdded }: { onAdded: () => void }) {
     const doAdd = () => {
         if (lk.s !== "done") return
         addUser(settings, cleanId, label.trim().slice(0, 50))
+        fetchNewUserBaseline(cleanId)
         setRawId(""); setLabel(""); setLk({ s: "idle" })
         onAdded()
     }
@@ -1489,6 +1583,67 @@ function previewNotification(uid: string, type: string) {
     notify({ title: "[Preview] " + p.title, body: p.body, icon })
 }
 
+// known-good public logos — only apps i can confirm resolve, no guessing broken urls
+const MUSIC_APP_ICONS: Record<string, string> = {
+    "spotify":        "https://cdn.simpleicons.org/spotify/1ED760",
+    "apple music":    "https://cdn.simpleicons.org/applemusic/FA243C",
+    "youtube music":  "https://cdn.simpleicons.org/youtubemusic/FF0000",
+    "tidal":          "https://cdn.simpleicons.org/tidal/000000",
+    "deezer":         "https://cdn.simpleicons.org/deezer/FEAA2D",
+    "soundcloud":     "https://cdn.simpleicons.org/soundcloud/FF5500",
+    "pandora":        "https://cdn.simpleicons.org/pandora/224099",
+    "qobuz":          "https://cdn.simpleicons.org/qobuz/000000",
+    "last.fm":        "https://cdn.simpleicons.org/lastdotfm/D51007",
+}
+
+// one resolver for games and listening. only works when discord actually sends asset
+// data though — a lot of games (minecraft's xbox rpc included) send just an appId with
+// no assets, so the icon has to come from the app's own public record instead — see below
+const appIconCache: Record<string, string | null> = {}
+const _appIconFetching: Record<string, Promise<string | null>> = {}
+
+async function fetchAppIcon(appId: string): Promise<string | null> {
+    if (appId in appIconCache) return appIconCache[appId]
+    if (_appIconFetching[appId]) return _appIconFetching[appId]
+    const p = (async () => {
+        try {
+            const { body } = await RestAPI.get({ url: `/applications/${appId}/rpc` })
+            const icon = body?.icon
+            const url = icon ? `https://cdn.discordapp.com/app-icons/${appId}/${icon}.png?size=128` : null
+            appIconCache[appId] = url
+            return url
+        } catch {
+            appIconCache[appId] = null
+            return null
+        } finally {
+            delete _appIconFetching[appId]
+        }
+    })()
+    _appIconFetching[appId] = p
+    return p
+}
+
+function resolveActivityImage(act: any): string {
+    const img = act.assets?.large_image || act.assets?.largeImage || ""
+    const appId = act.application_id || act.applicationId || ""
+    if (img.startsWith("spotify:")) return `https://i.scdn.co/image/${img.slice(8)}`
+    if (img.startsWith("twitch:")) return `https://static-cdn.jtvnw.net/previews-ttv/live_user_${img.slice(7)}-256x144.jpg`
+    if (img.startsWith("youtube:")) return `https://i.ytimg.com/vi/${img.slice(8)}/hqdefault.jpg`
+    if (img.startsWith("mp:external/")) return `https://media.discordapp.net/external/${img.slice(12)}`
+    if (img.startsWith("mp:app-asset/")) return `https://media.discordapp.net/app-assets/${img.slice(13)}`
+    if (img.startsWith("mp:")) return `https://media.discordapp.net/${img.slice(3)}`
+    if (img.startsWith("http")) return img
+    // some console-linked / embedded RPCs (Xbox, PlayStation, activity SDK games) send the
+    // media-proxy path without discord's "mp:" scheme in front — same asset, missing prefix.
+    // these got dropped straight to the controller icon before since they don't match any
+    // case above and always contain a "/", tripping the old blanket "!img.includes(':')" guard.
+    if (img.startsWith("external/")) return `https://media.discordapp.net/${img}`
+    if (img.startsWith("app-asset/")) return `https://media.discordapp.net/${img}`
+    if (appId && img && !img.includes(":")) return `https://cdn.discordapp.com/app-assets/${appId}/${img}.png`
+    if (act.type === 2) return MUSIC_APP_ICONS[(act.name || "").toLowerCase()] || ""
+    return ""
+}
+
 function getActivityIconKey(entry: ActivityEntry): keyof typeof actIco {
     const type = entry.type
     const meta = entry.metadata || {}
@@ -1688,6 +1843,75 @@ function matchesCategory(log: ActivityEntry, category: ActivityType): boolean {
     return log.type === category
 }
 
+function ActivityCardIcon({ log }: { log: ActivityEntry }) {
+    const [failed, setFailed] = React.useState(false)
+    const isListening = log.metadata?.type === 2 || (log.metadata?.action || "").includes("listening")
+    const appLogo = isListening ? MUSIC_APP_ICONS[(log.metadata?.appName || "").toLowerCase()] : ""
+    const storedUrl = log.metadata?.iconUrl || log.metadata?.gameIconUrl || (isListening ? "" : log.metadata?.albumArtUrl) || ""
+    const appId = log.metadata?.applicationId || ""
+    // heals old entries logged before appIconCache existed
+    const [healedUrl, setHealedUrl] = React.useState(() => (appId ? appIconCache[appId] || "" : ""))
+    React.useEffect(() => {
+        if (storedUrl || !appId || healedUrl || appIconCache[appId] !== undefined) return
+        let live = true
+        fetchAppIcon(appId).then(url => { if (live && url) setHealedUrl(url) }).catch(() => {})
+        return () => { live = false }
+    }, [storedUrl, appId, healedUrl])
+    const realUrl = appLogo || storedUrl || healedUrl
+    const key = getActivityIconKey(log)
+    const { Icon, color } = actIco[key]
+    const showImg = realUrl && !failed
+    return (
+        <div data-ur-card-icon className="ur-log-icon" style={{
+            width: 42, height: 42, borderRadius: appLogo ? "50%" : 12,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            flexShrink: 0, marginTop: 1, overflow: "hidden",
+            background: showImg ? C.bg1 : `${color}1c`,
+            border: appLogo ? "none" : `1px solid ${showImg ? C.border : color + "40"}`,
+            color,
+        }}>
+            {showImg
+                ? <img src={realUrl} onError={() => setFailed(true)} style={{ width: "100%", height: "100%", objectFit: appLogo ? "contain" : "cover", padding: appLogo ? 4 : 0 }} />
+                : <Icon />}
+        </div>
+    )
+}
+
+// on-avatar status badges — built from the provided status SVG set instead of flat
+// color dots. online/dnd/offline are complete self-contained badge shapes already;
+// idle's source asset is just the crescent glyph with no backing circle, so it gets
+// composited onto a solid circle here (crescent recolored to the card bg to "bite" it)
+// to read as a full badge like the other three, matching Discord's real idle icon.
+function StatusBadgeIcon({ status }: { status: string }) {
+    if (status === "online") {
+        return (
+            <svg viewBox="0 0 16 16" width="100%" height="100%">
+                <path d="M16 8C16 12.4183 12.4183 16 8 16C3.58172 16 0 12.4183 0 8C0 3.58172 3.58172 0 8 0C12.4183 0 16 3.58172 16 8Z" fill="#45a366" />
+            </svg>
+        )
+    }
+    if (status === "dnd") {
+        return (
+            <svg viewBox="0 0 16 16" width="100%" height="100%">
+                <path fillRule="evenodd" clipRule="evenodd" d="M8 16C3.58172 16 0 12.4183 0 8C0 3.58172 3.58172 0 8 0C12.4183 0 16 3.58172 16 8C16 12.4183 12.4183 16 8 16ZM5.24902 7C4.69674 7 4.24902 7.44772 4.24902 8C4.24902 8.55229 4.69674 9 5.24902 9H10.7499C11.3022 9 11.7499 8.55229 11.7499 8C11.7499 7.44772 11.3022 7 10.7499 7H5.24902Z" fill="#e00000" />
+            </svg>
+        )
+    }
+    if (status === "idle") {
+        return (
+            <svg viewBox="0 0 24 24" width="100%" height="100%" style={{ transform: "scaleX(-1)" }}>
+                <path d="M12.0557 3.59974C12.2752 3.2813 12.2913 2.86484 12.0972 2.53033C11.9031 2.19582 11.5335 2.00324 11.1481 2.03579C6.02351 2.46868 2 6.76392 2 12C2 17.5228 6.47715 22 12 22C17.236 22 21.5313 17.9764 21.9642 12.8518C21.9967 12.4664 21.8041 12.0968 21.4696 11.9027C21.1351 11.7086 20.7187 11.7248 20.4002 11.9443C19.4341 12.6102 18.2641 13 17 13C13.6863 13 11 10.3137 11 6.99996C11 5.73589 11.3898 4.56587 12.0557 3.59974Z" fill="#ffc04e" />
+            </svg>
+        )
+    }
+    // offline / invisible — hollow ring, same as Discord's real offline badge
+    return (
+        <svg viewBox="0 0 16 16" width="100%" height="100%">
+            <path fillRule="evenodd" clipRule="evenodd" d="M8 2C4.68629 2 2 4.68629 2 8C2 11.3137 4.68629 14 8 14C11.3137 14 14 11.3137 14 8C14 4.68629 11.3137 2 8 2ZM0 8C0 3.58172 3.58172 0 8 0C12.4183 0 16 3.58172 16 8C16 12.4183 12.4183 16 8 16C3.58172 16 0 12.4183 0 8Z" fill="#84858d" />
+        </svg>
+    )
+}
+
 function LogCard({ log, expanded, onToggle, onDelete, userId, index }: {
     log: ActivityEntry
     expanded: boolean
@@ -1717,27 +1941,7 @@ function LogCard({ log, expanded, onToggle, onDelete, userId, index }: {
                     animationDelay: `${Math.min(index ?? 0, 12) * 22}ms`,
                 }}
             >
-                <div data-ur-card-icon className="ur-log-icon" style={{
-                    width: 42,
-                    height: 42,
-                    borderRadius: 12,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                    marginTop: 1,
-                    ...(() => {
-                        const key = getActivityIconKey(log)
-                        const { color } = actIco[key]
-                        return { background: `${color}1c`, border: `1px solid ${color}40`, color }
-                    })(),
-                }}>
-                    {(() => {
-                        const key = getActivityIconKey(log)
-                        const { Icon } = actIco[key]
-                        return <Icon />
-                    })()}
-                </div>
+                <ActivityCardIcon log={log} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                     {(() => {
                         // Check if this log entry has an ongoing active session
@@ -1840,13 +2044,13 @@ function LogCard({ log, expanded, onToggle, onDelete, userId, index }: {
                         </div>
                     </div>
                     {log.body && log.body !== log.title && log.type !== "activity" && log.type !== "session" && log.type !== "edit" && log.metadata?.action !== "status_session" && (
-                        <div data-ur-card-body-text={(log.type === "msg" || log.type === "edit" || log.type === "delete") ? "content" : "meta"} style={{
-                            fontSize: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 14 : 13,
-                            color: log.type === "msg" || log.type === "edit" || log.type === "delete" ? C.text : C.muted,
+                        <div data-ur-card-body-text={(log.type === "msg" || log.type === "delete") ? "content" : "meta"} style={{
+                            fontSize: log.type === "msg" || log.type === "delete" ? 14 : 13,
+                            color: log.type === "msg" || log.type === "delete" ? C.text : C.muted,
                             lineHeight: 1.4,
                             wordBreak: "break-word",
-                            fontWeight: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 500 : 400,
-                            marginTop: log.type === "msg" || log.type === "edit" || log.type === "delete" ? 2 : 0,
+                            fontWeight: log.type === "msg" || log.type === "delete" ? 500 : 400,
+                            marginTop: log.type === "msg" || log.type === "delete" ? 2 : 0,
                         }}>
                             {log.body}
                         </div>
@@ -2225,14 +2429,21 @@ function LogCard({ log, expanded, onToggle, onDelete, userId, index }: {
                                                         </span>
                                                     )}
                                                 </div>
-                                                {(log.metadata.startTimestamp && log.metadata.endTimestamp) && (() => {
-                                                    const total = log.metadata.endTimestamp - log.metadata.startTimestamp
+                                                {(() => {
+                                                    // discord's own endTimestamp is optional and rarely sent outside spotify —
+                                                    // fall back to the plugin's own captured start/end wall-clock times
+                                                    const hasDiscordRange = log.metadata.startTimestamp && log.metadata.endTimestamp
+                                                    const startTs = hasDiscordRange ? log.metadata.startTimestamp : log.metadata.startTime
+                                                    const endTs = hasDiscordRange ? log.metadata.endTimestamp : (log.metadata.endTime || Date.now())
+                                                    if (!startTs) return null
+
+                                                    const total = endTs - startTs
                                                     const totalStr = formatDuration(total)
                                                     // full bar if ended, live calc if still going
                                                     const isSession = log.type === "session"
-                                                    const elapsed = isSession && log.metadata.endTime 
-                                                        ? log.metadata.endTime - log.metadata.startTimestamp 
-                                                        : Date.now() - log.metadata.startTimestamp
+                                                    const elapsed = isSession && log.metadata.endTime
+                                                        ? log.metadata.endTime - startTs
+                                                        : Date.now() - startTs
                                                     const progress = Math.min(100, Math.max(0, (elapsed / total) * 100))
                                                     const currentStr = formatDuration(Math.min(elapsed, total))
                                                     return (
@@ -2689,7 +2900,11 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                 return [entry, ...next]
             })
         })
-        return unsub
+        const unsubRemove = onActivityRemove((uid, logId) => {
+            if (uid !== userId) return
+            setLogs(prev => prev.filter(l => l.id !== logId))
+        })
+        return () => { unsub(); unsubRemove() }
     }, [userId])
 
     const toggleFilter = (key: ActivityType) => {
@@ -2703,6 +2918,20 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
 
     const clearFilters = () => {
         setActiveFilters(new Set())
+    }
+
+    const deleteCategory = async (cat: typeof ACTIVITY_CATEGORIES[number]) => {
+        const count = logs.filter(l => matchesCategory(l, cat.key)).length
+        if (count === 0) return
+        if (!confirm(`Delete all ${count} ${cat.label.toLowerCase()} cards for this user? This cannot be undone.`)) return
+        await activityStore.removeLogsWhere(userId, l => matchesCategory(l, cat.key))
+        setLogs(prev => prev.filter(l => !matchesCategory(l, cat.key)))
+        setActiveFilters(prev => {
+            if (!prev.has(cat.key)) return prev
+            const next = new Set(prev)
+            next.delete(cat.key)
+            return next
+        })
     }
 
     const filtered = React.useMemo(() => {
@@ -2972,6 +3201,29 @@ function UserRadarActivityTab({ userId }: { userId: string }) {
                             }}>
                                 {count}
                             </span>
+                            {count > 0 && (
+                                <span
+                                    className="ur-chip-trash"
+                                    title={`Delete all ${cat.label.toLowerCase()} cards`}
+                                    onClick={e => { e.stopPropagation(); deleteCategory(cat) }}
+                                    style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        width: 14,
+                                        height: 14,
+                                        marginLeft: 1,
+                                        borderRadius: 4,
+                                        color: C.muted,
+                                        opacity: 0.55,
+                                        transition: "opacity 120ms ease, color 120ms ease",
+                                    }}
+                                    onMouseEnter={e => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.color = C.red }}
+                                    onMouseLeave={e => { e.currentTarget.style.opacity = "0.55"; e.currentTarget.style.color = C.muted }}
+                                >
+                                    <ico.trash />
+                                </span>
+                            )}
                         </div>
                     )
                 })}
@@ -3120,7 +3372,10 @@ function ActivityLogFooter({ userId, onRefresh }: { userId: string; onRefresh?: 
         const unsub = onActivityUpdate((uid) => {
             if (uid === userId) setCount(activityStore.getLogs(userId).length)
         })
-        return unsub
+        const unsubRemove = onActivityRemove((uid) => {
+            if (uid === userId) setCount(activityStore.getLogs(userId).length)
+        })
+        return () => { unsub(); unsubRemove() }
     }, [userId])
 
     return (
@@ -3324,7 +3579,12 @@ function ActivityBadge({ userId }: { userId: string }) {
                 setCount(activityStore.getLogs(userId).length)
             }
         })
-        return () => { mounted = false; unsub() }
+        const unsubRemove = onActivityRemove((uid) => {
+            if (uid === userId && mounted) {
+                setCount(activityStore.getLogs(userId).length)
+            }
+        })
+        return () => { mounted = false; unsub(); unsubRemove() }
     }, [userId])
 
     return (
@@ -3571,19 +3831,26 @@ function WatchedRow({ user, refresh, expandedId, setExpandedId, onRemove, isPinn
                     {isPinned ? <ico.pin /> : <ico.pinOutline />}
                 </div>
                 <div style={{ position: "relative", flexShrink: 0, width: 44, height: 44 }}>
-                    <img className="ur-row-avatar" src={av} style={{ width: 44, height: 44, borderRadius: "50%", display: "block" }}
+                    <img className="ur-row-avatar" src={av} style={{
+                        width: 44, height: 44, borderRadius: "50%", display: "block",
+                        // cuts a notch out of the avatar for the status badge to sit in,
+                        // same as real discord — center matches the badge below
+                        WebkitMaskImage: "radial-gradient(circle 8px at calc(100% - 7px) calc(100% - 7px), transparent 8px, #000 8.5px)",
+                        maskImage: "radial-gradient(circle 8px at calc(100% - 7px) calc(100% - 7px), transparent 8px, #000 8.5px)",
+                    }}
                         onError={(e: any) => { e.target.src = FALLBACK_AV }} />
                     <span className="ur-status-dot" style={{
                         position: "absolute",
-                        bottom: -1,
-                        right: -1,
-                        width: 12,
-                        height: 12,
+                        bottom: 0,
+                        right: 0,
+                        width: 14,
+                        height: 14,
                         borderRadius: "50%",
-                        border: `2.5px solid ${C.bg2}`,
-                        background: liveStatus === "online" ? "#23a55a" : liveStatus === "idle" ? "#f0b232" : liveStatus === "dnd" ? "#da373c" : "#80848e",
+                        overflow: "hidden",
                         boxShadow: liveStatus === "online" ? "0 0 6px #23a55a80" : liveStatus === "idle" ? "0 0 6px #f0b23280" : liveStatus === "dnd" ? "0 0 6px #da373c80" : "none",
-                    }} />
+                    }}>
+                        <StatusBadgeIcon status={liveStatus} />
+                    </span>
                 </div>
 
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -4404,7 +4671,7 @@ const userCtxPatch: NavContextMenuPatchCallback = (children, { user }) => {
                 icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
                 action={() => {
                     if (isW) { removeUser(settings, user.id); purgeUserCaches(user.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(user)} from watchlist`, id: Toasts.genId() }) }
-                    else { addUser(settings, user.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(user)} to watchlist`, id: Toasts.genId() }) }
+                    else { addUser(settings, user.id); fetchNewUserBaseline(user.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(user)} to watchlist`, id: Toasts.genId() }) }
                 }}
 
             />
@@ -4431,7 +4698,7 @@ const msgCtxPatch: NavContextMenuPatchCallback = (children, { message }) => {
                 icon={isW ? CtxEyeOffIcon : CtxEyeIcon}
                 action={() => {
                     if (isW) { removeUser(settings, message.author.id); purgeUserCaches(message.author.id); Toasts.show({ type: Toasts.Type.DEFAULT, message: `removed ${displayName(message.author)} from watchlist`, id: Toasts.genId() }) }
-                    else { addUser(settings, message.author.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(message.author)} to watchlist`, id: Toasts.genId() }) }
+                    else { addUser(settings, message.author.id); fetchNewUserBaseline(message.author.id); Toasts.show({ type: Toasts.Type.SUCCESS, message: `added ${displayName(message.author)} to watchlist`, id: Toasts.genId() }) }
                 }}
 
             />
@@ -4698,37 +4965,42 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
     const actKeyOf = (a: any) => a.type === 2
         ? `2\x00${a.name}\x00${a.details || ""}\x00${a.state || ""}`
         : `${a.type}\x00${a.name}`
-    const rawActs = (u.activities || []).filter((a: any) => a.type !== 4)
+    // spotify's very first presence tick sometimes has no details/state yet (track
+    // metadata hasn't loaded) — tracking that empty tick then the real one right after
+    // was making 2 cards + 2 notifs for the same song. skip the empty one entirely.
+    const rawActs = (u.activities || []).filter((a: any) => a.type !== 4 && !(a.type === 2 && !a.details))
     const newActKeys = rawActs.map(actKeyOf)
     const oldActKeys: string[] = activityCache[uid] || []
     activityCache[uid] = newActKeys
 
     if (isFeatureOn(uid, "activity", "globalActivity") && !isStartup) {
         const actPlatform = clientCache[uid] ? (CLIENT_LABEL_MAP[clientCache[uid]!] || clientCache[uid]) : undefined
+        const avatarIcon = icon
+
+        // grab every field discord actually sends, exactly as it sends it
+        const captureFullMeta = (act: any) => ({
+            applicationId: act.application_id ?? act.applicationId ?? undefined,
+            flags: act.flags ?? undefined,
+            sessionId: act.session_id ?? act.sessionId ?? undefined,
+            syncId: act.sync_id ?? act.syncId ?? undefined,
+            party: act.party ? { id: act.party.id, size: act.party.size?.[0], max: act.party.size?.[1] } : undefined,
+            smallImage: resolveActivityImage({ ...act, assets: { large_image: act.assets?.small_image ?? act.assets?.smallImage } }) || undefined,
+            smallText: act.assets?.small_text ?? act.assets?.smallText ?? undefined,
+            largeText: act.assets?.large_text ?? act.assets?.largeText ?? undefined,
+            buttons: act.buttons ?? undefined,
+            url: act.url ?? undefined,
+        })
 
         const getSpotifyFields = (act: any) => {
-            const li = act.assets?.large_image || ""
             const song   = act.details || ""
             const artist = (act.state || "").replace(/;.*/, "").trim()
             const album  = act.assets?.large_text || act.assets?.largeText || ""
             const trackId = act.sync_id || ""
-            let albumArtUrl = ""
-            if (li.startsWith("spotify:")) albumArtUrl = `https://i.scdn.co/image/${li.replace("spotify:", "")}`
-            else if (li.startsWith("mp:")) albumArtUrl = `https://media.discordapp.net/${li.replace("mp:", "")}`
+            const albumArtUrl = resolveActivityImage(act)
             return { song, artist, album, trackId, albumArtUrl }
         }
 
-        const getGameIcon = (act: any) => {
-            const img = act.assets?.large_image || ""
-            const appId = act.application_id || ""
-            if (!img) return ""
-            if (img.startsWith("mp:external/")) return `https://media.discordapp.net/external/${img.slice(12)}`
-            if (img.startsWith("mp:app-asset/")) return `https://media.discordapp.net/app-assets/${img.slice(13)}`
-            if (img.startsWith("mp:")) return `https://media.discordapp.net/${img.slice(3)}`
-            if (img.startsWith("spotify:")) return `https://i.scdn.co/image/${img.slice(8)}`
-            if (appId && !img.includes(":")) return `https://cdn.discordapp.com/app-assets/${appId}/${img}.png`
-            return img
-        }
+        const getGameIcon = (act: any) => resolveActivityImage(act)
 
         const closeListening = async (songName: string, artistName: string) => {
             const sk = sessionKey(uid, "listening", `${songName}:${artistName}`)
@@ -4750,6 +5022,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 }
             })
             delete activeSessions[sk]
+            scheduleSessionSave()
         }
 
         const closeActivity = async (sk: string, actName: string, type: number) => {
@@ -4770,6 +5043,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                 }
             })
             delete activeSessions[sk]
+            scheduleSessionSave()
         }
 
         const openListening = async (act: any) => {
@@ -4791,8 +5065,10 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                     song, 
                     artist, 
                     album, 
+                    trackId,
                     albumArtUrl, 
                     platform: actPlatform, 
+                    startTime: Date.now(),
                     startTimestamp: act.timestamps?.start,
                     endTimestamp: act.timestamps?.end,
                     action: "listening_start" 
@@ -4807,57 +5083,60 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                     song, 
                     artist, 
                     album, 
+                    trackId,
                     albumArtUrl, 
                     platform: actPlatform,
                     startTimestamp: act.timestamps?.start,
                     endTimestamp: act.timestamps?.end
                 } 
             }
+            scheduleSessionSave()
         }
 
         const openActivity = async (act: any) => {
             const verb = ACT_VERB[act.type] ?? "playing"
-            const icon = act.type === 1 ? "📺" : act.type === 3 ? "🎬" : act.type === 5 ? "🏆" : "🎮"
+            const emojiIcon = act.type === 1 ? "📺" : act.type === 3 ? "🎬" : act.type === 5 ? "🏆" : "🎮"
             const sk = sessionKey(uid, "activity", actKeyOf(act))
             let desc = act.name || ""
             let body = `${verb} ${act.name}`
             if (act.type === 1 && act.details) { desc = `${act.name}: ${act.details}`; body = `streaming ${act.details}` }
             else if (act.details) { desc = `${act.name} — ${act.details}`; body = `${act.name}: ${act.details}${act.state ? ` · ${act.state}` : ""}` }
             const title = act.details ? `${verb} ${act.name} — ${act.details}` : `${verb} ${act.name}`
-            const iconUrl = getGameIcon(act)
+            const appId = act.application_id || act.applicationId || ""
+            let iconUrl = getGameIcon(act) || (appId ? appIconCache[appId] || "" : "")
             notify({
                 _uid: uid,
                 title: `${dn} is ${verb} ${act.name}`,
                 body: desc,
-                icon,
+                icon: avatarIcon,
                 onClick: () => openUserProfile(uid),
             })
-            const entry = await logUserActivity(uid, "activity", icon, title, body, {
-                metadata: { 
-                    type: act.type,
-                    appName: act.name,
-                    name: act.name, 
-                    details: act.details, 
-                    state: act.state, 
-                    platform: actPlatform, 
-                    gameIconUrl: iconUrl,
-                    startTimestamp: act.timestamps?.start,
-                    endTimestamp: act.timestamps?.end,
-                    action: "activity_start" 
-                }
+            const meta = {
+                type: act.type,
+                appName: act.name,
+                name: act.name, details: act.details, state: act.state,
+                platform: actPlatform,
+                gameIconUrl: iconUrl,
+                iconUrl,
+                startTime: Date.now(),
+                startTimestamp: act.timestamps?.start,
+                endTimestamp: act.timestamps?.end,
+                ...captureFullMeta(act),
+            }
+            const entry = await logUserActivity(uid, "activity", emojiIcon, title, body, {
+                metadata: { ...meta, action: "activity_start" }
             })
-            activeSessions[sk] = { 
-                logId: entry.id, 
-                startTime: Date.now(), 
-                metadata: { 
-                    type: act.type,
-                    appName: act.name,
-                    name: act.name, 
-                    platform: actPlatform, 
-                    gameIconUrl: iconUrl,
-                    startTimestamp: act.timestamps?.start,
-                    endTimestamp: act.timestamps?.end
-                } 
+            activeSessions[sk] = { logId: entry.id, startTime: Date.now(), metadata: meta }
+            scheduleSessionSave()
+            // no icon yet, app unconfirmed — fetch and patch the card once it's in
+            if (!iconUrl && appId && appIconCache[appId] === undefined) {
+                fetchAppIcon(appId).then(url => {
+                    if (!url) return
+                    const live = activeSessions[sk]
+                    const patchedMeta = { ...meta, gameIconUrl: url, iconUrl: url }
+                    if (live && live.logId === entry.id) live.metadata = patchedMeta
+                    activityStore.updateLog(uid, entry.id, { metadata: patchedMeta }).catch(() => {})
+                }).catch(() => {})
             }
         }
 
@@ -4874,7 +5153,7 @@ async function handlePresenceUpdate(uid: string, u: any, isStartup: boolean) {
                     _uid: uid,
                     title: `${dn} stopped ${ACT_VERB[type] ?? "playing"} ${actName}`,
                     body: "",
-                    icon,
+                    icon: avatarIcon,
                     onClick: () => openUserProfile(uid),
                 })
             }
@@ -4971,9 +5250,6 @@ export default definePlugin({
         try {
             const vsMod    = findByProps("getVoiceStateForUser")
             const presMod  = findByProps("getStatus", "getActivities")
-            const guildMod = findByProps("getGuildIds", "getGuild")
-            const memMod   = findByProps("getMember", "isMember")
-            const allGuilds: string[] = guildMod?.getGuildIds?.() ?? []
 
             for (const wu of getWatchlist(settings)) {
                 try {
@@ -5010,6 +5286,49 @@ export default definePlugin({
             }
         } catch (e) { log.warn("snapshot failed", e) }
 
+        // restore sessions that survived a restart, close out the ones that didn't
+        loadActiveSessions().then(async saved => {
+            if (!pluginActive) return
+            for (const [sk, sess] of Object.entries(saved)) {
+                const uid = sk.split("_")[0]
+                const rest = sk.slice(uid.length + 1)
+                if (!isWatched(settings, uid)) continue
+                let stillLive = false
+                if (rest.startsWith("voice_")) {
+                    const channelId = rest.slice(6)
+                    stillLive = vcCache[uid] != null && vcCache[uid] === channelId
+                } else if (rest === "camera") {
+                    stillLive = cameraCache[uid] === true && vcCache[uid] != null && vcCache[uid] === sess.channelId
+                } else if (rest === "stream") {
+                    stillLive = streamCache[uid] === true && vcCache[uid] != null && vcCache[uid] === sess.channelId
+                } else if (rest.startsWith("activity_")) {
+                    const key = rest.slice(9)
+                    stillLive = (activityCache[uid] || []).includes(key)
+                } else if (rest.startsWith("listening_")) {
+                    const suffix = rest.slice(10)
+                    stillLive = (activityCache[uid] || []).some(k => {
+                        const parts = k.split("\x00")
+                        if (parts[0] !== "2") return false
+                        const details = parts[2] || ""
+                        const artist = (parts[3] || "").replace(/;.*/, "").trim()
+                        return `${details}:${artist}` === suffix
+                    })
+                }
+                if (stillLive) {
+                    activeSessions[sk] = sess
+                } else {
+                    try {
+                        await activityStore.updateLog(uid, sess.logId, {
+                            title: sess.metadata?.channel ? `Was in #${sess.metadata.channel}` : (sess.metadata?.appName ? `${sess.metadata.appName} · ended offline` : "Session ended"),
+                            body: "ended while discord was closed — exact end time unknown",
+                            metadata: { ...sess.metadata, duration: formatDuration(Date.now() - sess.startTime), startTime: sess.startTime, endTime: Date.now() },
+                        })
+                    } catch { }
+                }
+            }
+            scheduleSessionSave()
+        }).catch(() => {})
+
         // staggered so we don't get ratelimited
         const list = getWatchlist(settings)
         let i = 0
@@ -5032,6 +5351,7 @@ export default definePlugin({
         setTimeout(fetchNext, 500)  // let discord finish its own startup first
 
         pollTimer = setInterval(pollProfiles, 5 * 60 * 1000)
+        _sessSaveInterval = setInterval(saveActiveSessions, 8000)
         pluginStartedAt = Date.now()
         pluginActive = true
     },
@@ -5039,6 +5359,9 @@ export default definePlugin({
     stop() {
         pluginActive = false
         activityStore.flushSave().catch(() => {})
+        saveActiveSessions().catch(() => {})
+        if (_sessSaveInterval) { clearInterval(_sessSaveInterval); _sessSaveInterval = null }
+        if (_sessSaveTimer) { clearTimeout(_sessSaveTimer); _sessSaveTimer = null }
         removeContextMenuPatch("user-context", userCtxPatch)
         removeContextMenuPatch("message", msgCtxPatch)
         stopToolbarObserver()
@@ -5056,6 +5379,7 @@ export default definePlugin({
         Object.keys(customStatusCache).forEach(k => delete customStatusCache[k])
         Object.keys(statusSessionCache).forEach(k => delete statusSessionCache[k])
         Object.keys(activeSessions).forEach(k => delete activeSessions[k])
+        Object.keys(pendingTypingLog).forEach(k => delete pendingTypingLog[k])
         Object.keys(_notifDebounce).forEach(k => delete _notifDebounce[k])
         Object.keys(_logDebounce).forEach(k => delete _logDebounce[k])
         presenceDebounce.forEach(t => clearTimeout(t))
@@ -5069,6 +5393,14 @@ export default definePlugin({
             if (optimistic || type !== "MESSAGE_CREATE") return
             const uid = message.author?.id
             if (!uid || !isWatched(settings, uid)) return
+            const typingKey = `${uid}_${channelId}`
+            const pendingTyping = pendingTypingLog[typingKey]
+            if (pendingTyping) {
+                delete pendingTypingLog[typingKey]
+                if (Date.now() - pendingTyping.ts < TYPING_LOG_TTL_MS) {
+                    activityStore.removeLog(uid, pendingTyping.logId).catch(() => {})
+                }
+            }
             if (isFeatureOn(uid, "msgs", "globalMsgs")) {
                 const label = getWatchedUser(settings, uid)?.nick
                 const name  = displayName(message.author)
@@ -5076,12 +5408,6 @@ export default definePlugin({
                 const ch    = ChannelStore.getChannel(channelId)
                 const gName = guildName(ch?.guild_id)
                 const chName  = ch?.name || "dm"
-                // for DMs, ch.name is null — show recipient context instead
-                const location = gName
-                    ? `${gName} · #${chName}`
-                    : ch?.recipients?.length
-                        ? "Direct Message"
-                        : `#${chName}`
                 const skipNotify = settings.store.skipCurrentChannel && getCurrentChannel()?.id === channelId
                 if (!skipNotify) {
                     notify({
@@ -5230,6 +5556,8 @@ export default definePlugin({
                         server: gName || "Direct Message",
                         channel: chName,
                     }
+                }).then(entry => {
+                    pendingTypingLog[`${userId}_${channelId}`] = { logId: entry.id, ts: Date.now() }
                 }).catch(() => {})
             }
         },
@@ -5311,6 +5639,7 @@ export default definePlugin({
                         }).catch(() => {})
                     }
                     activeSessions[sk] = { logId: entry.id, startTime: Date.now(), channelId: now!, guildId: ch?.guild_id, metadata: { server: guildNameVc || "DM", channel: chName, platform: joinPlatform, members: vcMembers.length > 0 ? vcMembers : undefined } }
+                    scheduleSessionSave()
                 } else if (old && !now) {
                     const spent = vcJoinTime[uid] ? Date.now() - vcJoinTime[uid] : 0
                     delete vcJoinTime[uid]
@@ -5337,6 +5666,7 @@ export default definePlugin({
                             }
                         })
                         delete activeSessions[sk]
+                        scheduleSessionSave()
                         notify({
                             _uid: uid,
                             title: `${dn} Left Voice`,
@@ -5422,6 +5752,7 @@ export default definePlugin({
                                 }
                             }).then(camEntry => {
                                 activeSessions[camSk] = { logId: camEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: guildName(currentGuildId) || "DM", channel: currentChName, platform: camPlatform } }
+                                scheduleSessionSave()
                             }).catch(e => log.warn("camera log failed", e))
                         } else {
                             const camSession = activeSessions[camSk]
@@ -5439,7 +5770,7 @@ export default definePlugin({
                                         endTime: Date.now(),
                                         duration: camDur || "< 1m",
                                     }
-                                }).then(() => { delete activeSessions[camSk] }).catch(() => { delete activeSessions[camSk] })
+                                }).then(() => { delete activeSessions[camSk]; scheduleSessionSave() }).catch(() => { delete activeSessions[camSk]; scheduleSessionSave() })
                             }
                             notify({
                                 _uid: uid,
@@ -5476,6 +5807,7 @@ export default definePlugin({
                                 }
                             }).then(streamEntry => {
                                 activeSessions[streamSk] = { logId: streamEntry.id, startTime: Date.now(), channelId: currentChId, guildId: currentGuildId, metadata: { server: guildName(currentGuildId) || "DM", channel: currentChName, platform: streamPlatform } }
+                                scheduleSessionSave()
                             }).catch(e => log.warn("stream log failed", e))
                         } else {
                                 const streamSession = activeSessions[streamSk]
@@ -5493,7 +5825,7 @@ export default definePlugin({
                                         endTime: Date.now(),
                                         duration: streamDur || "< 1m",
                                     }
-                                }).then(() => { delete activeSessions[streamSk] }).catch(() => { delete activeSessions[streamSk] })
+                                }).then(() => { delete activeSessions[streamSk]; scheduleSessionSave() }).catch(() => { delete activeSessions[streamSk]; scheduleSessionSave() })
                             }
                             notify({
                                 _uid: uid,
